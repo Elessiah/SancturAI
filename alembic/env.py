@@ -1,6 +1,7 @@
 import asyncio
 
 from alembic import context
+from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -23,7 +24,7 @@ def _run(connection: Connection) -> None:
 
 
 async def _main() -> None:
-    engine = create_async_engine(_url())
+    engine = create_async_engine(_url(), poolclass=pool.NullPool, hide_parameters=True)
     async with engine.connect() as conn:
         await conn.run_sync(_run)
     await engine.dispose()
