@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,12 +18,12 @@ PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, confi
 
 
 class RegisterStartIn(BaseModel):
-    invite_code: str = Field(max_length=64)
+    invite_code: str = Field(max_length=32)  # = longueur de invites.code
     handle: str = Field(max_length=32)
 
 
 class RegisterCompleteIn(BaseModel):
-    challenge_id: str = Field(max_length=64)
+    challenge_id: str = Field(max_length=32)  # = longueur de challenges.challenge_id
     answers: list[Annotated[str, Field(max_length=200)]] = Field(max_length=40)
 
 
@@ -48,15 +48,17 @@ async def register_start(body: RegisterStartIn, request: Request, db: AsyncSessi
 
 
 @router.post("/register/complete", dependencies=[Depends(require_disk)])
-async def register_complete(body: RegisterCompleteIn, db: AsyncSession = Depends(get_db),
+async def register_complete(body: RegisterCompleteIn, response: Response, db: AsyncSession = Depends(get_db),
                             state: AppState = Depends(get_state)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"  # la réponse porte la phrase
     agent, phrase = await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
     return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
 
 
 @router.post("/login")
-async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_db),
+async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
                 state: AppState = Depends(get_state)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"  # la réponse porte le token de session
     limit_login(state, client_ip(request))
     token, expires_at, agent = await IdentityService(db, state).login(body.phrase)
     return {"session_token": token, "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),

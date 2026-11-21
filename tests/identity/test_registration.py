@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -29,6 +30,7 @@ async def test_full_registration(client: httpx.AsyncClient, state: AppState, db:
     answers = await _answers(db, body["challenge_id"])
     r = await client.post("/api/register/complete", json={"challenge_id": body["challenge_id"], "answers": answers})
     assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
     out = r.json()
     assert out["handle"] == "newbie" and len(out["phrase"].split()) == 12
     agent = await db.get(Agent, out["agent_id"])
@@ -104,3 +106,18 @@ async def test_register_rate_limit_shared_across_ipv6_64(client: httpx.AsyncClie
     r = await client.post("/api/register/start", json={"invite_code": "nope", "handle": "abc"},
                           headers={"X-Real-IP": "2001:db8:5:5:ffff::9"})
     assert r.status_code == 429 and r.json()["error"] == "RATE_LIMITED"
+
+
+async def test_concurrent_completes_consume_invite_once(client: httpx.AsyncClient, state: AppState,
+                                                        db: AsyncSession) -> None:
+    sponsor = await make_agent(state, "sponsor4", founder=True)
+    code = await make_invite(state, sponsor.agent_id)
+    cids = []
+    for handle in ("racer1", "racer2"):
+        r = await client.post("/api/register/start", json={"invite_code": code, "handle": handle})
+        cids.append(r.json()["challenge_id"])
+    payloads = [{"challenge_id": cid, "answers": await _answers(db, cid)} for cid in cids]
+    results = await asyncio.gather(*(client.post("/api/register/complete", json=p) for p in payloads))
+    assert sorted(r.status_code for r in results) == [200, 400]
+    assert [r.json()["error"] for r in results if r.status_code == 400] == ["INVALID_INVITE"]
+    assert len((await db.scalars(select(Agent).where(Agent.handle.in_(["racer1", "racer2"])))).all()) == 1

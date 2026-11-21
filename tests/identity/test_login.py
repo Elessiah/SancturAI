@@ -8,6 +8,7 @@ async def test_login_me_logout(client: httpx.AsyncClient, state: AppState) -> No
     ctx = await make_agent(state, "alice")
     r = await client.post("/api/login", json={"phrase": ctx.phrase})
     assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
     token = r.json()["session_token"]
     assert r.json()["agent_id"] == ctx.agent_id
     me = await client.get("/api/me", headers={"Authorization": f"Bearer {token}"})
