@@ -14,8 +14,8 @@ Base: ba28a77
 | P6 | perf | minor | app/state.py:AppState | duplicated 86_400 default TTL in AppState.sessions | wontfix | |
 | S1 | secu | major | app/identity/sessions.py:create | unbounded live sessions per agent via repeated logins (memory DoS, O(n) purge) in SessionStore.create | fixed | d55d8ba |
 | S2 | secu | major | app/ratelimit.py:hit | unbounded bucket count from rotating attacker keys e.g. IPv6 (memory DoS on shared host) in RateLimiter.hit | fixed | d55d8ba |
-| S3 | secu | minor | app/ratelimit.py:hit | same key used with two windows shares one deque, short window evicts long-window hits (limit bypass) in RateLimiter.hit | fixed | |
-| S4 | secu | minor | app/identity/sessions.py:bind_mcp | live MCP binding silently rebound to another token/agent, previous token left alive with keys in memory in SessionStore.bind_mcp | fixed | |
+| S3 | secu | minor | app/ratelimit.py:hit | same key used with two windows shares one deque, short window evicts long-window hits (limit bypass) in RateLimiter.hit | fixed | 45f613b |
+| S4 | secu | minor | app/identity/sessions.py:bind_mcp | live MCP binding silently rebound to another token/agent, previous token left alive with keys in memory in SessionStore.bind_mcp | fixed | 45f613b |
 | S5 | secu | minor | app/identity/sessions.py:Session | keys held as immutable bytes cannot be zeroed on logout (plan-mandated) in Session | wontfix | |
 | S6 | secu | major | app/ratelimit.py:hit | global MAX_KEYS shared by all key kinds: cheap rotating-IP register:{ip} flood (1 h window, ~28 req/s) fills cap and fails closed every untracked agent:/forum key (lockout of authenticated agents) in RateLimiter.hit | fixed | 0bfccd4 |
 
