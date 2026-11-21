@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
+from app.identity.auth import ensure_writable
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, generate_tasks, score
 from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
 from app.outbox.service import enqueue
@@ -130,6 +131,13 @@ class IdentityService:
                 Invite.challenges_used < MAX_CHALLENGES_PER_INVITE]
 
     async def create_invite(self, agent: Agent) -> Invite:
+        # Verrou sur la ligne du créateur : sérialise les créations concurrentes (plafond de codes actifs)
+        # et relit suspension / bannissement d'invitation posés par une modération concurrente.
+        locked = await self._db.get(Agent, agent.agent_id, with_for_update=True, populate_existing=True)
+        if locked is None:
+            raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+        agent = locked
+        ensure_writable(self._state, agent)
         t = now()
         if not agent.is_founder and agent.created_at > t - MIN_AGE_TO_INVITE:
             raise ApiError("FORBIDDEN", "members can invite after 7 days")
