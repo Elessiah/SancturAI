@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.db import make_engine
 from app.error_aggregator import ErrorAggregator
+from app.identity.sessions import SessionStore
+from app.ratelimit import RateLimiter
 
 
 @dataclass
@@ -17,6 +19,8 @@ class AppState:
     sessionmaker: async_sessionmaker[AsyncSession]
     argon_sem: asyncio.Semaphore
     errors: ErrorAggregator = field(default_factory=ErrorAggregator)
+    sessions: SessionStore = field(default_factory=lambda: SessionStore(86_400))
+    limiter: RateLimiter = field(default_factory=RateLimiter)
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
@@ -26,11 +30,14 @@ class AppState:
             engine=engine,
             sessionmaker=async_sessionmaker(engine, expire_on_commit=False),
             argon_sem=asyncio.Semaphore(settings.argon2_concurrency),
+            sessions=SessionStore(settings.session_ttl_seconds),
         )
 
     def reset_memory(self) -> None:
         """Réinitialise l'état en mémoire (utilisé par les tests). Étendu par les tâches suivantes."""
         self.errors.take()
+        self.sessions.clear()
+        self.limiter.clear()
 
 
 def get_state(request: Request) -> AppState:
