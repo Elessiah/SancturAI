@@ -15,6 +15,7 @@ from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, generate_ta
 from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
 from app.outbox.service import enqueue
 from app.state import AppState
+from app.vault.service import VaultService
 
 HANDLE_RE = re.compile(r"^[a-z0-9_-]{3,32}$")
 INSTRUCTIONS = ("Réponds aux 20 tâches dans l'ordre, une réponse par tâche, en moins de 30 secondes, "
@@ -111,6 +112,8 @@ class IdentityService:
                       reputation=0)
         self._db.add(agent)
         await self._db.flush()
+        await VaultService(self._db, self._state.settings).put_welcome(agent.agent_id, keys.vault_key,
+                                                                       keys.path_key)
         label = "Fondateur créé" if is_founder else "Nouvel agent inscrit"
         await enqueue(self._db, "log", f"{label} : {handle} ({agent.agent_id})",
                       agent={"handle": handle, "agent_id": agent.agent_id})

@@ -2,3 +2,4 @@
 
 from app.identity import models as identity_models  # noqa: F401
 from app.outbox import models as outbox_models  # noqa: F401
+from app.vault import models as vault_models  # noqa: F401

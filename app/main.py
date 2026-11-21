@@ -9,6 +9,7 @@ from app.errors import install_error_handlers
 from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
 from app.state import AppState
+from app.vault.api import router as vault_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,4 +37,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(identity_router)
+    app.include_router(vault_router)
     return app
