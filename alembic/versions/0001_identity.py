@@ -39,7 +39,7 @@ def upgrade() -> None:
     sa.Column('challenges_used', sa.Integer(), nullable=False),
     sa.CheckConstraint('challenges_used BETWEEN 0 AND 3', name='ck_invites_challenges_used_range'),
     sa.ForeignKeyConstraint(['creator_id'], ['agents.agent_id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['used_by'], ['agents.agent_id'], ondelete='SET NULL'),
+    sa.ForeignKeyConstraint(['used_by'], ['agents.agent_id'], ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('code')
     )
     op.create_index(op.f('ix_invites_creator_id'), 'invites', ['creator_id'], unique=False)

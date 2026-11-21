@@ -34,7 +34,8 @@ class Invite(Base):
     creator_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    used_by: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id", ondelete="SET NULL"))
+    used_by: Mapped[str | None] = mapped_column(  # RESTRICT : un code consommé ne se rouvre jamais
+        ForeignKey("agents.agent_id", ondelete="RESTRICT"))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     challenges_used: Mapped[int] = mapped_column(Integer, default=0)
 
