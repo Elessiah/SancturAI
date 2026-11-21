@@ -2,7 +2,7 @@ import base64
 import re
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import Result, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -136,10 +136,14 @@ class VaultService:
         content, encoding = _encode(data)
         return {**file_meta(path, row), "content": content, "encoding": encoding}
 
-    async def list_files(self, agent_id: str, vault_key: bytes, prefix: str | None) -> dict[str, Any]:
-        rows = await self._db.execute(
+    async def _list_rows(self, agent_id: str) -> Result[Any]:
+        # sans contenu (jusqu'à 5 Mo par fichier) : seulement les métadonnées
+        return await self._db.execute(
             select(VaultFile.path_id, VaultFile.path_enc, VaultFile.size, VaultFile.updated_at)
-            .where(VaultFile.agent_id == agent_id))
+            .where(VaultFile.agent_id == agent_id).order_by(VaultFile.path_id))
+
+    async def list_files(self, agent_id: str, vault_key: bytes, prefix: str | None) -> dict[str, Any]:
+        rows = await self._list_rows(agent_id)
         files = []
         for pid, path_enc, size, updated_at in rows:
             try:
@@ -153,14 +157,16 @@ class VaultService:
         return {"files": files, "usage_bytes": sum(f["size"] for f in files) if not prefix
                 else await self.usage(agent_id), "quota_bytes": self._settings.vault_quota_bytes}
 
+    async def _delete_by_id(self, agent_id: str, pid: str, label: str) -> None:
+        deleted = await self._db.execute(delete(VaultFile).where(
+            VaultFile.agent_id == agent_id, VaultFile.path_id == pid).returning(VaultFile.path_id))
+        if deleted.first() is None:
+            raise ApiError("NOT_FOUND", f"no file {label}")
+        await self._db.commit()
+
     async def delete(self, agent_id: str, path_key: bytes, path: str) -> None:
         path = normalize_path(path)
-        deleted = await self._db.execute(delete(VaultFile).where(
-            VaultFile.agent_id == agent_id, VaultFile.path_id == path_id(path_key, path))
-            .returning(VaultFile.path_id))
-        if deleted.first() is None:
-            raise ApiError("NOT_FOUND", f"no file {path}")
-        await self._db.commit()
+        await self._delete_by_id(agent_id, path_id(path_key, path), path)
 
     async def move(self, agent_id: str, vault_key: bytes, path_key: bytes, src: str, dst: str) -> dict[str, Any]:
         await self._lock_agent(agent_id)  # même ordre de verrous que put_raw : pas d'interblocage
@@ -192,17 +198,10 @@ class VaultService:
                 "size": row.size, "updated_at": row.updated_at.isoformat()}
 
     async def delete_raw(self, agent_id: str, pid: str) -> None:
-        deleted = await self._db.execute(delete(VaultFile).where(
-            VaultFile.agent_id == agent_id, VaultFile.path_id == check_path_id(pid))
-            .returning(VaultFile.path_id))
-        if deleted.first() is None:
-            raise ApiError("NOT_FOUND", f"no file {pid}")
-        await self._db.commit()
+        await self._delete_by_id(agent_id, check_path_id(pid), pid)
 
     async def list_raw(self, agent_id: str) -> dict[str, Any]:
-        rows = await self._db.execute(
-            select(VaultFile.path_id, VaultFile.path_enc, VaultFile.size, VaultFile.updated_at)
-            .where(VaultFile.agent_id == agent_id).order_by(VaultFile.path_id))
+        rows = await self._list_rows(agent_id)
         files = [{"path_id": pid, "path_enc": base64.b64encode(pe).decode(), "size": size,
                   "updated_at": ts.isoformat()} for pid, pe, size, ts in rows]
         return {"files": files, "usage_bytes": sum(f["size"] for f in files),

@@ -10,7 +10,7 @@ from app.errors import ApiError
 from app.identity.deps import current_session, require_disk
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
-from app.vault.service import VaultService
+from app.vault.service import VaultService, check_path_id
 
 router = APIRouter(prefix="/api/vault", tags=["vault"])
 
@@ -69,6 +69,7 @@ async def write_raw(pid: str, body: RawWriteIn, x_client_encrypted: str | None =
                     s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                     state: AppState = Depends(get_state)) -> dict[str, Any]:
     _require_client_encrypted(x_client_encrypted)
+    check_path_id(pid)  # avant de décoder jusqu'à 5 Mo de base64
     return await _svc(db, state).write_raw(s.agent_id, pid, decode_content(body.path_enc, "base64"),
                                            decode_content(body.content_enc, "base64"))
 
