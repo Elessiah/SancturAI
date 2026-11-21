@@ -1,8 +1,9 @@
 import base64
 import re
+from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import Result, delete, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -136,11 +137,12 @@ class VaultService:
         content, encoding = _encode(data)
         return {**file_meta(path, row), "content": content, "encoding": encoding}
 
-    async def _list_rows(self, agent_id: str) -> Result[Any]:
+    async def _list_rows(self, agent_id: str) -> Sequence[tuple[Any, ...]]:
         # sans contenu (jusqu'à 5 Mo par fichier) : seulement les métadonnées
-        return await self._db.execute(
+        result = await self._db.execute(
             select(VaultFile.path_id, VaultFile.path_enc, VaultFile.size, VaultFile.updated_at)
             .where(VaultFile.agent_id == agent_id).order_by(VaultFile.path_id))
+        return [tuple(r) for r in result]
 
     async def list_files(self, agent_id: str, vault_key: bytes, prefix: str | None) -> dict[str, Any]:
         rows = await self._list_rows(agent_id)
