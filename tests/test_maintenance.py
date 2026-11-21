@@ -59,3 +59,14 @@ async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: p
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled()
+
+
+async def test_disk_probe_failure_keeps_errors(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    def bad(_p: str) -> Usage:
+        raise OSError("gone")
+
+    monkeypatch.setattr(state, "disk", DiskGuard("/x", 0.85, usage=bad))
+    state.errors.record()
+    with pytest.raises(OSError):
+        await run_maintenance_once(state)
+    assert state.errors.take() == 1

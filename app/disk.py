@@ -17,6 +17,10 @@ class DiskGuard:
         self._busy = False
         self._alerted_at = float("-inf")
 
+    @property
+    def ratio(self) -> float:
+        return self._ratio
+
     def is_busy(self) -> bool:
         now = self._clock()
         if now - self._checked_at >= _CACHE_SECONDS:
@@ -27,7 +31,7 @@ class DiskGuard:
 
     def ensure_writable(self) -> None:
         if self.is_busy():
-            raise ApiError("SERVER_BUSY", "data volume above 85% usage")
+            raise ApiError("SERVER_BUSY", f"data volume above {self._ratio:.0%} usage")
 
     def should_alert(self) -> bool:
         now = self._clock()

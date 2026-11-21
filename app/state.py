@@ -19,10 +19,10 @@ class AppState:
     engine: AsyncEngine
     sessionmaker: async_sessionmaker[AsyncSession]
     argon_sem: asyncio.Semaphore
+    disk: DiskGuard
     errors: ErrorAggregator = field(default_factory=ErrorAggregator)
     sessions: SessionStore = field(default_factory=lambda: SessionStore(86_400))
     limiter: RateLimiter = field(default_factory=RateLimiter)
-    disk: DiskGuard = field(default_factory=lambda: DiskGuard("/", 0.85))
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
