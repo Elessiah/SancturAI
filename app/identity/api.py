@@ -6,8 +6,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.auth import is_suspended, limit_login, limit_register
-from app.identity.deps import client_ip, current_agent, current_session, current_token, require_disk
-from app.identity.models import Agent
+from app.identity.deps import (
+    client_ip,
+    current_agent,
+    current_session,
+    current_token,
+    require_disk,
+    writable_agent,
+)
+from app.identity.models import Agent, Invite
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
@@ -76,3 +83,20 @@ async def logout(_: Session = Depends(current_session), token: str | None = Depe
 @router.get("/me")
 async def me(agent: Agent = Depends(current_agent)) -> dict[str, Any]:
     return agent_profile(agent)
+
+
+def invite_out(invite: Invite) -> dict[str, Any]:
+    return {"code": invite.code, "expires_at": invite.expires_at.isoformat(),
+            "challenges_left": 3 - invite.challenges_used}
+
+
+@router.post("/invites")
+async def create_invite(agent: Agent = Depends(writable_agent), db: AsyncSession = Depends(get_db),
+                        state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return invite_out(await IdentityService(db, state).create_invite(agent))
+
+
+@router.get("/invites")
+async def list_invites(agent: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
+                       state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return {"invites": [invite_out(i) for i in await IdentityService(db, state).list_invites(agent)]}
