@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from testcontainers.postgres import PostgresContainer
 
+import app.db_models  # noqa: F401
 from app.config import Settings
 from app.db import Base
 from app.main import create_app
