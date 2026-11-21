@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.config import Settings, get_settings
 from app.errors import install_error_handlers
+from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
 from app.state import AppState
 
@@ -34,4 +35,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(identity_router)
     return app
