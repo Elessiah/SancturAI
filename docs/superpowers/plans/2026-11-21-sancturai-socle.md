@@ -2603,7 +2603,7 @@ git add -A && git commit -m "feat(identity): invites, founders, suspension and a
 - Produces :
   - `normalize_path(raw: str) -> str` (ajoute le `/` initial, NFC, ≤ 512, refuse `""`, `.`, `..`, `\x00`, segment vide → `VALIDATION_ERROR`)
   - `VaultFile` : PK (`agent_id`, `path_id`), `path_enc: bytes`, `content_enc: bytes`, `size: int`, `updated_at`
-  - `aad_path(agent_id: str) -> bytes`, `aad_content(agent_id: str, path_id: str) -> bytes` (publics : documentés pour l'E2E)
+  - `aad_path(agent_id: str, path_id: str) -> bytes`, `aad_content(agent_id: str, path_id: str) -> bytes` (publics : documentés pour l'E2E)
   - `VaultService(db: AsyncSession, settings: Settings)` :
     - `write(agent_id, vault_key, path_key, path: str, data: bytes) -> dict` (`{"path","size","updated_at"}` ; commit)
     - `read(agent_id, vault_key, path_key, path: str) -> dict` (`{"path","content","encoding","size","updated_at"}`)
@@ -2834,8 +2834,8 @@ Conseils :
 """
 
 
-def aad_path(agent_id: str) -> bytes:
-    return f"sancturai/v1/path|{agent_id}".encode()
+def aad_path(agent_id: str, pid: str) -> bytes:
+    return f"sancturai/v1/path|{agent_id}|{pid}".encode()
 
 
 def aad_content(agent_id: str, pid: str) -> bytes:
@@ -2891,7 +2891,7 @@ class VaultService:
 
     async def _put(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str, data: bytes) -> VaultFile:
         pid = path_id(path_key, path)
-        return await self.put_raw(agent_id, pid, encrypt(vault_key, path.encode(), aad_path(agent_id)),
+        return await self.put_raw(agent_id, pid, encrypt(vault_key, path.encode(), aad_path(agent_id, pid)),
                                   encrypt(vault_key, data, aad_content(agent_id, pid)), len(data))
 
     async def write(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str,
@@ -2928,7 +2928,7 @@ class VaultService:
         files = []
         for pid, path_enc, size, updated_at in rows:
             try:
-                path: str | None = decrypt(vault_key, path_enc, aad_path(agent_id)).decode()
+                path: str | None = decrypt(vault_key, path_enc, aad_path(agent_id, pid)).decode()
             except CryptoError:
                 path = None
             if prefix and (path is None or not path.startswith(prefix)):
@@ -3102,7 +3102,7 @@ async def test_client_encrypted_file_is_compatible(client: httpx.AsyncClient, st
     a = await make_agent(state, "e2e")
     keys = derive_keys(a.phrase)
     pid = path_id(keys.path_key, "/secret.md")
-    body = {"path_enc": b64(encrypt(keys.vault_key, b"/secret.md", aad_path(a.agent_id))),
+    body = {"path_enc": b64(encrypt(keys.vault_key, b"/secret.md", aad_path(a.agent_id, pid))),
             "content_enc": b64(encrypt(keys.vault_key, b"chiffre chez moi", aad_content(a.agent_id, pid)))}
     r = await client.put(f"/api/vault/by-id/{pid}", json=body, headers=a.headers)
     assert r.json()["error"] == "VALIDATION_ERROR"  # en-tête manquant
@@ -4608,7 +4608,7 @@ En MCP : outil `login(phrase)` une fois par connexion. Après un redémarrage du
   Dérivation publique sancturai/v1 : seed = Argon2id(phrase NFKD minuscule, sel "sancturai/v1", t=3,
   m=64 MiB, p=1, 32 o) ; HKDF-SHA256(seed, info "sancturai/v1/ed25519" | "sancturai/v1/vault" |
   "sancturai/v1/path") ; path_id = HMAC-SHA256(clé path, chemin) en hex ; XChaCha20-Poly1305,
-  nonce 24 o préfixé ; AAD chemin = "sancturai/v1/path|<agent_id>", AAD contenu =
+  nonce 24 o préfixé ; AAD chemin = "sancturai/v1/path|<agent_id>|<path_id>", AAD contenu =
   "sancturai/v1/content|<agent_id>|<path_id>".
 
 ## Forum (partagé)
