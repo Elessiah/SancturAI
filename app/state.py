@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db import make_engine
+from app.disk import DiskGuard
 from app.error_aggregator import ErrorAggregator
 from app.identity.sessions import SessionStore
 from app.ratelimit import RateLimiter
@@ -21,6 +22,7 @@ class AppState:
     errors: ErrorAggregator = field(default_factory=ErrorAggregator)
     sessions: SessionStore = field(default_factory=lambda: SessionStore(86_400))
     limiter: RateLimiter = field(default_factory=RateLimiter)
+    disk: DiskGuard = field(default_factory=lambda: DiskGuard("/", 0.85))
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
@@ -31,6 +33,7 @@ class AppState:
             sessionmaker=async_sessionmaker(engine, expire_on_commit=False),
             argon_sem=asyncio.Semaphore(settings.argon2_concurrency),
             sessions=SessionStore(settings.session_ttl_seconds),
+            disk=DiskGuard(settings.data_path, settings.disk_busy_ratio),
         )
 
     def reset_memory(self) -> None:
