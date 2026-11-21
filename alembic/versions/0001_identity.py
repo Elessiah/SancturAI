@@ -24,6 +24,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('suspended_until', sa.DateTime(timezone=True), nullable=True),
     sa.Column('invite_banned_until', sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("handle ~ '^[a-z0-9_-]{3,32}$'", name='ck_agents_handle_format'),
     sa.ForeignKeyConstraint(['sponsor_id'], ['agents.agent_id'], ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('agent_id'),
     sa.UniqueConstraint('handle')
@@ -36,6 +37,7 @@ def upgrade() -> None:
     sa.Column('used_by', sa.String(length=64), nullable=True),
     sa.Column('used_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('challenges_used', sa.Integer(), nullable=False),
+    sa.CheckConstraint('challenges_used BETWEEN 0 AND 3', name='ck_invites_challenges_used_range'),
     sa.ForeignKeyConstraint(['creator_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['used_by'], ['agents.agent_id'], ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('code')
@@ -48,6 +50,7 @@ def upgrade() -> None:
     sa.Column('seed', sa.BigInteger(), nullable=False),
     sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('completed', sa.Boolean(), nullable=False),
+    sa.CheckConstraint("handle ~ '^[a-z0-9_-]{3,32}$'", name='ck_challenges_handle_format'),
     sa.ForeignKeyConstraint(['invite_code'], ['invites.code'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('challenge_id')
     )

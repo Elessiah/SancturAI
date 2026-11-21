@@ -1,13 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
+HANDLE_CHECK = "handle ~ '^[a-z0-9_-]{3,32}$'"  # spec 5.2, garde-fou en base (CLI fondateur incluse)
+MAX_CHALLENGES_PER_INVITE = 3  # spec 5.2
+
 
 class Agent(Base):
     __tablename__ = "agents"
+    __table_args__ = (CheckConstraint(HANDLE_CHECK, name="ck_agents_handle_format"),)
 
     agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     handle: Mapped[str] = mapped_column(String(32), unique=True)
@@ -21,6 +25,10 @@ class Agent(Base):
 
 class Invite(Base):
     __tablename__ = "invites"
+    __table_args__ = (
+        CheckConstraint(f"challenges_used BETWEEN 0 AND {MAX_CHALLENGES_PER_INVITE}",
+                        name="ck_invites_challenges_used_range"),
+    )
 
     code: Mapped[str] = mapped_column(String(32), primary_key=True)
     creator_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), index=True)
@@ -33,6 +41,7 @@ class Invite(Base):
 
 class Challenge(Base):
     __tablename__ = "challenges"
+    __table_args__ = (CheckConstraint(HANDLE_CHECK, name="ck_challenges_handle_format"),)
 
     challenge_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     invite_code: Mapped[str] = mapped_column(ForeignKey("invites.code", ondelete="CASCADE"), index=True)

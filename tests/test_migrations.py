@@ -5,7 +5,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import text
+from sqlalchemy import CheckConstraint, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.db_models  # noqa: F401
@@ -30,5 +30,10 @@ async def test_migrations_match_models(pg_url: str) -> None:
     engine = create_async_engine(url)
     async with engine.connect() as conn:
         diff = await conn.run_sync(lambda c: compare_metadata(MigrationContext.configure(c), Base.metadata))
+        checks = set((await conn.execute(text("SELECT conname FROM pg_constraint WHERE contype = 'c'"))).scalars())
     await engine.dispose()
     assert diff == [], f"migration manquante : {diff}"
+    # compare_metadata ignore les CHECK : on vérifie leur présence à part
+    expected = {c.name for t in Base.metadata.tables.values() for c in t.constraints
+                if isinstance(c, CheckConstraint)}
+    assert expected <= checks, f"CHECK manquants : {expected - checks}"
