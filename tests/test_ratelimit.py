@@ -38,3 +38,20 @@ def test_gc_evicts_short_window_buckets() -> None:
     now[0] = 11
     rl.hit("last", limit=1, window_seconds=10)  # 1000e appel -> GC
     assert list(rl._hits) == ["last"]
+
+
+def test_key_cap_fails_closed_then_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.ratelimit as rlmod
+
+    monkeypatch.setattr(rlmod, "MAX_KEYS", 3)
+    now = [0.0]
+    rl = RateLimiter(clock=lambda: now[0])
+    for i in range(3):
+        rl.hit(f"k{i}", limit=5, window_seconds=10)
+    with pytest.raises(ApiError) as exc:
+        rl.hit("new", limit=5, window_seconds=10)
+    assert exc.value.retry_after == 1 and len(rl._hits) == 3
+    rl.hit("k0", limit=5, window_seconds=10)  # clé connue : toujours servie
+    now[0] = 20
+    rl.hit("new", limit=5, window_seconds=10)  # GC libère les seaux périmés
+    assert list(rl._hits) == ["new"]

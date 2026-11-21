@@ -3,6 +3,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+# Plafond de sessions vivantes par agent : au-delà, la plus ancienne est révoquée
+# (borne la mémoire face à des logins répétés).
+MAX_SESSIONS_PER_AGENT = 10
+
 
 @dataclass
 class Session:
@@ -21,11 +25,16 @@ class SessionStore:
         self._sessions: dict[str, Session] = {}
         self._mcp: dict[str, str] = {}  # mcp_session_id -> token
         self._mcp_by_token: dict[str, set[str]] = {}  # index inverse (révocation O(1))
+        self._by_agent: dict[str, dict[str, None]] = {}  # agent -> tokens (ordre de création)
 
     def create(self, agent_id: str, vault_key: bytes, path_key: bytes) -> tuple[str, float]:
         self._purge()
+        tokens = self._by_agent.get(agent_id)
+        while tokens and len(tokens) >= MAX_SESSIONS_PER_AGENT:
+            self.revoke(next(iter(tokens)))
         token = secrets.token_urlsafe(32)
         self._sessions[token] = Session(agent_id, vault_key, path_key, self._clock() + self._ttl)
+        self._by_agent.setdefault(agent_id, {})[token] = None
         return token, time.time() + self._ttl
 
     def get(self, token: str) -> Session | None:
@@ -38,12 +47,18 @@ class SessionStore:
         return session
 
     def revoke(self, token: str) -> None:
-        self._sessions.pop(token, None)
+        session = self._sessions.pop(token, None)
+        if session is not None:
+            tokens = self._by_agent.get(session.agent_id)
+            if tokens is not None:
+                tokens.pop(token, None)
+                if not tokens:
+                    del self._by_agent[session.agent_id]
         for mcp_id in self._mcp_by_token.pop(token, ()):
             self._mcp.pop(mcp_id, None)
 
     def revoke_agent(self, agent_id: str) -> None:
-        for token in [t for t, s in self._sessions.items() if s.agent_id == agent_id]:
+        for token in list(self._by_agent.get(agent_id, ())):
             self.revoke(token)
 
     def bind_mcp(self, mcp_session_id: str, token: str) -> None:
@@ -70,6 +85,7 @@ class SessionStore:
         self._sessions.clear()
         self._mcp.clear()
         self._mcp_by_token.clear()
+        self._by_agent.clear()
 
     def _purge(self) -> None:
         now = self._clock()

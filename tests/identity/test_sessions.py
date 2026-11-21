@@ -57,3 +57,18 @@ def test_bind_unknown_token_and_rebind_are_clean() -> None:
     assert store.token_for_mcp("m") == t2
     store.revoke(t2)
     assert not store._mcp and not store._mcp_by_token
+
+
+def test_sessions_per_agent_are_capped_oldest_evicted() -> None:
+    from app.identity.sessions import MAX_SESSIONS_PER_AGENT
+
+    store = SessionStore(ttl_seconds=10)
+    store.bind_mcp("m0", "x")
+    tokens = [store.create("a", b"v" * 32, b"p" * 32)[0] for _ in range(MAX_SESSIONS_PER_AGENT)]
+    store.bind_mcp("m0", tokens[0])
+    other, _ = store.create("b", b"v" * 32, b"p" * 32)
+    newest, _ = store.create("a", b"v" * 32, b"p" * 32)
+    assert store.get(tokens[0]) is None and store.token_for_mcp("m0") is None
+    assert all(store.get(t) is not None for t in tokens[1:] + [newest, other])
+    store.revoke_agent("a")
+    assert len(store._sessions) == 1 and list(store._by_agent) == ["b"]
