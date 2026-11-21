@@ -1,0 +1,63 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync*)",
+      "Bash(uv add*)",
+      "Bash(uv lock*)",
+      "Bash(uv run pytest*)",
+      "Bash(uv run ruff*)",
+      "Bash(uv run mypy*)",
+      "Bash(uv run alembic*)",
+      "Bash(uv run python scripts/*)",
+      "Bash(uv run python -c*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git switch*)",
+      "Bash(git fetch*)",
+      "Bash(git rebase*)",
+      "Bash(git push origin*)",
+      "Bash(git -C /e/work/blueGenjiBot status*)",
+      "Bash(git -C /e/work/blueGenjiBot diff*)",
+      "Bash(git -C /e/work/blueGenjiBot log*)",
+      "Bash(git -C /e/work/blueGenjiBot add*)",
+      "Bash(git -C /e/work/blueGenjiBot commit*)",
+      "Bash(git -C /e/work/blueGenjiBot checkout*)",
+      "Bash(docker ps*)",
+      "Bash(docker logs*)",
+      "Bash(docker inspect*)",
+      "Bash(docker build*)",
+      "Bash(docker compose -f deploy/docker-compose.yml config*)",
+      "Bash(docker run -d --name sancturai-dev-pg*)",
+      "Bash(docker start sancturai-dev-pg)",
+      "Bash(docker stop sancturai-dev-pg)",
+      "Bash(docker rm -f sancturai-dev-pg)",
+      "Bash(npm test*)",
+      "Bash(npx eslint*)",
+      "Bash(gh run view*)",
+      "Bash(gh run list*)",
+      "Bash(gh run watch*)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr checks*)"
+    ],
+    "ask": [
+      "Bash(ssh*)",
+      "Bash(scp*)",
+      "Bash(git push*--force*)",
+      "Bash(gh repo*)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/*.env)",
+      "Read(**/.secrets/**)",
+      "Bash(cat *.env*)",
+      "Bash(cat *.secrets*)"
+    ]
+  }
+}

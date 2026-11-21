@@ -1,0 +1,78 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Les étapes sont conditionnées à l'existence des fichiers : la CI reste verte tant que le code
+# des tâches correspondantes n'est pas encore écrit (Task 1 : pyproject, Task 17 : relay, Task 19 : Dockerfile).
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        if: hashFiles('pyproject.toml') != ''
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install
+        if: hashFiles('pyproject.toml') != ''
+        run: uv sync --frozen
+      - name: Lint
+        if: hashFiles('pyproject.toml') != ''
+        run: uv run ruff check .
+      - name: Types
+        if: hashFiles('pyproject.toml') != ''
+        run: uv run mypy app
+      - name: Tests
+        if: hashFiles('pyproject.toml') != ''
+        run: uv run pytest -q
+      - name: Relay install
+        if: hashFiles('relay/pyproject.toml') != ''
+        working-directory: relay
+        run: uv sync --frozen
+      - name: Relay tests
+        if: hashFiles('relay/pyproject.toml') != ''
+        working-directory: relay
+        run: uv run pytest -q
+
+  image:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+        if: hashFiles('deploy/Dockerfile') != ''
+      - uses: docker/setup-buildx-action@v3
+        if: hashFiles('deploy/Dockerfile') != ''
+      - uses: docker/login-action@v3
+        if: hashFiles('deploy/Dockerfile') != ''
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        if: hashFiles('deploy/Dockerfile') != ''
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ env.OWNER }}/sancturai:latest
+            ghcr.io/${{ env.OWNER }}/sancturai:${{ github.sha }}

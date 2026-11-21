@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+*.env
+deploy/.env
+.claude/settings.local.json
+docs/superpowers/reviews/*.tmp
