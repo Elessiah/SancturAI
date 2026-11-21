@@ -15,8 +15,8 @@ class AppState:
     settings: Settings
     engine: AsyncEngine
     sessionmaker: async_sessionmaker[AsyncSession]
+    argon_sem: asyncio.Semaphore
     errors: ErrorAggregator = field(default_factory=ErrorAggregator)
-    argon_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":

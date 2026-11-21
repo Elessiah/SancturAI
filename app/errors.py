@@ -78,7 +78,8 @@ def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> Non
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        return _response(ApiError(_HTTP_TO_CODE.get(exc.status_code, "INTERNAL"), str(exc.detail)[:200]))
+        code = _HTTP_TO_CODE.get(exc.status_code) or ("VALIDATION_ERROR" if 400 <= exc.status_code < 500 else "INTERNAL")
+        return _response(ApiError(code, str(exc.detail)[:200]))
 
     @app.exception_handler(Exception)
     async def _internal(_: Request, exc: Exception) -> JSONResponse:
