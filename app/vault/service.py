@@ -1,8 +1,9 @@
 import base64
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.config import Settings
 from app.crypto import CryptoError, decrypt, encrypt, path_id
@@ -56,15 +57,17 @@ class VaultService:
         # sérialise les écritures d'un même agent pour un calcul de quota exact
         await self._db.get(Agent, agent_id, with_for_update=True)
 
-    async def _get(self, agent_id: str, pid: str, *, lock: bool = False) -> VaultFile | None:
-        return await self._db.get(VaultFile, (agent_id, pid), with_for_update=lock)
+    async def _get(self, agent_id: str, pid: str, *, blobs: bool = True) -> VaultFile | None:
+        # blobs=False : ne charge ni le contenu (jusqu'à 5 Mo) ni le nom chiffré
+        opts = [] if blobs else [defer(VaultFile.content_enc), defer(VaultFile.path_enc)]
+        return await self._db.get(VaultFile, (agent_id, pid), options=opts)
 
     async def put_raw(self, agent_id: str, pid: str, path_enc: bytes, content_enc: bytes, size: int) -> VaultFile:
         """Écriture commune (serveur et E2E). Vérifie les quotas, ne commit pas."""
         if size > self._settings.vault_file_max_bytes:
             raise ApiError("QUOTA_EXCEEDED", f"file larger than {self._settings.vault_file_max_bytes} bytes")
         await self._lock_agent(agent_id)
-        existing = await self._get(agent_id, pid, lock=True)
+        existing = await self._get(agent_id, pid, blobs=False)
         projected = await self.usage(agent_id) - (existing.size if existing else 0) + size
         if projected > self._settings.vault_quota_bytes:
             raise ApiError("QUOTA_EXCEEDED", f"vault quota {self._settings.vault_quota_bytes} bytes")
@@ -75,7 +78,7 @@ class VaultService:
         else:
             existing.path_enc, existing.content_enc, existing.size = path_enc, content_enc, size
         await self._db.flush()
-        await self._db.refresh(existing)
+        await self._db.refresh(existing, ["updated_at"])
         return existing
 
     async def _put(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str, data: bytes) -> VaultFile:
@@ -93,10 +96,9 @@ class VaultService:
     async def put_welcome(self, agent_id: str, vault_key: bytes, path_key: bytes) -> None:
         await self._put(agent_id, vault_key, path_key, "/README.md", WELCOME.encode())
 
-    async def _require(self, agent_id: str, path_key: bytes, path: str, *, lock: bool = False
-                       ) -> tuple[str, VaultFile]:
+    async def _require(self, agent_id: str, path_key: bytes, path: str) -> tuple[str, VaultFile]:
         path = normalize_path(path)
-        row = await self._get(agent_id, path_id(path_key, path), lock=lock)
+        row = await self._get(agent_id, path_id(path_key, path))
         if row is None:
             raise ApiError("NOT_FOUND", f"no file {path}")
         return path, row
@@ -128,14 +130,19 @@ class VaultService:
                 else await self.usage(agent_id), "quota_bytes": self._settings.vault_quota_bytes}
 
     async def delete(self, agent_id: str, path_key: bytes, path: str) -> None:
-        _, row = await self._require(agent_id, path_key, path)
-        await self._db.delete(row)
+        path = normalize_path(path)
+        deleted = await self._db.execute(delete(VaultFile).where(
+            VaultFile.agent_id == agent_id, VaultFile.path_id == path_id(path_key, path))
+            .returning(VaultFile.path_id))
+        if deleted.first() is None:
+            raise ApiError("NOT_FOUND", f"no file {path}")
         await self._db.commit()
 
     async def move(self, agent_id: str, vault_key: bytes, path_key: bytes, src: str, dst: str) -> dict[str, Any]:
-        src, row = await self._require(agent_id, path_key, src, lock=True)
+        await self._lock_agent(agent_id)  # même ordre de verrous que put_raw : pas d'interblocage
+        src, row = await self._require(agent_id, path_key, src)
         dst = normalize_path(dst)
-        if await self._get(agent_id, path_id(path_key, dst)) is not None:
+        if await self._get(agent_id, path_id(path_key, dst), blobs=False) is not None:
             raise ApiError("VALIDATION_ERROR", f"{dst} already exists")
         try:
             data = decrypt(vault_key, row.content_enc, aad_content(agent_id, row.path_id))
