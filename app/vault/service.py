@@ -1,4 +1,5 @@
 import base64
+import re
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -22,6 +23,17 @@ Conseils :
 - Range tes souvenirs par dossiers (ex. /memories/2026-11-21.md, /projets/, /relations/).
 - Ne stocke JAMAIS ta phrase ici : sans elle, ce vault est illisible.
 """
+
+
+PATH_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+AEAD_OVERHEAD = 40  # nonce 24 + tag 16
+MAX_PATH_ENC_BYTES = 1024
+
+
+def check_path_id(pid: str) -> str:
+    if not PATH_ID_RE.fullmatch(pid):
+        raise ApiError("VALIDATION_ERROR", "path_id must be 64 lowercase hex chars")
+    return pid
 
 
 def aad_path(agent_id: str, pid: str) -> bytes:
@@ -162,3 +174,36 @@ class VaultService:
         new = await self._put(agent_id, vault_key, path_key, dst, data)
         await self._db.commit()
         return file_meta(dst, new)
+
+    async def write_raw(self, agent_id: str, pid: str, path_enc: bytes, content_enc: bytes) -> dict[str, Any]:
+        check_path_id(pid)
+        if len(path_enc) > MAX_PATH_ENC_BYTES:
+            raise ApiError("VALIDATION_ERROR", "path_enc too large")
+        row = await self.put_raw(agent_id, pid, path_enc, content_enc, max(0, len(content_enc) - AEAD_OVERHEAD))
+        await self._db.commit()
+        return {"path_id": pid, "size": row.size, "updated_at": row.updated_at.isoformat()}
+
+    async def read_raw(self, agent_id: str, pid: str) -> dict[str, Any]:
+        row = await self._get(agent_id, check_path_id(pid))
+        if row is None:
+            raise ApiError("NOT_FOUND", f"no file {pid}")
+        return {"path_id": pid, "path_enc": base64.b64encode(row.path_enc).decode(),
+                "content_enc": base64.b64encode(row.content_enc).decode(),
+                "size": row.size, "updated_at": row.updated_at.isoformat()}
+
+    async def delete_raw(self, agent_id: str, pid: str) -> None:
+        deleted = await self._db.execute(delete(VaultFile).where(
+            VaultFile.agent_id == agent_id, VaultFile.path_id == check_path_id(pid))
+            .returning(VaultFile.path_id))
+        if deleted.first() is None:
+            raise ApiError("NOT_FOUND", f"no file {pid}")
+        await self._db.commit()
+
+    async def list_raw(self, agent_id: str) -> dict[str, Any]:
+        rows = await self._db.execute(
+            select(VaultFile.path_id, VaultFile.path_enc, VaultFile.size, VaultFile.updated_at)
+            .where(VaultFile.agent_id == agent_id).order_by(VaultFile.path_id))
+        files = [{"path_id": pid, "path_enc": base64.b64encode(pe).decode(), "size": size,
+                  "updated_at": ts.isoformat()} for pid, pe, size, ts in rows]
+        return {"files": files, "usage_bytes": sum(f["size"] for f in files),
+                "quota_bytes": self._settings.vault_quota_bytes}

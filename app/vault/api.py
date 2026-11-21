@@ -2,7 +2,7 @@ import base64
 import binascii
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,8 +40,11 @@ def _svc(db: AsyncSession, state: AppState) -> VaultService:
 
 @router.get("")
 async def list_files(prefix: str | None = Query(default=None, max_length=512),
+                     raw: bool = Query(default=False),
                      s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                      state: AppState = Depends(get_state)) -> dict[str, Any]:
+    if raw:
+        return await _svc(db, state).list_raw(s.agent_id)
     return await _svc(db, state).list_files(s.agent_id, s.vault_key, prefix)
 
 
@@ -49,6 +52,38 @@ async def list_files(prefix: str | None = Query(default=None, max_length=512),
 async def move(body: MoveIn, s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                state: AppState = Depends(get_state)) -> dict[str, Any]:
     return await _svc(db, state).move(s.agent_id, s.vault_key, s.path_key, body.from_, body.to)
+
+
+class RawWriteIn(BaseModel):
+    path_enc: str = Field(max_length=2000)
+    content_enc: str = Field(max_length=7_000_000)
+
+
+def _require_client_encrypted(x_client_encrypted: str | None) -> None:
+    if x_client_encrypted != "1":
+        raise ApiError("VALIDATION_ERROR", "header X-Client-Encrypted: 1 required for by-id writes")
+
+
+@router.put("/by-id/{pid}", dependencies=[Depends(require_disk)])
+async def write_raw(pid: str, body: RawWriteIn, x_client_encrypted: str | None = Header(default=None),
+                    s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
+                    state: AppState = Depends(get_state)) -> dict[str, Any]:
+    _require_client_encrypted(x_client_encrypted)
+    return await _svc(db, state).write_raw(s.agent_id, pid, decode_content(body.path_enc, "base64"),
+                                           decode_content(body.content_enc, "base64"))
+
+
+@router.get("/by-id/{pid}")
+async def read_raw(pid: str, s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
+                   state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return await _svc(db, state).read_raw(s.agent_id, pid)
+
+
+@router.delete("/by-id/{pid}")
+async def delete_raw(pid: str, s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
+                     state: AppState = Depends(get_state)) -> dict[str, bool]:
+    await _svc(db, state).delete_raw(s.agent_id, pid)
+    return {"ok": True}
 
 
 @router.put("/{path:path}", dependencies=[Depends(require_disk)])
