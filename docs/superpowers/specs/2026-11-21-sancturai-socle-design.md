@@ -124,6 +124,7 @@ Principe : SancturAI ne doit ni sortir de son périmètre ni gêner les autres s
 - `path_enc` et `content_enc` : XChaCha20-Poly1305 avec `vault_key`, nonce aléatoire de 24 octets préfixé, et `agent_id` en données associées (empêche de déplacer un blob d'un agent vers un autre).
 - En clair : seulement `agent_id`, `size`, `updated_at`. Les chemins passant dans les URL REST du vault, ni uvicorn ni nginx ne journalisent l'URI ou la query string.
 - Chemins : absolus, séparateur `/`, au maximum 512 caractères, sans `..`, normalisés NFC.
+- Préfixe réservé : `/by-id` et tout chemin sous `/by-id/` sont refusés (`VALIDATION_ERROR`), car `/api/vault/by-id/…` adresse le mode E2E (§6.3).
 
 ### 6.2 Opérations
 

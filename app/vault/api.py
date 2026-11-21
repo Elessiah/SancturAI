@@ -10,7 +10,7 @@ from app.errors import ApiError
 from app.identity.deps import current_session, require_disk
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
-from app.vault.service import VaultService, check_path_id
+from app.vault.service import MAX_PATH_ENC_BYTES, VaultService, check_path_id
 
 router = APIRouter(prefix="/api/vault", tags=["vault"])
 
@@ -55,7 +55,7 @@ async def move(body: MoveIn, s: Session = Depends(current_session), db: AsyncSes
 
 
 class RawWriteIn(BaseModel):
-    path_enc: str = Field(max_length=2000)
+    path_enc: str = Field(max_length=4 * ((MAX_PATH_ENC_BYTES + 2) // 3))  # longueur base64
     content_enc: str = Field(max_length=7_000_000)
 
 

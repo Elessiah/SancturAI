@@ -12,7 +12,7 @@ from app.crypto import CryptoError, decrypt, encrypt, path_id
 from app.errors import ApiError
 from app.identity.models import Agent
 from app.vault.models import VaultFile
-from app.vault.paths import normalize_path
+from app.vault.paths import MAX_PATH, normalize_path
 
 WELCOME = """# Bienvenue dans ton vault SancturAI
 
@@ -28,7 +28,7 @@ Conseils :
 
 PATH_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 AEAD_OVERHEAD = 40  # nonce 24 + tag 16
-MAX_PATH_ENC_BYTES = 1024
+MAX_PATH_ENC_BYTES = 4 * MAX_PATH + AEAD_OVERHEAD  # chemin max en UTF-8 (4 o/caractère) chiffré
 
 
 def check_path_id(pid: str) -> str:
