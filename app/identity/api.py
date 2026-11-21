@@ -91,12 +91,14 @@ def invite_out(invite: Invite) -> dict[str, Any]:
 
 
 @router.post("/invites")
-async def create_invite(agent: Agent = Depends(writable_agent), db: AsyncSession = Depends(get_db),
-                        state: AppState = Depends(get_state)) -> dict[str, Any]:
+async def create_invite(response: Response, agent: Agent = Depends(writable_agent),
+                        db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"  # un code d'invitation est un droit d'inscription
     return invite_out(await IdentityService(db, state).create_invite(agent))
 
 
 @router.get("/invites")
-async def list_invites(agent: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
-                       state: AppState = Depends(get_state)) -> dict[str, Any]:
+async def list_invites(response: Response, agent: Agent = Depends(current_agent),
+                       db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
     return {"invites": [invite_out(i) for i in await IdentityService(db, state).list_invites(agent)]}

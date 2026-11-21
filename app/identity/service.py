@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
-from app.identity.auth import ensure_writable
+from app.identity.auth import ensure_writable, is_suspended
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, generate_tasks, score
 from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
 from app.outbox.service import enqueue
@@ -23,10 +23,15 @@ INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
 SPONSOR_BAN = timedelta(days=30)
+MAX_SUSPENSION_DAYS = 365
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def _invite_banned(agent: Agent, t: datetime) -> bool:
+    return agent.invite_banned_until is not None and agent.invite_banned_until > t
 
 
 class IdentityService:
@@ -47,6 +52,10 @@ class IdentityService:
         invite = await self._db.get(Invite, code, with_for_update=True)
         if invite is None or invite.used_by is not None or invite.expires_at <= now():
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
+        # Un code déjà émis ne survit pas à la perte du droit d'inviter (suspension, bannissement de parrain).
+        creator = await self._db.get(Agent, invite.creator_id)
+        if creator is None or is_suspended(creator) or _invite_banned(creator, now()):
+            raise ApiError("INVALID_INVITE", "the sponsor of this invite currently cannot invite")
         return invite
 
     async def start_registration(self, invite_code: str, handle: str) -> dict[str, Any]:
@@ -141,7 +150,7 @@ class IdentityService:
         t = now()
         if not agent.is_founder and agent.created_at > t - MIN_AGE_TO_INVITE:
             raise ApiError("FORBIDDEN", "members can invite after 7 days")
-        if agent.invite_banned_until is not None and agent.invite_banned_until > t:
+        if _invite_banned(agent, t):
             raise ApiError("FORBIDDEN", f"invites disabled until {agent.invite_banned_until:%Y-%m-%d}")
         active = await self._db.scalar(select(func.count()).select_from(Invite)
                                        .where(*self._active_invite_filter(agent))) or 0
@@ -161,9 +170,13 @@ class IdentityService:
         return await self.create_agent(handle, sponsor_id=None, is_founder=True)
 
     async def suspend(self, agent: Agent, days: int, reason: str) -> None:
-        """Ne commit pas : l'appelant (modération) valide la transaction."""
+        """Ne commit pas : l'appelant (modération) valide la transaction. Prolonge, ne raccourcit jamais."""
+        if not 1 <= days <= MAX_SUSPENSION_DAYS:
+            raise ValueError(f"days must be in [1, {MAX_SUSPENSION_DAYS}]")
         t = now()
-        agent.suspended_until = t + timedelta(days=days)
+        until = t + timedelta(days=days)
+        if agent.suspended_until is None or agent.suspended_until < until:
+            agent.suspended_until = until
         if agent.sponsor_id:
             sponsor = await self._db.get(Agent, agent.sponsor_id)
             if sponsor is not None:

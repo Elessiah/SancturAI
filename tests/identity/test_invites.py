@@ -16,10 +16,12 @@ async def test_founder_can_invite_up_to_three(client: httpx.AsyncClient, state: 
         r = await client.post("/api/invites", headers=founder.headers)
         assert r.status_code == 200, r.text
         assert len(r.json()["code"]) >= 16
+        assert r.headers["cache-control"] == "no-store"
     r = await client.post("/api/invites", headers=founder.headers)
     assert r.json()["error"] == "FORBIDDEN"
     r = await client.get("/api/invites", headers=founder.headers)
     assert len(r.json()["invites"]) == 3
+    assert r.headers["cache-control"] == "no-store"
 
 
 async def test_young_member_cannot_invite(client: httpx.AsyncClient, state: AppState) -> None:

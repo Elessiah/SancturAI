@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +9,7 @@ from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.outbox.models import OutboxEvent
 from app.state import AppState
-from tests.helpers import make_agent
+from tests.helpers import make_agent, make_invite
 
 
 async def test_suspend_blocks_writes_and_bans_sponsor(client: httpx.AsyncClient, state: AppState,
@@ -33,3 +34,30 @@ async def test_suspend_blocks_writes_and_bans_sponsor(client: httpx.AsyncClient,
     await svc.unsuspend("child")
     await db.refresh(agent)
     assert agent.suspended_until is None or agent.suspended_until <= datetime.now(UTC)
+
+
+async def test_suspend_extends_never_shortens_and_bounds_days(state: AppState, db: AsyncSession) -> None:
+    child = await make_agent(state, "longer")
+    agent = await db.get(Agent, child.agent_id)
+    assert agent is not None
+    svc = IdentityService(db, state)
+    await svc.suspend(agent, days=30, reason="r")
+    longest = agent.suspended_until
+    await svc.suspend(agent, days=7, reason="r")
+    assert agent.suspended_until == longest
+    for bad in (0, -1, 10**9):
+        with pytest.raises(ValueError):
+            await svc.suspend(agent, days=bad, reason="r")
+
+
+async def test_issued_invites_unusable_while_sponsor_cannot_invite(client: httpx.AsyncClient, state: AppState,
+                                                                   db: AsyncSession) -> None:
+    sponsor = await make_agent(state, "presponsor", founder=True)
+    code = await make_invite(state, sponsor.agent_id)
+    child = await make_agent(state, "prechild", sponsor_id=sponsor.agent_id)
+    agent = await db.get(Agent, child.agent_id)
+    assert agent is not None
+    await IdentityService(db, state).suspend(agent, days=7, reason="r")
+    await db.commit()
+    r = await client.post("/api/register/start", json={"invite_code": code, "handle": "sneaky"})
+    assert r.json()["error"] == "INVALID_INVITE"
