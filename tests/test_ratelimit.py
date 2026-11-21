@@ -21,3 +21,20 @@ def test_keys_are_independent() -> None:
     rl = RateLimiter()
     rl.hit("a", limit=1, window_seconds=60)
     rl.hit("b", limit=1, window_seconds=60)
+
+
+def test_zero_limit_rejects_without_crash() -> None:
+    rl = RateLimiter()
+    with pytest.raises(ApiError) as exc:
+        rl.hit("k", limit=0, window_seconds=60)
+    assert exc.value.retry_after == 1
+
+
+def test_gc_evicts_short_window_buckets() -> None:
+    now = [0.0]
+    rl = RateLimiter(clock=lambda: now[0])
+    for i in range(999):
+        rl.hit(f"k{i}", limit=1, window_seconds=10)
+    now[0] = 11
+    rl.hit("last", limit=1, window_seconds=10)  # 1000e appel -> GC
+    assert list(rl._hits) == ["last"]

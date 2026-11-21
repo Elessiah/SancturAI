@@ -19,7 +19,8 @@ class SessionStore:
         self._ttl = ttl_seconds
         self._clock = clock
         self._sessions: dict[str, Session] = {}
-        self._mcp: dict[str, str] = {}
+        self._mcp: dict[str, str] = {}  # mcp_session_id -> token
+        self._mcp_by_token: dict[str, set[str]] = {}  # index inverse (révocation O(1))
 
     def create(self, agent_id: str, vault_key: bytes, path_key: bytes) -> tuple[str, float]:
         self._purge()
@@ -38,15 +39,21 @@ class SessionStore:
 
     def revoke(self, token: str) -> None:
         self._sessions.pop(token, None)
-        for mcp_id in [m for m, t in self._mcp.items() if t == token]:
-            del self._mcp[mcp_id]
+        for mcp_id in self._mcp_by_token.pop(token, ()):
+            self._mcp.pop(mcp_id, None)
 
     def revoke_agent(self, agent_id: str) -> None:
         for token in [t for t, s in self._sessions.items() if s.agent_id == agent_id]:
             self.revoke(token)
 
     def bind_mcp(self, mcp_session_id: str, token: str) -> None:
+        if token not in self._sessions:
+            return
+        previous = self._mcp.get(mcp_session_id)
+        if previous is not None and previous != token:
+            self._mcp_by_token.get(previous, set()).discard(mcp_session_id)
         self._mcp[mcp_session_id] = token
+        self._mcp_by_token.setdefault(token, set()).add(mcp_session_id)
 
     def token_for_mcp(self, mcp_session_id: str) -> str | None:
         token = self._mcp.get(mcp_session_id)
@@ -58,6 +65,7 @@ class SessionStore:
     def clear(self) -> None:
         self._sessions.clear()
         self._mcp.clear()
+        self._mcp_by_token.clear()
 
     def _purge(self) -> None:
         now = self._clock()

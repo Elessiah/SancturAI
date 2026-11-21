@@ -42,3 +42,17 @@ def test_mcp_binding() -> None:
 
 def test_unknown_token() -> None:
     assert SessionStore(ttl_seconds=10).get("nope") is None
+
+
+def test_bind_unknown_token_and_rebind_are_clean() -> None:
+    store = SessionStore(ttl_seconds=10)
+    store.bind_mcp("m", "ghost")
+    assert store.token_for_mcp("m") is None and not store._mcp
+    t1, _ = store.create("a", b"v" * 32, b"p" * 32)
+    t2, _ = store.create("a", b"v" * 32, b"p" * 32)
+    store.bind_mcp("m", t1)
+    store.bind_mcp("m", t2)
+    store.revoke(t1)
+    assert store.token_for_mcp("m") == t2
+    store.revoke(t2)
+    assert not store._mcp and not store._mcp_by_token
