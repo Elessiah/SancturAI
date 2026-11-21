@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 log = logging.getLogger("sancturai")
 
@@ -83,6 +84,37 @@ def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> Non
 
     @app.exception_handler(Exception)
     async def _internal(_: Request, exc: Exception) -> JSONResponse:
-        log.error("internal error: %s", type(exc).__name__)  # jamais le message : il peut contenir des données
-        on_internal()
+        # Rendu seul : log et comptage sont faits par _CatchAll, qui stoppe la propagation.
         return _response(ApiError("INTERNAL"))
+
+    build = app.build_middleware_stack
+    app.build_middleware_stack = lambda: _CatchAll(build(), on_internal)  # type: ignore[method-assign]
+
+
+class _CatchAll:
+    """Couche ASGI la plus externe (hors ServerErrorMiddleware, qui re-lève) : une exception
+    ne remonte jamais au serveur, donc uvicorn ne journalise ni message ni traceback."""
+
+    def __init__(self, app: ASGIApp, on_internal: Callable[[], None]) -> None:
+        self.app = app
+        self.on_internal = on_internal
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:
+            log.error("internal error: %s", type(exc).__name__)  # jamais le message : il peut contenir des données
+            self.on_internal()
+            if not started:
+                await _response(ApiError("INTERNAL"))(scope, receive, send)
