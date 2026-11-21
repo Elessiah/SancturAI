@@ -45,6 +45,11 @@ def test_arith_answers_are_digits_only() -> None:
     assert all(t.answer.isdigit() for t in arith)
 
 
+def test_every_prompt_states_answer_format() -> None:
+    tasks = [t for s in range(50) for t in generate_tasks(s)]
+    assert all(t.prompt.endswith(" only.") for t in tasks)
+
+
 def test_number_to_words() -> None:
     assert number_to_words(0) == "zero"
     assert number_to_words(17) == "seventeen"

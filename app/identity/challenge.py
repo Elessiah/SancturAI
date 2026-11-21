@@ -70,7 +70,8 @@ def _count(rng: random.Random) -> ChallengeTask:
 def _sort(rng: random.Random) -> ChallengeTask:
     words = rng.sample(_WORDS, 5)
     return ChallengeTask(
-        f"Sort these words alphabetically and give the third one: {', '.join(words)}.",
+        f"Sort these words alphabetically and give the third one: {', '.join(words)}. "
+        "Answer with the word only.",
         sorted(words)[2],
     )
 
