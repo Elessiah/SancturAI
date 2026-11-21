@@ -55,3 +55,19 @@ def test_key_cap_fails_closed_then_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     now[0] = 20
     rl.hit("new", limit=5, window_seconds=10)  # GC libère les seaux périmés
     assert list(rl._hits) == ["new"]
+
+
+def test_key_cap_is_per_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.ratelimit as rlmod
+
+    monkeypatch.setattr(rlmod, "MAX_KEYS", 2)
+    rl = RateLimiter(clock=lambda: 0.0)
+    rl.hit("register:ip1", limit=5, window_seconds=3600)
+    rl.hit("register:ip2", limit=5, window_seconds=3600)
+    with pytest.raises(ApiError):
+        rl.hit("register:ip3", limit=5, window_seconds=3600)
+    rl.hit("agent:a1", limit=60, window_seconds=60)  # flot d'IP sans effet sur les agents
+    rl.hit("agent:a2", limit=60, window_seconds=60)
+    assert rl._counts == {"register": 2, "agent": 2}
+    rl.clear()
+    assert not rl._counts

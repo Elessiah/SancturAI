@@ -17,5 +17,6 @@ Base: ba28a77
 | S3 | secu | minor | app/ratelimit.py:hit | same key used with two windows shares one deque, short window evicts long-window hits (limit bypass) in RateLimiter.hit | open | |
 | S4 | secu | minor | app/identity/sessions.py:bind_mcp | live MCP binding silently rebound to another token/agent, previous token left alive with keys in memory in SessionStore.bind_mcp | open | |
 | S5 | secu | minor | app/identity/sessions.py:Session | keys held as immutable bytes cannot be zeroed on logout (plan-mandated) in Session | open | |
+| S6 | secu | major | app/ratelimit.py:hit | global MAX_KEYS shared by all key kinds: cheap rotating-IP register:{ip} flood (1 h window, ~28 req/s) fills cap and fails closed every untracked agent:/forum key (lockout of authenticated agents) in RateLimiter.hit | fixed | |
 
 wontfix P6: default factory is needed for directly-built AppState in tests; build() overrides it with the setting.

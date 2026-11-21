@@ -5,9 +5,16 @@ from collections.abc import Callable
 
 from app.errors import ApiError
 
-# Plafond de clés suivies : au-delà (clés tournantes, ex. IPv6), refus fail-closed
-# plutôt qu'une croissance mémoire non bornée sur l'hôte partagé.
+# Plafond de clés suivies PAR ESPACE DE NOMS (préfixe avant le premier ':', ex.
+# "register", "agent") : au-delà (clés tournantes, ex. IPv6), refus fail-closed de
+# ce seul espace, sans croissance mémoire non bornée et sans qu'un flot de clés IP
+# ne bloque les clés des autres espaces (agents authentifiés).
 MAX_KEYS = 100_000
+
+
+def _namespace(key: str) -> str:
+    head, sep, _ = key.partition(":")
+    return head if sep else ""  # clés sans préfixe : espace commun
 
 
 class RateLimiter:
@@ -17,18 +24,22 @@ class RateLimiter:
         self._clock = clock
         # clé -> (horodatages des hits, fenêtre utilisée) ; la fenêtre sert au GC.
         self._hits: dict[str, tuple[deque[float], float]] = {}
+        self._counts: dict[str, int] = {}  # espace de noms -> nombre de clés suivies
         self._calls = 0
         self._full_gc_at = -math.inf
 
     def hit(self, key: str, limit: int, window_seconds: float) -> None:
         now = self._clock()
         entry = self._hits.get(key)
-        if entry is None and len(self._hits) >= MAX_KEYS:
-            if now - self._full_gc_at >= 1:  # GC O(n) au plus 1 fois/s quand plein
-                self._full_gc_at = now
-                self._gc(now)
-            if len(self._hits) >= MAX_KEYS:
-                raise ApiError("RATE_LIMITED", "too many tracked clients", retry_after=1)
+        if entry is None:
+            ns = _namespace(key)
+            if self._counts.get(ns, 0) >= MAX_KEYS:
+                if now - self._full_gc_at >= 1:  # GC O(n) au plus 1 fois/s quand plein
+                    self._full_gc_at = now
+                    self._gc(now)
+                if self._counts.get(ns, 0) >= MAX_KEYS:
+                    raise ApiError("RATE_LIMITED", "too many tracked clients", retry_after=1)
+            self._counts[ns] = self._counts.get(ns, 0) + 1
         bucket: deque[float] = entry[0] if entry else deque()
         if entry is None or entry[1] != window_seconds:
             self._hits[key] = (bucket, window_seconds)
@@ -46,6 +57,11 @@ class RateLimiter:
         stale = [k for k, (b, w) in self._hits.items() if not b or b[-1] <= now - w]
         for key in stale:
             del self._hits[key]
+            ns = _namespace(key)
+            self._counts[ns] -= 1
+            if not self._counts[ns]:
+                del self._counts[ns]
 
     def clear(self) -> None:
         self._hits.clear()
+        self._counts.clear()
