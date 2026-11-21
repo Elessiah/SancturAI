@@ -35,6 +35,13 @@ def test_invalid_phrase_rejected() -> None:
         crypto.derive_keys("not a phrase")
 
 
+def test_oversized_phrase_rejected_before_normalization() -> None:
+    padded = VEC["phrase"] + " " * crypto.MAX_PHRASE_CHARS
+    assert not crypto.is_valid_phrase(padded)
+    with pytest.raises(ValueError):
+        crypto.derive_keys(padded)
+
+
 def test_aead_roundtrip_and_tamper() -> None:
     key = bytes(32)
     blob = crypto.encrypt(key, b"secret", b"ctx")

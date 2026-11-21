@@ -22,6 +22,7 @@ _MNEMONIC = Mnemonic("english")
 SALT = b"sancturai/v1"
 NONCE_BYTES = 24
 TAG_BYTES = 16
+MAX_PHRASE_CHARS = 1024  # garde-fou d'entrée, pas un paramètre de dérivation
 INFO_SIGN = b"sancturai/v1/ed25519"
 INFO_VAULT = b"sancturai/v1/vault"
 INFO_PATH = b"sancturai/v1/path"
@@ -51,6 +52,8 @@ def normalize_phrase(phrase: str) -> str:
 
 
 def is_valid_phrase(phrase: str) -> bool:
+    if len(phrase) > MAX_PHRASE_CHARS:
+        return False
     norm = normalize_phrase(phrase)
     return len(norm.split()) == 12 and _MNEMONIC.check(norm)
 
