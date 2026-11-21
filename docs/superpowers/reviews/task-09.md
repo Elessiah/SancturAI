@@ -12,7 +12,8 @@ Base: 03ab996
 | P6 | perf | minor | app/vault/service.py:_put | 5 MB encrypt/decrypt runs on the event loop, in _put/read | wontfix | |
 | S1 | secu | major | app/vault/api.py:routes | plaintext vault paths in request URL (PUT/GET/DELETE /api/vault/{path}, ?prefix=) written to uvicorn/nginx access logs (plan Dockerfile CMD lacks --no-access-log), plan-mandated, in vault router | open | |
 | S2 | secu | major | app/vault/service.py:put_raw | no file-count cap: zero-size files and uncounted path_enc bytes bypass the 50 MB quota, unbounded rows/listing (re-files P5), in put_raw | fixed | 38d7d54 |
-| S3 | secu | minor | app/vault/service.py:_put | path+content encrypted before the per-file size check (allocation before rejection), in _put | open | |
-| S4 | secu | minor | app/vault/paths.py:normalize_path | control characters other than NUL (LF, CR, TAB, DEL, C1) accepted in paths, in normalize_path | open | |
+| S3 | secu | minor | app/vault/service.py:_put | path+content encrypted before the per-file size check (allocation before rejection), in _put | fixed | |
+| S4 | secu | minor | app/vault/paths.py:normalize_path | control characters other than NUL (LF, CR, TAB, DEL, C1) accepted in paths, in normalize_path | fixed | |
 
 wontfix P6: libsodium XChaCha20 does ~5 MB in a few ms; offloading to a thread adds complexity for no measurable gain.
+wontfix S1: corrigé côté déploiement (plan Task 19, commit c1fd436) : pas d'URI dans les logs.

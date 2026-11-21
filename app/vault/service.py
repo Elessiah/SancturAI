@@ -62,10 +62,13 @@ class VaultService:
         opts = [] if blobs else [defer(VaultFile.content_enc), defer(VaultFile.path_enc)]
         return await self._db.get(VaultFile, (agent_id, pid), options=opts)
 
-    async def put_raw(self, agent_id: str, pid: str, path_enc: bytes, content_enc: bytes, size: int) -> VaultFile:
-        """Écriture commune (serveur et E2E). Vérifie les quotas, ne commit pas."""
+    def _check_file_size(self, size: int) -> None:
         if size > self._settings.vault_file_max_bytes:
             raise ApiError("QUOTA_EXCEEDED", f"file larger than {self._settings.vault_file_max_bytes} bytes")
+
+    async def put_raw(self, agent_id: str, pid: str, path_enc: bytes, content_enc: bytes, size: int) -> VaultFile:
+        """Écriture commune (serveur et E2E). Vérifie les quotas, ne commit pas."""
+        self._check_file_size(size)
         await self._lock_agent(agent_id)
         existing = await self._get(agent_id, pid, blobs=False)
         used, count = (await self._db.execute(
@@ -86,6 +89,7 @@ class VaultService:
         return existing
 
     async def _put(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str, data: bytes) -> VaultFile:
+        self._check_file_size(len(data))  # avant tout chiffrement : pas d'allocation inutile
         pid = path_id(path_key, path)
         return await self.put_raw(agent_id, pid, encrypt(vault_key, path.encode(), aad_path(agent_id, pid)),
                                   encrypt(vault_key, data, aad_content(agent_id, pid)), len(data))

@@ -2,6 +2,7 @@ import asyncio
 import base64
 
 import httpx
+import pytest
 
 from app.state import AppState
 from tests.helpers import make_agent
@@ -58,6 +59,22 @@ async def test_quotas(client: httpx.AsyncClient, state: AppState) -> None:
         assert (await client.put("/api/vault/a", json={"content": "y" * 10}, headers=a.headers)).status_code == 200
     finally:
         state.settings.vault_file_max_bytes, state.settings.vault_quota_bytes = old_file, old_total
+
+
+async def test_oversized_file_rejected_before_encryption(client: httpx.AsyncClient, state: AppState,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    a = await make_agent(state, "nocrypt")
+
+    def boom(*_: object) -> bytes:
+        raise AssertionError("encrypt called on an oversized file")
+
+    monkeypatch.setattr("app.vault.service.encrypt", boom)
+    state.settings.vault_file_max_bytes, old_file = 10, state.settings.vault_file_max_bytes
+    try:
+        r = await client.put("/api/vault/big", json={"content": "x" * 11}, headers=a.headers)
+        assert r.json()["error"] == "QUOTA_EXCEEDED"
+    finally:
+        state.settings.vault_file_max_bytes = old_file
 
 
 async def test_requires_session(client: httpx.AsyncClient) -> None:
