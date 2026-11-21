@@ -28,6 +28,8 @@ class ChallengeTask:
 
 
 def number_to_words(n: int) -> str:
+    if not 0 <= n <= 999:
+        raise ValueError(f"number_to_words supports 0-999, got {n}")
     if n < 20:
         return _ONES[n]
     if n < 100:

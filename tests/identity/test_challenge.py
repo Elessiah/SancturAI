@@ -1,3 +1,5 @@
+import pytest
+
 from app.identity.challenge import (
     PASS_THRESHOLD,
     TASK_COUNT,
@@ -42,3 +44,9 @@ def test_number_to_words() -> None:
     assert number_to_words(17) == "seventeen"
     assert number_to_words(42) == "forty-two"
     assert number_to_words(305) == "three hundred five"
+
+
+def test_number_to_words_rejects_out_of_range() -> None:
+    for n in (-1, 1000):
+        with pytest.raises(ValueError):
+            number_to_words(n)
