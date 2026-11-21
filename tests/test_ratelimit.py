@@ -37,7 +37,7 @@ def test_gc_evicts_short_window_buckets() -> None:
         rl.hit(f"k{i}", limit=1, window_seconds=10)
     now[0] = 11
     rl.hit("last", limit=1, window_seconds=10)  # 1000e appel -> GC
-    assert list(rl._hits) == ["last"]
+    assert list(rl._hits) == [("last", 10)]
 
 
 def test_key_cap_fails_closed_then_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,7 +54,7 @@ def test_key_cap_fails_closed_then_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     rl.hit("k0", limit=5, window_seconds=10)  # clé connue : toujours servie
     now[0] = 20
     rl.hit("new", limit=5, window_seconds=10)  # GC libère les seaux périmés
-    assert list(rl._hits) == ["new"]
+    assert list(rl._hits) == [("new", 10)]
 
 
 def test_key_cap_is_per_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,3 +71,13 @@ def test_key_cap_is_per_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rl._counts == {"register": 2, "agent": 2}
     rl.clear()
     assert not rl._counts
+
+
+def test_same_key_two_windows_do_not_share_hits() -> None:
+    now = [0.0]
+    rl = RateLimiter(clock=lambda: now[0])
+    rl.hit("k", limit=1, window_seconds=3600)
+    now[0] = 20
+    rl.hit("k", limit=5, window_seconds=10)  # fenêtre courte : seau distinct
+    with pytest.raises(ApiError):
+        rl.hit("k", limit=1, window_seconds=3600)  # le hit long n'a pas été purgé

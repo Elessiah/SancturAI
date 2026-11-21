@@ -70,7 +70,10 @@ class SessionStore:
             if siblings is not None:
                 siblings.discard(mcp_session_id)
                 if not siblings:
+                    # session MCP reconnectée : l'ancien token n'est plus joignable,
+                    # on efface ses clés au lieu de les laisser vivre jusqu'au TTL.
                     del self._mcp_by_token[previous]
+                    self.revoke(previous)
         self._mcp[mcp_session_id] = token
         self._mcp_by_token.setdefault(token, set()).add(mcp_session_id)
 

@@ -22,16 +22,18 @@ class RateLimiter:
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        # clé -> (horodatages des hits, fenêtre utilisée) ; la fenêtre sert au GC.
-        self._hits: dict[str, tuple[deque[float], float]] = {}
-        self._counts: dict[str, int] = {}  # espace de noms -> nombre de clés suivies
+        # (clé, fenêtre) -> horodatages des hits : une même clé utilisée avec deux
+        # fenêtres a deux seaux distincts (la courte ne purge pas la longue).
+        self._hits: dict[tuple[str, float], deque[float]] = {}
+        self._counts: dict[str, int] = {}  # espace de noms -> nombre de seaux suivis
         self._calls = 0
         self._full_gc_at = -math.inf
 
     def hit(self, key: str, limit: int, window_seconds: float) -> None:
         now = self._clock()
-        entry = self._hits.get(key)
-        if entry is None:
+        slot = (key, window_seconds)
+        bucket = self._hits.get(slot)
+        if bucket is None:
             ns = _namespace(key)
             if self._counts.get(ns, 0) >= MAX_KEYS:
                 if now - self._full_gc_at >= 1:  # GC O(n) au plus 1 fois/s quand plein
@@ -40,9 +42,7 @@ class RateLimiter:
                 if self._counts.get(ns, 0) >= MAX_KEYS:
                     raise ApiError("RATE_LIMITED", "too many tracked clients", retry_after=1)
             self._counts[ns] = self._counts.get(ns, 0) + 1
-        bucket: deque[float] = entry[0] if entry else deque()
-        if entry is None or entry[1] != window_seconds:
-            self._hits[key] = (bucket, window_seconds)
+            bucket = self._hits[slot] = deque()
         while bucket and bucket[0] <= now - window_seconds:
             bucket.popleft()
         if len(bucket) >= limit:
@@ -54,10 +54,10 @@ class RateLimiter:
             self._gc(now)
 
     def _gc(self, now: float) -> None:
-        stale = [k for k, (b, w) in self._hits.items() if not b or b[-1] <= now - w]
-        for key in stale:
-            del self._hits[key]
-            ns = _namespace(key)
+        stale = [s for s, b in self._hits.items() if not b or b[-1] <= now - s[1]]
+        for slot in stale:
+            del self._hits[slot]
+            ns = _namespace(slot[0])
             self._counts[ns] -= 1
             if not self._counts[ns]:
                 del self._counts[ns]

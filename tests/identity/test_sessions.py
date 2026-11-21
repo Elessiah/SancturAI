@@ -53,6 +53,7 @@ def test_bind_unknown_token_and_rebind_are_clean() -> None:
     store.bind_mcp("m", t1)
     store.bind_mcp("m", t2)
     assert t1 not in store._mcp_by_token  # index vidé après rebind
+    assert store.get(t1) is None  # ancien token sans liaison MCP : clés effacées
     store.revoke(t1)
     assert store.token_for_mcp("m") == t2
     store.revoke(t2)
