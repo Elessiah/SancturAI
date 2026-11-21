@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,3 +28,16 @@ async def test_enqueue_strips_chars_jsonb_rejects(db: AsyncSession) -> None:
     row = (await db.scalars(select(OutboxEvent))).one()
     assert row.payload["text"] == "ab�cd\ne\tf"
 
+
+
+async def test_enqueue_cleans_extra_values(db: AsyncSession) -> None:
+    await enqueue(db, "agent_message", "hi", short_id="ab\x0012", agent={"handle": "x\ud800", "agent_id": "y"})
+    await db.commit()
+    row = (await db.scalars(select(OutboxEvent))).one()
+    assert row.payload == {"text": "hi", "short_id": "ab12", "agent": {"handle": "x\N{REPLACEMENT CHARACTER}",
+                                                                        "agent_id": "y"}}
+
+
+async def test_enqueue_rejects_unknown_extra_keys(db: AsyncSession) -> None:
+    with pytest.raises(ValueError):
+        await enqueue(db, "log", "hi", vault_key="secret")
