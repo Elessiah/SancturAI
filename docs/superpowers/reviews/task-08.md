@@ -12,3 +12,4 @@ Base: 38e8569
 | S2 | secu | minor | app/identity/api.py:create_invite,list_invites | responses carrying invite codes (registration credentials) without Cache-Control: no-store in create_invite, list_invites | fixed | dadbd2d |
 | S3 | secu | minor | app/identity/service.py:suspend | unvalidated days (<=0 or overflow) and overwrite that can shorten a longer active suspension in suspend | fixed | dadbd2d |
 | S4 | secu | major | app/identity/service.py:_valid_invite | already-issued active invite codes stay redeemable while their creator is suspended or invite-banned (spec §5.3/§6 bypass) in _valid_invite | fixed | dadbd2d |
+| S5 | secu | minor | tests/identity/test_suspension.py | S4 guard untested on register/complete (sanction landing after start) and on expired suspension/ban in _valid_invite | fixed | |

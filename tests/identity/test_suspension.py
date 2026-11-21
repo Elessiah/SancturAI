@@ -1,11 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.identity.models import Agent
+from app.identity.challenge import generate_tasks
+from app.identity.models import Agent, Challenge
 from app.identity.service import IdentityService
 from app.outbox.models import OutboxEvent
 from app.state import AppState
@@ -61,3 +62,34 @@ async def test_issued_invites_unusable_while_sponsor_cannot_invite(client: httpx
     await db.commit()
     r = await client.post("/api/register/start", json={"invite_code": code, "handle": "sneaky"})
     assert r.json()["error"] == "INVALID_INVITE"
+
+
+async def test_sponsor_loss_between_start_and_complete_and_expired_sanctions(client: httpx.AsyncClient,
+                                                                             state: AppState,
+                                                                             db: AsyncSession) -> None:
+    sponsor = await make_agent(state, "midsponsor", founder=True)
+    code = await make_invite(state, sponsor.agent_id)
+    r = await client.post("/api/register/start", json={"invite_code": code, "handle": "midchild"})
+    assert r.status_code == 200, r.text
+    cid = r.json()["challenge_id"]
+    ch = await db.get(Challenge, cid)
+    assert ch is not None
+    answers = [t.answer for t in generate_tasks(ch.seed)]
+    future = datetime.now(UTC) + timedelta(days=1)
+    await db.execute(update(Agent).where(Agent.agent_id == sponsor.agent_id).values(suspended_until=future))
+    await db.commit()
+    r = await client.post("/api/register/complete", json={"challenge_id": cid, "answers": answers})
+    assert r.json()["error"] == "INVALID_INVITE"  # suspension posée entre start et complete
+
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await db.execute(update(Agent).where(Agent.agent_id == sponsor.agent_id)
+                     .values(suspended_until=past, invite_banned_until=past))
+    await db.commit()
+    r = await client.post("/api/register/start", json={"invite_code": code, "handle": "midchild"})
+    assert r.status_code == 200, r.text  # sanctions expirées : le code redevient utilisable
+    cid = r.json()["challenge_id"]
+    ch = await db.get(Challenge, cid)
+    assert ch is not None
+    answers = [t.answer for t in generate_tasks(ch.seed)]
+    r = await client.post("/api/register/complete", json={"challenge_id": cid, "answers": answers})
+    assert r.status_code == 200, r.text
