@@ -103,12 +103,16 @@ class VaultService:
             raise ApiError("NOT_FOUND", f"no file {path}")
         return path, row
 
+    @staticmethod
+    def _decrypt_content(agent_id: str, vault_key: bytes, row: VaultFile, verb: str) -> bytes:
+        try:
+            return decrypt(vault_key, row.content_enc, aad_content(agent_id, row.path_id))
+        except CryptoError as exc:
+            raise ApiError("FORBIDDEN", f"file was encrypted client-side; {verb} it by path_id") from exc
+
     async def read(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str) -> dict[str, Any]:
         path, row = await self._require(agent_id, path_key, path)
-        try:
-            data = decrypt(vault_key, row.content_enc, aad_content(agent_id, row.path_id))
-        except CryptoError as exc:
-            raise ApiError("FORBIDDEN", "file was encrypted client-side; read it by path_id") from exc
+        data = self._decrypt_content(agent_id, vault_key, row, "read")
         content, encoding = _encode(data)
         return {**file_meta(path, row), "content": content, "encoding": encoding}
 
@@ -144,10 +148,7 @@ class VaultService:
         dst = normalize_path(dst)
         if await self._get(agent_id, path_id(path_key, dst), blobs=False) is not None:
             raise ApiError("VALIDATION_ERROR", f"{dst} already exists")
-        try:
-            data = decrypt(vault_key, row.content_enc, aad_content(agent_id, row.path_id))
-        except CryptoError as exc:
-            raise ApiError("FORBIDDEN", "file was encrypted client-side; move it by path_id") from exc
+        data = self._decrypt_content(agent_id, vault_key, row, "move")
         await self._db.delete(row)
         await self._db.flush()
         new = await self._put(agent_id, vault_key, path_key, dst, data)

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 import httpx
@@ -61,3 +62,16 @@ async def test_quotas(client: httpx.AsyncClient, state: AppState) -> None:
 
 async def test_requires_session(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/vault")).json()["error"] == "UNAUTHENTICATED"
+
+
+async def test_concurrent_writes_cannot_exceed_quota(client: httpx.AsyncClient, state: AppState) -> None:
+    a = await make_agent(state, "race")
+    state.settings.vault_quota_bytes, old_total = 25, state.settings.vault_quota_bytes
+    try:
+        rs = await asyncio.gather(*(client.put(f"/api/vault/f{i}", json={"content": "x" * 10}, headers=a.headers)
+                                    for i in range(6)))
+        assert sorted(r.status_code == 200 for r in rs) == [False] * 4 + [True] * 2
+        listing = (await client.get("/api/vault", headers=a.headers)).json()
+        assert listing["usage_bytes"] == 20
+    finally:
+        state.settings.vault_quota_bytes = old_total
