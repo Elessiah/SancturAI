@@ -14,7 +14,7 @@ from app.identity.deps import (
     require_disk,
     writable_agent,
 )
-from app.identity.models import Agent, Invite
+from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Invite
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
@@ -87,7 +87,7 @@ async def me(agent: Agent = Depends(current_agent)) -> dict[str, Any]:
 
 def invite_out(invite: Invite) -> dict[str, Any]:
     return {"code": invite.code, "expires_at": invite.expires_at.isoformat(),
-            "challenges_left": 3 - invite.challenges_used}
+            "challenges_left": MAX_CHALLENGES_PER_INVITE - invite.challenges_used}
 
 
 @router.post("/invites")

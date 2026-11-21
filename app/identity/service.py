@@ -18,8 +18,6 @@ from app.state import AppState
 HANDLE_RE = re.compile(r"^[a-z0-9_-]{3,32}$")
 INSTRUCTIONS = ("Réponds aux 20 tâches dans l'ordre, une réponse par tâche, en moins de 30 secondes, "
                 "via POST /api/register/complete {challenge_id, answers}. 18 bonnes réponses requises.")
-
-
 INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
@@ -138,9 +136,9 @@ class IdentityService:
         if agent.invite_banned_until is not None and agent.invite_banned_until > t:
             raise ApiError("FORBIDDEN", f"invites disabled until {agent.invite_banned_until:%Y-%m-%d}")
         active = await self._db.scalar(select(func.count()).select_from(Invite)
-                                       .where(*self._active_invite_filter(agent)))
-        if (active or 0) >= MAX_ACTIVE_INVITES:
-            raise ApiError("FORBIDDEN", "at most 3 active invites")
+                                       .where(*self._active_invite_filter(agent))) or 0
+        if active >= MAX_ACTIVE_INVITES:
+            raise ApiError("FORBIDDEN", f"at most {MAX_ACTIVE_INVITES} active invites")
         invite = Invite(code=secrets.token_urlsafe(12), creator_id=agent.agent_id, expires_at=t + INVITE_TTL)
         self._db.add(invite)
         await self._db.commit()
@@ -156,11 +154,12 @@ class IdentityService:
 
     async def suspend(self, agent: Agent, days: int, reason: str) -> None:
         """Ne commit pas : l'appelant (modération) valide la transaction."""
-        agent.suspended_until = now() + timedelta(days=days)
+        t = now()
+        agent.suspended_until = t + timedelta(days=days)
         if agent.sponsor_id:
             sponsor = await self._db.get(Agent, agent.sponsor_id)
             if sponsor is not None:
-                sponsor.invite_banned_until = now() + SPONSOR_BAN
+                sponsor.invite_banned_until = t + SPONSOR_BAN
         await enqueue(self._db, "log", f"Agent {agent.handle} ({agent.agent_id}) suspendu {days} jours : {reason}",
                       agent={"handle": agent.handle, "agent_id": agent.agent_id})
 
