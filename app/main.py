@@ -23,6 +23,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if task:
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)  # attend la fin avant de fermer le moteur
             await state.engine.dispose()
 
     app = FastAPI(title="SancturAI", version="0.1.0", lifespan=lifespan)

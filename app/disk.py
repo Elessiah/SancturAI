@@ -35,3 +35,6 @@ class DiskGuard:
             self._alerted_at = now
             return True
         return False
+
+    def rearm_alert(self) -> None:
+        self._alerted_at = float("-inf")

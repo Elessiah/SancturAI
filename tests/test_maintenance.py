@@ -1,10 +1,12 @@
+import asyncio
 from collections import namedtuple
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.disk import DiskGuard
-from app.maintenance import run_maintenance_once
+from app.maintenance import maintenance_loop, run_maintenance_once
 from app.outbox.models import OutboxEvent
 from app.state import AppState
 
@@ -28,3 +30,32 @@ async def test_flushes_errors_and_disk_alert(state: AppState, db: AsyncSession) 
 async def test_nothing_to_report(state: AppState, db: AsyncSession) -> None:
     await run_maintenance_once(state)
     assert (await db.scalars(select(OutboxEvent))).all() == []
+
+
+async def test_failure_keeps_errors_and_alert(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("app.maintenance.enqueue", boom)
+    monkeypatch.setattr(state, "disk", DiskGuard("/x", 0.85, usage=lambda _p: Usage(100, 95, 5)))
+    state.errors.record()
+    with pytest.raises(RuntimeError):
+        await run_maintenance_once(state)
+    assert state.errors.take() == 1
+    assert state.disk.should_alert()
+
+
+async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def flaky(_s: AppState) -> None:
+        calls.append(1)
+        raise RuntimeError("x")
+
+    monkeypatch.setattr("app.maintenance.run_maintenance_once", flaky)
+    task = asyncio.create_task(maintenance_loop(state, 0.01))
+    await asyncio.sleep(0.1)
+    assert len(calls) >= 2 and not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
