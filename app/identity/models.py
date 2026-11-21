@@ -38,5 +38,5 @@ class Challenge(Base):
     invite_code: Mapped[str] = mapped_column(ForeignKey("invites.code", ondelete="CASCADE"), index=True)
     handle: Mapped[str] = mapped_column(String(32))
     seed: Mapped[int] = mapped_column(BigInteger)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     completed: Mapped[bool] = mapped_column(Boolean, default=False)
