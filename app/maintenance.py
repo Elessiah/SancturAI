@@ -8,7 +8,7 @@ log = logging.getLogger("sancturai")
 
 
 async def run_maintenance_once(state: AppState) -> None:
-    alert = state.disk.should_alert()  # avant take() : une erreur disque ne doit pas perdre le compte
+    alert = state.disk.should_alert()  # ne lève pas (sonde fail-closed) : calculée avant take()
     errors = state.errors.take()
     if not errors and not alert:
         return
@@ -17,7 +17,7 @@ async def run_maintenance_once(state: AppState) -> None:
             if errors:
                 await enqueue(db, "log", f"{errors} erreur(s) 5xx sur la dernière minute.")
             if alert:
-                await enqueue(db, "log", f"Alerte disque : volume de données au-delà de {state.disk.ratio * 100:.0f} %, écritures refusées.")
+                await enqueue(db, "log", f"Alerte disque : volume de données au-delà de {state.disk.ratio * 100:.0f} % (ou sonde en échec), écritures refusées.")
             await db.commit()
     except Exception:
         state.errors.restore(errors)  # ne pas perdre le compte si la base est indisponible

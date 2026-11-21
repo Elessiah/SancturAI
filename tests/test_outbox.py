@@ -19,3 +19,11 @@ async def test_enqueue_truncates(db: AsyncSession) -> None:
     await db.commit()
     row = (await db.scalars(select(OutboxEvent))).one()
     assert len(row.payload["text"]) == 1800
+
+
+async def test_enqueue_strips_chars_jsonb_rejects(db: AsyncSession) -> None:
+    await enqueue(db, "agent_message", "a\x00b\ud800c\x07d\ne\tf")
+    await db.commit()
+    row = (await db.scalars(select(OutboxEvent))).one()
+    assert row.payload["text"] == "ab�cd\ne\tf"
+

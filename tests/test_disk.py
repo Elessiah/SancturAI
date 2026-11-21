@@ -46,3 +46,16 @@ def test_cache_ten_seconds() -> None:
     now[0] += 11
     guard.is_busy()
     assert len(calls) == 2
+
+
+def _gone(_p: str) -> Usage:
+    raise OSError("gone")
+
+
+@pytest.mark.parametrize("usage", [_gone, lambda _p: Usage(0, 0, 0)])
+def test_probe_failure_fails_closed(usage: object) -> None:
+    guard = DiskGuard("/x", 0.85, clock=lambda: 0.0, usage=usage)  # type: ignore[arg-type]
+    with pytest.raises(ApiError) as exc:
+        guard.ensure_writable()
+    assert exc.value.code == "SERVER_BUSY"
+    assert guard.should_alert()

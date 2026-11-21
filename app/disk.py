@@ -1,3 +1,4 @@
+import logging
 import shutil
 import time
 from collections.abc import Callable
@@ -5,6 +6,7 @@ from typing import Any
 
 from app.errors import ApiError
 
+log = logging.getLogger("sancturai")
 _CACHE_SECONDS = 10.0
 _ALERT_EVERY = 3600.0
 
@@ -24,8 +26,12 @@ class DiskGuard:
     def is_busy(self) -> bool:
         now = self._clock()
         if now - self._checked_at >= _CACHE_SECONDS:
-            u = self._usage(self._path)
-            self._busy = u.used / u.total > self._ratio
+            try:
+                u = self._usage(self._path)
+                self._busy = u.used / u.total > self._ratio
+            except Exception:  # sonde illisible : fail-closed (SERVER_BUSY + alerte), pas de 500
+                log.exception("disk usage probe failed")
+                self._busy = True
             self._checked_at = now
         return self._busy
 

@@ -61,12 +61,14 @@ async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: p
     assert task.cancelled()
 
 
-async def test_disk_probe_failure_keeps_errors(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_disk_probe_failure_alerts_and_flushes(state: AppState, db: AsyncSession,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     def bad(_p: str) -> Usage:
         raise OSError("gone")
 
     monkeypatch.setattr(state, "disk", DiskGuard("/x", 0.85, usage=bad))
     state.errors.record()
-    with pytest.raises(OSError):
-        await run_maintenance_once(state)
-    assert state.errors.take() == 1
+    await run_maintenance_once(state)  # sonde en échec : ne bloque plus le flush des erreurs
+    texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
+    assert any("1 erreur" in t for t in texts)
+    assert any("disque" in t.lower() for t in texts)
