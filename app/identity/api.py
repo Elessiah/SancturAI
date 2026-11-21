@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.auth import is_suspended, limit_login, limit_register
-from app.identity.deps import client_ip, current_agent, current_session, require_disk
+from app.identity.deps import client_ip, current_agent, current_session, current_token, require_disk
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
@@ -64,10 +64,10 @@ async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_
 
 
 @router.post("/logout")
-async def logout(request: Request, _: Session = Depends(current_session),
+async def logout(_: Session = Depends(current_session), token: str | None = Depends(current_token),
                  state: AppState = Depends(get_state)) -> dict[str, bool]:
-    token = request.headers["authorization"].split(" ", 1)[1]
-    state.sessions.revoke(token)
+    if token:
+        state.sessions.revoke(token)
     return {"ok": True}
 
 

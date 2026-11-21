@@ -29,9 +29,13 @@ def client_ip(request: Request) -> str:
     return normalize_ip(request.headers.get("x-real-ip") or (request.client.host if request.client else ""))
 
 
-async def current_session(creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+async def current_token(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str | None:
+    return creds.credentials if creds else None
+
+
+async def current_session(token: str | None = Depends(current_token),
                           state: AppState = Depends(get_state)) -> Session:
-    return resolve_session(state, creds.credentials if creds else None)
+    return resolve_session(state, token)
 
 
 async def current_agent(session: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
