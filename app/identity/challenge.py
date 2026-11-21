@@ -42,6 +42,8 @@ def number_to_words(n: int) -> str:
 def _arith(rng: random.Random) -> ChallengeTask:
     a, b = rng.randint(2, 99), rng.randint(2, 99)
     op = rng.choice(["plus", "minus", "times"])
+    if op == "minus" and a < b:
+        a, b = b, a  # résultat >= 0 : cohérent avec « digits only »
     result = {"plus": a + b, "minus": a - b, "times": a * b}[op]
     return ChallengeTask(
         f"Compute {number_to_words(a)} {op} {number_to_words(b)}. Answer with digits only.",

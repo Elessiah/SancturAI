@@ -39,6 +39,12 @@ def test_perfect_answers_pass() -> None:
     assert score(tasks, [t.answer for t in tasks]) == TASK_COUNT >= PASS_THRESHOLD
 
 
+def test_arith_answers_are_digits_only() -> None:
+    arith = [t for s in range(200) for t in generate_tasks(s) if t.prompt.startswith("Compute")]
+    assert any("minus" in t.prompt for t in arith)
+    assert all(t.answer.isdigit() for t in arith)
+
+
 def test_number_to_words() -> None:
     assert number_to_words(0) == "zero"
     assert number_to_words(17) == "seventeen"
