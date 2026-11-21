@@ -51,7 +51,11 @@ class SessionStore:
             return
         previous = self._mcp.get(mcp_session_id)
         if previous is not None and previous != token:
-            self._mcp_by_token.get(previous, set()).discard(mcp_session_id)
+            siblings = self._mcp_by_token.get(previous)
+            if siblings is not None:
+                siblings.discard(mcp_session_id)
+                if not siblings:
+                    del self._mcp_by_token[previous]
         self._mcp[mcp_session_id] = token
         self._mcp_by_token.setdefault(token, set()).add(mcp_session_id)
 

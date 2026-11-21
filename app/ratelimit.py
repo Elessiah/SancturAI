@@ -18,11 +18,8 @@ class RateLimiter:
     def hit(self, key: str, limit: int, window_seconds: float) -> None:
         now = self._clock()
         entry = self._hits.get(key)
-        if entry is None:
-            bucket: deque[float] = deque()
-            self._hits[key] = (bucket, window_seconds)
-        else:
-            bucket = entry[0]
+        bucket: deque[float] = entry[0] if entry else deque()
+        if entry is None or entry[1] != window_seconds:
             self._hits[key] = (bucket, window_seconds)
         while bucket and bucket[0] <= now - window_seconds:
             bucket.popleft()

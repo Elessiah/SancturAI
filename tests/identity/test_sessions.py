@@ -52,6 +52,7 @@ def test_bind_unknown_token_and_rebind_are_clean() -> None:
     t2, _ = store.create("a", b"v" * 32, b"p" * 32)
     store.bind_mcp("m", t1)
     store.bind_mcp("m", t2)
+    assert t1 not in store._mcp_by_token  # index vidé après rebind
     store.revoke(t1)
     assert store.token_for_mcp("m") == t2
     store.revoke(t2)
