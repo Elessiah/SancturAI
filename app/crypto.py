@@ -21,6 +21,7 @@ from nacl.signing import SigningKey
 _MNEMONIC = Mnemonic("english")
 SALT = b"sancturai/v1"
 NONCE_BYTES = 24
+TAG_BYTES = 16
 INFO_SIGN = b"sancturai/v1/ed25519"
 INFO_VAULT = b"sancturai/v1/vault"
 INFO_PATH = b"sancturai/v1/path"
@@ -87,7 +88,7 @@ def encrypt(key: bytes, plaintext: bytes, aad: bytes) -> bytes:
 
 
 def decrypt(key: bytes, blob: bytes, aad: bytes) -> bytes:
-    if len(blob) < NONCE_BYTES + 16:
+    if len(blob) < NONCE_BYTES + TAG_BYTES:
         raise CryptoError("blob too short")
     try:
         return crypto_aead_xchacha20poly1305_ietf_decrypt(blob[NONCE_BYTES:], aad, blob[:NONCE_BYTES], key)
