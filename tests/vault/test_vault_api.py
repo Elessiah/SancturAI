@@ -75,3 +75,20 @@ async def test_concurrent_writes_cannot_exceed_quota(client: httpx.AsyncClient, 
         assert listing["usage_bytes"] == 20
     finally:
         state.settings.vault_quota_bytes = old_total
+
+
+async def test_file_count_cap_blocks_empty_files(client: httpx.AsyncClient, state: AppState) -> None:
+    a = await make_agent(state, "many")
+    state.settings.vault_max_files, old_max = 2, state.settings.vault_max_files
+    try:
+        for name in ("e1", "e2"):
+            r = await client.put(f"/api/vault/{name}", json={"content": ""}, headers=a.headers)
+            assert r.status_code == 200, r.text
+        r = await client.put("/api/vault/e3", json={"content": ""}, headers=a.headers)
+        assert r.json()["error"] == "QUOTA_EXCEEDED"
+        # écraser ou renommer un fichier existant reste permis au plafond
+        assert (await client.put("/api/vault/e1", json={"content": "x"}, headers=a.headers)).status_code == 200
+        r = await client.post("/api/vault/move", json={"from": "/e1", "to": "/e9"}, headers=a.headers)
+        assert r.status_code == 200, r.text
+    finally:
+        state.settings.vault_max_files = old_max

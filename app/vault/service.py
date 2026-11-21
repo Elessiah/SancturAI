@@ -68,8 +68,12 @@ class VaultService:
             raise ApiError("QUOTA_EXCEEDED", f"file larger than {self._settings.vault_file_max_bytes} bytes")
         await self._lock_agent(agent_id)
         existing = await self._get(agent_id, pid, blobs=False)
-        projected = await self.usage(agent_id) - (existing.size if existing else 0) + size
-        if projected > self._settings.vault_quota_bytes:
+        used, count = (await self._db.execute(
+            select(func.coalesce(func.sum(VaultFile.size), 0), func.count())
+            .where(VaultFile.agent_id == agent_id))).one()
+        if existing is None and count >= self._settings.vault_max_files:
+            raise ApiError("QUOTA_EXCEEDED", f"vault limited to {self._settings.vault_max_files} files")
+        if int(used) - (existing.size if existing else 0) + size > self._settings.vault_quota_bytes:
             raise ApiError("QUOTA_EXCEEDED", f"vault quota {self._settings.vault_quota_bytes} bytes")
         if existing is None:
             existing = VaultFile(agent_id=agent_id, path_id=pid, path_enc=path_enc, content_enc=content_enc,
