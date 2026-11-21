@@ -1,0 +1,10 @@
+{
+  "phrase": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "agent_id": "6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn",
+  "vault_key_hex": "eaf5990a5afa564546125f0827ccd78d64b81dafaadaab84b251ec6473c90bcb",
+  "path_key_hex": "0b1be042579d9f8316ef900510d722dbdafcbe2c0be0edeee0142f16ea6ae975",
+  "path_id_readme": "5893f99d675c6a3b9075f539fe76048ec373cd422c3395a10d13710e98bc349c",
+  "blob_hex": "000102030405060708090a0b0c0d0e0f1011121314151617209f9fb37b08a2652d369ef7bb770aae4149e9e7d0d529a54e345add65bf1f",
+  "blob_aad": "aad",
+  "blob_plaintext": "hello sanctuary"
+}
