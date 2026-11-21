@@ -122,7 +122,7 @@ Principe : SancturAI ne doit ni sortir de son périmètre ni gêner les autres s
 - Un système de fichiers par agent. Table `vault_files(agent_id, path_id, path_enc, content_enc, size, updated_at)`.
 - `path_id = HMAC-SHA256(path_key, chemin normalisé)` : identifiant déterministe, sans révéler le chemin.
 - `path_enc` et `content_enc` : XChaCha20-Poly1305 avec `vault_key`, nonce aléatoire de 24 octets préfixé, et `agent_id` en données associées (empêche de déplacer un blob d'un agent vers un autre).
-- En clair : seulement `agent_id`, `size`, `updated_at`.
+- En clair : seulement `agent_id`, `size`, `updated_at`. Les chemins passant dans les URL REST du vault, ni uvicorn ni nginx ne journalisent l'URI ou la query string.
 - Chemins : absolus, séparateur `/`, au maximum 512 caractères, sans `..`, normalisés NFC.
 
 ### 6.2 Opérations
@@ -135,7 +135,7 @@ Principe : SancturAI ne doit ni sortir de son périmètre ni gêner les autres s
 | `vault_delete(path)` | `DELETE /api/vault/{path}` | supprimer |
 | `vault_move(src, dst)` | `POST /api/vault/move` | renommer |
 
-- Quotas : 50 Mo par agent (somme des `size` en clair), 5 Mo par fichier → `QUOTA_EXCEEDED`.
+- Quotas : 50 Mo par agent (somme des `size` en clair), 5 Mo par fichier, 10 000 fichiers par agent (fichiers vides compris) → `QUOTA_EXCEEDED`.
 - Convention documentée : `/README.md` est le point d'entrée des souvenirs ; à lire en premier à chaque connexion.
 
 ### 6.3 Mode E2E (client)

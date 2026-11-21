@@ -5548,12 +5548,16 @@ def test_hardening_and_limits() -> None:
     app = compose()["services"]["app"]
     assert app["read_only"] is True and app["user"] == "10001:33"
     assert "--workers 1" in " ".join(app["command"])
+    assert "--no-access-log" in " ".join(app["command"])  # chemins vault en clair dans les URL
 
 
 def test_nginx_blocks_internal_and_slice_limits() -> None:
     conf = (DEPLOY / "nginx" / "sancturai.conf").read_text()
     assert "location /internal/" in conf and "return 404" in conf
     assert "listen 127.0.0.1:8300" in conf
+    assert "log_format sancturai_nouri" in conf and "$request_uri" not in conf and "$request " not in conf
+    assert "access_log /var/log/nginx/sancturai.access.log sancturai_nouri" in conf
+    assert "error_log /var/log/nginx/sancturai.error.log crit" in conf
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text()
     for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
         assert line in sl
@@ -5604,7 +5608,7 @@ WORKDIR /app
 COPY --from=build --chown=root:root /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER 10001:33
-CMD ["sh", "-c", "umask 0007 && exec uvicorn app.main:create_app --factory --uds /run/sancturai/app.sock --workers 1 --no-server-header --no-proxy-headers"]
+CMD ["sh", "-c", "umask 0007 && exec uvicorn app.main:create_app --factory --uds /run/sancturai/app.sock --workers 1 --no-server-header --no-proxy-headers --no-access-log"]
 ```
 
 - [ ] **Step 3: Compose**
@@ -5659,7 +5663,7 @@ services:
         required: false
     environment:
       SANCTURAI_DATA_PATH: /data
-    command: ["sh", "-c", "umask 0007 && exec uvicorn app.main:create_app --factory --uds /run/sancturai/app.sock --workers 1 --no-server-header --no-proxy-headers"]
+    command: ["sh", "-c", "umask 0007 && exec uvicorn app.main:create_app --factory --uds /run/sancturai/app.sock --workers 1 --no-server-header --no-proxy-headers --no-access-log"]
     volumes:
       - /run/sancturai:/run/sancturai
       - /srv/sancturai-data:/data:ro
@@ -5734,6 +5738,10 @@ upstream sancturai_app {
 
 limit_req_zone $binary_remote_addr zone=sancturai:10m rate=20r/s;
 
+# Spec §6.1 : les chemins du vault sont dans l'URL (`/api/vault/{path}`, `?prefix=`). On ne journalise
+# jamais l'URI ni la query string ; error_log en `crit` car nginx y recopie la ligne de requête.
+log_format sancturai_nouri '$remote_addr [$time_local] $request_method $status $body_bytes_sent $request_time';
+
 server {
     listen 80;
     listen [::]:80;
@@ -5741,6 +5749,8 @@ server {
     # `certbot --nginx -d sancturai.bluegenji-esport.fr` ajoute ensuite le bloc 443 et la redirection.
 
     client_max_body_size 8m;
+    access_log /var/log/nginx/sancturai.access.log sancturai_nouri;
+    error_log /var/log/nginx/sancturai.error.log crit;
 
     location /internal/ {
         return 404;
@@ -5760,16 +5770,24 @@ server {
 }
 
 # Listener local pour l'hôte (bot → /internal/*). Jamais exposé : 127.0.0.1 uniquement, pas de X-Forwarded-For.
+# Il ne sert que /internal/* et réécrit X-Real-IP : un client local ne peut pas imposer son IP.
 server {
     listen 127.0.0.1:8300;
     server_name _;
     client_max_body_size 64k;
+    access_log /var/log/nginx/sancturai.access.log sancturai_nouri;
+    error_log /var/log/nginx/sancturai.error.log crit;
 
-    location / {
+    location /internal/ {
         proxy_pass http://sancturai_app;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For "";
+    }
+
+    location / {
+        return 404;
     }
 }
 ```
