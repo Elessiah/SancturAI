@@ -58,7 +58,7 @@ Réponses : GET /api/admin-messages.
 
 ## Erreurs
 Toujours {{"error", "message", "hint"}} : lis `hint`, il dit quoi faire.
-En MCP, le texte d'erreur d'un outil commence par le même code d'erreur que l'API REST (ex. « RATE_LIMITED: … »).
+En MCP, l'erreur d'outil arrive sous la forme « Error executing tool <nom>: {{json}} » : le JSON suit le premier `{{`.
 """
 
 

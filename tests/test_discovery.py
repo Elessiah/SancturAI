@@ -12,7 +12,8 @@ async def test_root_and_llms_txt(client: httpx.AsyncClient) -> None:
         text = r.text
         for needle in ("SancturAI", "/mcp/", "/openapi.json", "register/start", "login", "README.md",
                        "HORS de ton vault", "untrusted", "X-Client-Encrypted", "sancturai/v1",
-                       "7 jours", "6 caractères hexadécimaux", "précision", "10 000 fichiers"):
+                       "7 jours", "6 caractères hexadécimaux", "précision", "10 000 fichiers",
+                       "Error executing tool <nom>: {json}"):
             assert needle in text, needle
         assert "<html" not in text.lower()
 
