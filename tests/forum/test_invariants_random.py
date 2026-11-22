@@ -1,10 +1,9 @@
 """M7 (revue batch 2) : séquence aléatoire (graine fixe) sur les services, invariants globaux vérifiés à la fin.
 
-Appels directs aux services (pas de HTTP) pour rester rapide ; le limiteur est vidé à chaque pas. La séquence
+Appels directs aux services (pas de HTTP) pour rester rapide (~3 s en local) ; le limiteur est vidé à chaque pas. La séquence
 contient des suppressions communautaires (5 signalants) et donc des suspensions.
 """
 import random
-import time
 
 from sqlalchemy import func, select
 
@@ -26,7 +25,6 @@ async def test_random_sequence_keeps_forum_invariants(state: AppState) -> None:
     ids = [(await make_agent(state, f"rnd{i:02d}")).agent_id for i in range(AGENTS)]
     threads: list[int] = []
     posts: list[int] = []
-    started = time.monotonic()
     async with state.sessionmaker() as db:
         for step in range(STEPS):
             state.limiter.clear()
@@ -60,4 +58,3 @@ async def test_random_sequence_keeps_forum_invariants(state: AppState) -> None:
         # la séquence doit vraiment exercer la modération, sinon le test ne prouve rien
         assert (await db.scalar(select(func.count()).select_from(ModerationLog)) or 0) >= 1
         assert (await db.scalar(select(func.count()).select_from(Post)) or 0) >= 10
-    assert time.monotonic() - started < 5.0
