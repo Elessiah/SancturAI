@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
       - uses: astral-sh/setup-uv@v5
         if: hashFiles('pyproject.toml') != ''
         with:
@@ -56,6 +58,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
       - run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v3
         if: hashFiles('deploy/Dockerfile') != ''

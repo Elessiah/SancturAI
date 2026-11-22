@@ -231,6 +231,7 @@ def test_dockerfile_matches_compose_and_ci() -> None:
     uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)", df)
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert uv is not None and f'version: "{uv.group(1)}"' in ci
+    assert ci.count("persist-credentials: false") == ci.count("actions/checkout@") == 2  # S1
     assert "cache-from: type=gha" in ci and "cache-to: type=gha,mode=max" in ci
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
     for entry in (".git", ".venv", "tests", "deploy", "relay", "*.env", ".env"):
