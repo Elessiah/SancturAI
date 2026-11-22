@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -307,6 +308,38 @@ def test_relay_role_has_only_column_level_update(conn: psycopg.Connection, rconn
                  "INSERT INTO outbox (kind, payload) VALUES ('log', '{}')"):
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             rconn.execute(stmt)  # type: ignore[call-overload]
+
+
+def test_relay_works_with_deploy_grants_only(conn: psycopg.Connection) -> None:
+    """Droits réels de prod (extraits de deploy.sh) : bail, envoi, échec et abandon passent, kind/payload restent intouchables."""
+    sh = (ROOT / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    m = re.search(r'-c "(REVOKE UPDATE ON outbox FROM relay;[^"]*)"', sh)
+    assert m is not None
+    grants = m.group(1).replace(" relay;", " relay_deploy;").replace(" relay ", " relay_deploy ")
+    assert "relay_deploy" in grants and " relay" not in grants.replace("relay_deploy", "")
+    conn.execute("TRUNCATE outbox")
+    conn.execute("DROP ROLE IF EXISTS relay_deploy")
+    conn.execute("CREATE ROLE relay_deploy LOGIN PASSWORD 'relay-test-pw'")
+    conn.execute(grants)  # type: ignore[arg-type]
+    for text in ("ok", "fail", "bad"):
+        _insert(conn, "log", {"text": text})
+    _insert(conn, "agent_message", {"text": "x"})  # hors contrat (short_id/agent absents) : abandon
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response({"ok": 200, "fail": 503, "bad": 400}[json.loads(request.content)["text"]])
+
+    try:
+        with psycopg.connect(conn.info.dsn, user="relay_deploy", password="relay-test-pw", autocommit=True) as rc:
+            with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+                assert process_batch(rc, http, "http://bot/notify", "tok") == 4
+            for column in ("payload = '{}'", "kind = 'log'"):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    rc.execute(f"UPDATE outbox SET {column}")  # type: ignore[call-overload]  # noqa: S608
+        rows = conn.execute("SELECT kind, sent_at IS NOT NULL, attempts FROM outbox ORDER BY id").fetchall()
+        assert rows == [("log", True, 0), ("log", False, 1), ("log", False, MAX_ATTEMPTS), ("agent_message", False, MAX_ATTEMPTS)]
+    finally:
+        conn.execute("DROP OWNED BY relay_deploy")
+        conn.execute("DROP ROLE relay_deploy")
 
 
 @pytest.mark.parametrize("token", [None, "", "  "])
