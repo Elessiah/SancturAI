@@ -7,5 +7,9 @@ CPUWeight=20
 CPUQuota=150%
 MemoryHigh=1.2G
 MemoryMax=1.5G
+# Au-delà de MemoryHigh : ralenti puis tué (OOM dans la tranche), jamais paginé sur le swap partagé de l'hôte.
+MemorySwapMax=0
+# IOWeight n'agit que si l'ordonnanceur du disque est BFQ (cat /sys/block/mmcblk0/queue/scheduler) ;
+# avec mq-deadline (défaut sur la carte SD du Pi) il est sans effet : voir setup.md §3.
 IOWeight=20
 TasksMax=512

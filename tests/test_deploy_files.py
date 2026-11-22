@@ -3,13 +3,36 @@ import subprocess
 from pathlib import Path
 
 import yaml
+from starlette.responses import JSONResponse
 
 from app.config import Settings
-from app.middleware import MCP_BODY_BYTES, body_cap
+from app.middleware import DEFAULT_BODY_BYTES, body_cap, too_large_error
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 DOMAIN = "sancturai.bluegenji-esport.fr"
+DATA = "/srv/sancturai-data"
+
+
+def text(*parts: str) -> str:
+    return ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+
+def setup_doc() -> str:
+    return text("docs", "ops", "setup.md")
+
+
+def nginx_size(value: str) -> int:
+    units = {"k": 1024, "m": 1024 * 1024}
+    return int(value[:-1]) * units[value[-1]] if value[-1] in units else int(value)
+
+
+def named_return(locs: list[str], name: str) -> tuple[int, str]:
+    """Statut et corps (échappements nginx \\' retirés) du `return` de la location nommée."""
+    loc = next(b for b in locs if b.lstrip().startswith(f"location {name} "))
+    m = re.search(r"return (\d{3}) '((?:[^'\\]|\\.)*)';", loc)
+    assert m is not None, name
+    return int(m.group(1)), re.sub(r"\\(.)", r"\1", m.group(2))
 
 
 def compose() -> dict:  # type: ignore[type-arg]
@@ -86,9 +109,7 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     # la ligne de requête (URI vault), dès que le socket de l'app est absent (redémarrage)
     assert "error_log /var/log/nginx/sancturai.error.log alert" in conf
     assert re.search(r"error_log\s+\S+\s+(debug|info|notice|warn|error|crit);", conf) is None
-    # revue batch 1, M13 : 5 Mo de texte non ASCII échappé en JSON (\uXXXX) dépasse 8 Mo
-    assert "client_max_body_size 16m;" in conf
-    assert "error_page 413 = @sancturai_413;" in conf and '"error":"QUOTA_EXCEEDED"' in conf
+    assert "error_page 413 = @sancturai_413;" in conf
     # flux SSE longs : plafond de connexions par IP (worker_connections est partagé avec les autres sites)
     public = next(b for b in blocks(conf, "location") if b.lstrip().startswith("location / "))
     assert "limit_conn sancturai_conn 20;" in public and "limit_conn_status 429;" in public
@@ -97,8 +118,11 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     assert "limit_conn_zone $server_name zone=sancturai_total:1m;" in conf
     assert "limit_conn sancturai_total 256;" in public
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text(encoding="utf-8")
-    for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
-        assert line in sl
+    for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20",
+                 "MemorySwapMax=0"):  # revue batch 6, m6 : jamais de pagination sur le swap partagé
+        assert line in sl.splitlines(), line
+    for name, svc in compose()["services"].items():
+        assert svc["memswap_limit"] == svc["mem_limit"], name
 
 
 def test_nginx_never_logs_uri() -> None:
@@ -142,7 +166,7 @@ def test_nginx_tls_and_redirect_match_certbot() -> None:
         assert line in tls[0], line
     # http2 est activé globalement (conf.d) ; ipv6only=on ne peut figurer qu'une fois sur le serveur
     assert "http2" not in conf and "ipv6only" not in conf
-    assert "client_max_body_size 16m;" in tls[0] and "location /internal/" in tls[0]
+    assert "location /internal/" in tls[0]
 
 
 def test_nginx_security_headers_wherever_add_header() -> None:
@@ -167,11 +191,15 @@ def test_nginx_local_listener_only_internal() -> None:
     assert "proxy_set_header X-Real-IP $remote_addr;" in proxied[0]
     assert 'proxy_set_header X-Forwarded-For "";' in proxied[0]
     assert any(loc.lstrip().startswith("location / ") and "return 404" in loc for loc in locs)
+    # revue batch 6, m5 : app en redémarrage → JSON §9.2 pour le bot aussi, pas la page 502 HTML
+    assert "error_page 502 504 = @sancturai_busy;" in srv
+    assert named_return(locs, "@sancturai_busy")[0] == 503
+    assert "client_max_body_size 64k;" in srv
 
 
 def test_nginx_json_errors() -> None:
     conf = nginx()
-    assert "message\":\"request body larger than 16 MiB\"" in conf
+    assert "QUOTA_EXCEEDED" not in conf  # revue batch 6, m4 : même code que l'app pour un corps trop gros
     assert "limit_req_status 429;" in conf and "error_page 429 = @sancturai_429;" in conf
     assert '"error":"RATE_LIMITED"' in conf
     assert "error_page 502 504 = @sancturai_busy;" in conf and '"error":"SERVER_BUSY"' in conf
@@ -231,7 +259,7 @@ def test_dockerfile_matches_compose_and_ci() -> None:
     uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)", df)
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert uv is not None and f'version: "{uv.group(1)}"' in ci
-    assert ci.count("persist-credentials: false") == ci.count("actions/checkout@") == 2  # S1
+    assert ci.count("persist-credentials: false") == ci.count("actions/checkout@") == 3  # S1
     assert "cache-from: type=gha" in ci and "cache-to: type=gha,mode=max" in ci
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
     for entry in (".git", ".venv", "tests", "deploy", "relay", "*.env", ".env"):
@@ -240,18 +268,28 @@ def test_dockerfile_matches_compose_and_ci() -> None:
 
 def test_relay_unit() -> None:
     unit = (DEPLOY / "systemd" / "sancturai-relay.service").read_text(encoding="utf-8")
-    for line in ("Slice=sancturai.slice", "User=elessiah", "NoNewPrivileges=yes", "ProtectSystem=strict",
-                 "EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env", "MemoryMax=128M"):
-        assert line in unit, line
-    # §4.1 : le relais ne joint que la boucle locale (bot) et le socket Postgres
     lines = unit.splitlines()
-    for line in ("IPAddressDeny=any", "IPAddressAllow=localhost", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-                 "CapabilityBoundingSet=", "Environment=UV_OFFLINE=1"):
+    for line in ("Slice=sancturai.slice", "NoNewPrivileges=yes", "ProtectSystem=strict",
+                 "EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env", "MemoryMax=128M"):
         assert line in lines, line
-    # /home masqué (clés SSH, secrets et code des autres services) ; seuls uv et le relais sont remontés
+    # revue batch 6, I4 : compte système dédié (ni sudo ni shell), venv du relais exécuté directement : ni uv ni
+    # cache partagé inscriptible ; tout ce qui est remonté l'est en lecture seule
+    assert "User=sancturai-relay" in lines and "User=elessiah" not in unit
+    assert "ExecStart=/home/elessiah/apps/SancturAI/relay/.venv/bin/python relay.py" in lines
+    assert "uv" not in re.sub(r"#[^\n]*", "", unit).replace("UMask", "")
+    assert "BindReadOnlyPaths=/home/elessiah/apps/SancturAI/relay" in lines
+    assert not any(line.startswith(("BindPaths=", "ReadWritePaths=")) for line in lines)
+    # §4.1 : le relais ne joint que la boucle locale (bot) et le socket Postgres
+    for line in ("IPAddressDeny=any", "IPAddressAllow=localhost", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+                 "CapabilityBoundingSet=", "SystemCallFilter=@system-service", "ProtectProc=invisible",
+                 "UMask=0077", "MemoryDenyWriteExecute=yes"):
+        assert line in lines, line
+    # /home masqué (clés SSH, secrets et code des autres services) ; seul le relais est remonté
     assert "ProtectHome=tmpfs" in lines and "ProtectHome=read-only" not in unit
-    assert "BindPaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv" in lines
-    assert not any(line.startswith(("ReadWritePaths=", "Bind")) and ".secrets" in line for line in lines)
+    assert not any(line.startswith("Bind") and ".secrets" in line for line in lines)
+    doc = setup_doc()
+    assert "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sancturai-relay" in doc
+    assert "uv sync --frozen --no-dev --python /usr/bin/python3" in doc
     tmp = (DEPLOY / "tmpfiles" / "sancturai.conf").read_text(encoding="utf-8")
     assert "d /run/sancturai 2770 10001 www-data -" in tmp
 
@@ -278,35 +316,134 @@ def test_setup_doc_fits_existing_vhost() -> None:
     assert "socket.getaddrinfo('example.com', 443)" in doc  # DNS externe en échec (§7)
 
 
-def test_scripts_are_executable_in_git() -> None:
-    out = subprocess.run(  # noqa: S603
-        ["git", "ls-files", "-s", "deploy/deploy.sh", "deploy/postgres/init/01-roles.sh"],  # noqa: S607
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.splitlines()
-    assert len(out) == 2 and all(line.startswith("100755") for line in out), out
-
-
-def test_nginx_mcp_body_cap_matches_app() -> None:
-    """Revue batch 4 : nginx refuse un corps MCP trop gros avant l'app, au même plafond que BodyLimitMiddleware."""
+def test_nginx_body_caps_match_app() -> None:
+    """Revue batch 6, I1 : chaque plafond nginx = celui de BodyLimitMiddleware pour la route, et le corps renvoyé
+    est octet pour octet celui de l'app (même code, statut, message et conseil : revue batch 6, m4)."""
     conf = nginx()
     tls = next(s for s in blocks(conf, "server") if "listen 443 ssl;" in s)
     locs = blocks(tls, "location")
-    public = next(b for b in locs if b.lstrip().startswith("location / "))
-    mcp = next(b for b in locs if b.lstrip().startswith("location ~ ^/mcp(/|$) "))
-    assert f"client_max_body_size {MCP_BODY_BYTES // 1024}k;" in mcp
-    assert body_cap("POST", "/mcp/") == MCP_BODY_BYTES == 256 * 1024
-    assert body_cap("PUT", "/api/vault/a.md") == 16 * 1024 * 1024  # = client_max_body_size 16m du serveur
+    server_level = re.sub(r"(?s)\n\s*location .*", "", tls)  # directives avant le premier bloc location
+    assert f"client_max_body_size {DEFAULT_BODY_BYTES // 1024}k;" in server_level
+    # corps en attente sur le volume borné de 20 Go (jamais la racine partagée), lecture lente coupée vite
+    assert f"client_body_temp_path {DATA}/nginx-body;" in server_level
+    assert "client_body_timeout 15s;" in server_level
 
     def directives(block: str) -> set[str]:
         return {line.strip() for line in block.lstrip().splitlines()[1:] if line.strip() and line.strip() != "}"}
 
-    # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` : seuls le plafond et les error_page diffèrent
-    extra = directives(mcp) - directives(public)
-    assert directives(public) <= directives(mcp)
-    assert extra == {f"client_max_body_size {MCP_BODY_BYTES // 1024}k;", "error_page 413 = @sancturai_mcp_413;",
-                     "error_page 429 = @sancturai_429;", "error_page 502 504 = @sancturai_busy;"}
-    # un error_page local remplace TOUS ceux hérités du serveur : 429 et 502/504 sont redéclarés ci-dessus
-    named = next(b for b in locs if b.lstrip().startswith("location @sancturai_mcp_413 "))
-    assert "include snippets/security-headers.conf;" in named and "add_header Cache-Control no-store always;" in named
-    assert '"error":"QUOTA_EXCEEDED"' in named and "request body larger than 256 KiB" in named
-    assert "PUT /api/vault/" in named  # même conseil que l'app (MCP_TOO_LARGE_HINT)
+    def app_body(method: str, path: str) -> tuple[int, str]:
+        err = too_large_error(body_cap(method, path), path)
+        return err.status, JSONResponse(err.to_dict()).body.decode()
+
+    assert named_return(locs, "@sancturai_413") == app_body("POST", "/api/login")
+    public = next(b for b in locs if b.lstrip().startswith("location / "))
+    routes = [("location ^~ /api/vault/ ", "PUT", "/api/vault/a.md"),
+              ("location ^~ /api/forum/ ", "POST", "/api/forum/threads"),
+              ("location ~ ^/mcp(/|$) ", "POST", "/mcp/")]
+    assert {body_cap(m, p) for _, m, p in routes} | {DEFAULT_BODY_BYTES} == {
+        16 * 1024 * 1024, 128 * 1024, 256 * 1024, 64 * 1024}
+    for opener, method, path in routes:
+        loc = next(b for b in locs if b.lstrip().startswith(opener))
+        size = re.search(r"client_max_body_size (\w+);", loc)
+        assert size is not None and nginx_size(size.group(1)) == body_cap(method, path), opener
+        handler = re.search(r"error_page 413 = (@\w+);", loc)
+        assert handler is not None and named_return(locs, handler.group(1)) == app_body(method, path), opener
+        # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` ; un error_page local remplace TOUS ceux
+        # hérités du serveur : 429 et 502/504 sont redéclarés
+        assert directives(public) <= directives(loc), opener
+        assert directives(loc) - directives(public) == {
+            size.group(0), handler.group(0), "error_page 429 = @sancturai_429;",
+            "error_page 502 504 = @sancturai_busy;"}, opener
+    for loc in locs:
+        if re.match(r"\s*location @sancturai_\w*413 ", loc):
+            assert "include snippets/security-headers.conf;" in loc and "add_header Cache-Control no-store always;" in loc
+
+
+def deploy_sh() -> str:
+    return (DEPLOY / "deploy.sh").read_text(encoding="utf-8")
+
+
+def test_deploy_script_is_serialised_and_checks_prerequisites() -> None:
+    sh = deploy_sh()
+    first_change = sh.index("docker compose pull")
+    # revue batch 6, m1 : deux déploiements simultanés ne s'entremêlent pas
+    assert "exec 9>/run/lock/sancturai-deploy.lock" in sh and "flock -n 9" in sh
+    assert sh.index("flock -n 9") < first_change
+    # revue batch 6, I5 : nginx doit réellement écouter 127.0.0.1:8300 (nginx -t ne lie aucun socket)
+    assert "ss -ltnpH 'sport = :8300'" in sh and sh.index("sport = :8300") < first_change
+    # revue batch 6, m2 : référence `dépôt:étiquette` (un digest @sha256 donnerait une image invalide)
+    assert "^[^@]+:[^/:]+$" in sh
+    # revue batch 6, m12 : fichiers de secrets lisibles (sinon l'app retomberait sur les valeurs par défaut)
+    assert "\nsecrets=/home/elessiah/apps/.secrets\n" in sh
+    for name in ("sancturai-db.env", "sancturai.env", "sancturai-relay.env"):
+        assert f'"${{secrets}}/{name}"' in sh, name
+    assert '[ -r "${f}" ]' in sh and sh.index('[ -r "${f}" ]') < first_change
+
+
+def test_deploy_script_backs_up_and_rolls_back() -> None:
+    sh = deploy_sh()
+    # revue batch 6, I2 : sauvegarde juste avant la migration
+    assert sh.index('./backup.sh "pre-') < sh.index("alembic upgrade head")
+    # revue batch 6, I3 : .env réécrit seulement après un healthcheck réussi ; échec → retour à l'image précédente
+    health = sh.index("--unix-socket /run/sancturai/app.sock")
+    assert sh.index("sed -i") > health
+    assert "SANCTURAI_PREVIOUS_IMAGE" in sh
+    assert 'SANCTURAI_IMAGE="${current_image}" docker compose up -d --pull never app' in sh
+    assert sh.index("--pull never") > health
+
+
+def test_backup_script_and_timer() -> None:
+    sh = (DEPLOY / "backup.sh").read_text(encoding="utf-8")
+    assert sh.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in sh
+    assert "umask 077" in sh and f"install -d -m 700 {DATA}/backups" in sh
+    assert "pg_dump -U postgres -Fc" in sh and "mountpoint -q" in sh
+    assert "tail -n +8" in sh  # les 7 plus récentes sont gardées
+    # même seuil que la garde disque de l'app : une sauvegarde n'affame jamais l'hôte
+    pct = re.search(r"max_used_pct=(\d+)", sh)
+    assert pct is not None and int(pct.group(1)) == round(Settings.model_fields["disk_busy_ratio"].default * 100)
+    assert ".tmp" in sh and "mv " in sh  # écrite à part puis renommée : jamais de sauvegarde tronquée retenue
+    svc = (DEPLOY / "systemd" / "sancturai-backup.service").read_text(encoding="utf-8").splitlines()
+    for line in ("Type=oneshot", "ExecStart=/home/elessiah/apps/SancturAI/deploy/backup.sh daily",
+                 "Nice=19", "IOSchedulingClass=idle"):
+        assert line in svc, line
+    timer = (DEPLOY / "systemd" / "sancturai-backup.timer").read_text(encoding="utf-8").splitlines()
+    assert "Persistent=true" in timer and any(line.startswith("OnCalendar=") for line in timer)
+    doc = setup_doc()
+    assert "sancturai-backup.timer" in doc and "pg_restore" in doc and "--single-transaction" in doc
+
+
+def test_scripts_are_executable_in_git() -> None:
+    files = ["deploy/backup.sh", "deploy/deploy.sh", "deploy/postgres/init/01-roles.sh"]
+    out = subprocess.run(  # noqa: S603
+        ["git", "ls-files", "-s", *files],  # noqa: S607
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert len(out) == len(files) and all(line.startswith("100755") for line in out), out
+
+
+def test_setup_doc_operational_checks() -> None:
+    doc = setup_doc()
+    # I5 : port libre avant l'activation, nginx à l'écoute après le rechargement
+    assert "ss -ltnH 'sport = :8300'" in doc and "ss -ltnpH 'sport = :8300'" in doc
+    assert doc.index("ss -ltnH 'sport = :8300'") < doc.index("sudo nginx -t && sudo systemctl reload nginx")
+    assert doc.index("sudo nginx -t && sudo systemctl reload nginx") < doc.index("ss -ltnpH 'sport = :8300'")
+    # I1 : dossier des corps en attente sous le point de montage ET dans l'image (nginx démarre même sans l'image)
+    assert doc.count(f"install -d -o www-data -g www-data -m 700 {DATA}/nginx-body") == 2
+    assert doc.index(f"{DATA}/nginx-body") < doc.index("sudo chattr +i /srv/sancturai-data")
+    # m9, m10, m11
+    assert doc.index("df -h /srv") < doc.index("fallocate -l 20G")
+    assert "docker login ghcr.io" in doc
+    assert "certbot renew --dry-run" in doc and "/etc/nginx/snippets/security-headers.conf" in doc
+    assert "2.24" in doc and "502" not in doc
+    # I3 : retour arrière documenté
+    assert "Retour arrière" in doc
+
+
+def test_ci_builds_image_on_pull_requests() -> None:
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    # revue batch 6, m13 : un push rapide sur main n'annule pas la publication de l'image du précédent
+    assert ci["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/main' }}"
+    build = ci["jobs"]["build"]
+    assert build["if"] == "github.event_name == 'pull_request'"
+    step = next(s for s in build["steps"] if s.get("uses", "").startswith("docker/build-push-action"))
+    assert step["with"]["push"] is False and step["with"]["platforms"] == "linux/amd64"

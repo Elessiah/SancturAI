@@ -35,6 +35,7 @@ services:
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     mem_limit: 512m
+    memswap_limit: 512m  # = mem_limit : aucun swap (le swap et la carte SD de l'hôte servent d'abord aux autres services)
     cpus: 0.5
     pids_limit: 128
     healthcheck:
@@ -57,6 +58,7 @@ services:
     volumes:
       - /run/sancturai:/run/sancturai
       - /srv/sancturai-data:/data:ro
+    memswap_limit: 896m  # = mem_limit : aucun swap
     mem_limit: 896m  # budget tranche : db 512m + app 896m + relais 128M = 1,5G = MemoryMax de sancturai.slice
     cpus: 1.0
     pids_limit: 256

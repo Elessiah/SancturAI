@@ -9,7 +9,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # sur main, un push rapide n'annule pas la publication de l'image du précédent (son SHA resterait sans image)
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Les étapes sont conditionnées à l'existence des fichiers : la CI reste verte tant que le code
 # des tâches correspondantes n'est pas encore écrit (Task 1 : pyproject, Task 17 : relay, Task 19 : Dockerfile).
@@ -47,6 +48,25 @@ jobs:
         if: hashFiles('relay/pyproject.toml') != ''
         working-directory: relay
         run: uv run pytest -q
+
+  # PR : l'image est construite (amd64, sans publication) pour qu'un Dockerfile cassé ne soit pas découvert après fusion
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
+      - uses: docker/setup-buildx-action@v3
+        if: hashFiles('deploy/Dockerfile') != ''
+      - uses: docker/build-push-action@v6
+        if: hashFiles('deploy/Dockerfile') != ''
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: false
 
   image:
     needs: test

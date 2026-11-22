@@ -2,7 +2,7 @@
 
 Prérequis : accès SSH au serveur avec l'utilisateur `elessiah`, sudo (elessiah n'est pas dans le groupe
 `docker` : toutes les commandes Docker passent par `sudo`). Rien ici ne modifie les autres sites ni les
-autres services.
+autres services. Docker Compose ≥ 2.24 (syntaxe `env_file: path/required`) : `sudo docker compose version`.
 
 Déjà fait : DNS `sancturai.bluegenji-esport.fr` → serveur, vhost provisoire (503 JSON) activé et
 certificat Let's Encrypt émis par certbot. Le vhost de l'étape 4 **remplace** ce vhost provisoire.
@@ -22,11 +22,27 @@ chmod 600 ~/apps/.secrets/sancturai*.env ~/apps/SancturAI/deploy/.env
 `SANCTURAI_BOT_TOKEN` (relais) = `INTERNAL_API_TOKEN` du bot. `SANCTURAI_INTERNAL_TOKEN` (app) est un
 nouveau secret, partagé avec le bot à l'étape 5.
 
+Image : la CI publie `ghcr.io/<compte>/sancturai:<SHA>` ; un nouveau paquet GHCR est **privé**. Soit le rendre
+public (GitHub → Packages → sancturai → Package settings → Change visibility), soit autoriser le Pi :
+`sudo docker login ghcr.io -u <compte>` avec un jeton `read:packages` (jamais committé). Sans l'un des deux,
+`docker compose pull` échoue (sans rien casser).
+
 ## 2. Volume disque de taille fixe (20 Go)
 ```bash
+# Marge d'abord : après les 20 Go, la partition doit garder au moins 10 Go libres pour les autres services.
+df -h /srv
+[ "$(df --output=avail -B1G /srv | tail -n 1)" -ge 30 ] && echo 'OK : place suffisante' || echo 'MANQUE DE PLACE : ne pas continuer'
 sudo fallocate -l 20G /srv/sancturai-data.img
 sudo mkfs.ext4 -L sancturai /srv/sancturai-data.img
 sudo mkdir -p /srv/sancturai-data
+# Corps de requête en attente de nginx (client_body_temp_path du vhost) : ce dossier existe sous le point de
+# montage (racine) pour que nginx, et donc tous les sites, démarre même si l'image n'est pas montée ; une fois
+# l'image montée, c'est celui de l'image (créé plus bas) qui reçoit les corps, dans les 20 Go.
+sudo install -d -o www-data -g www-data -m 700 /srv/sancturai-data/nginx-body
+# (nginx refuse de démarrer s'il ne peut pas créer ce dossier. Image déjà montée par une installation antérieure :
+#  sudo mkdir -p /mnt/racine && sudo mount --bind / /mnt/racine && sudo chattr -i /mnt/racine/srv/sancturai-data
+#  sudo install -d -o www-data -g www-data -m 700 /mnt/racine/srv/sancturai-data/nginx-body
+#  sudo chattr +i /mnt/racine/srv/sancturai-data && sudo umount /mnt/racine)
 # Point de montage immuable : si l'image n'est pas montée, Docker ne peut pas y recréer pg/ sur la
 # partition racine (les conteneurs refusent de démarrer au lieu d'initialiser une base vide).
 sudo chattr +i /srv/sancturai-data
@@ -48,19 +64,25 @@ sudo install -d -o 70 -g 70 -m 700 /srv/sancturai-data/pg
 # donc 70:70 0770 ; seul le relais l'ouvre, par SupplementaryGroups=sancturai-pg de son unité systemd
 # (n'ajouter aucun compte à ce groupe).
 sudo install -d -o 70 -g 70 -m 770 /srv/sancturai-data/pg-socket
+sudo install -d -o www-data -g www-data -m 700 /srv/sancturai-data/nginx-body   # dans l'image cette fois
 df -h /srv/sancturai-data   # ~20G
 ```
 
-## 3. Slice, socket et relais
-Budget mémoire de la tranche (`MemoryMax=1.5G`) : db 512m + app 896m + relais 128M = 1,5G ; le reste du serveur reste prioritaire.
+## 3. Slice, socket, relais et sauvegardes
+Budget mémoire de la tranche (`MemoryMax=1.5G`, sans swap) : db 512m + app 896m + relais 128M = 1,5G ; le reste du serveur reste prioritaire.
 ```bash
+# Compte système du relais : ni shell, ni sudo, ni répertoire personnel ; seul groupe ajouté : sancturai-pg (unité).
+getent passwd sancturai-relay >/dev/null || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sancturai-relay
 sudo cp ~/apps/SancturAI/deploy/systemd/sancturai.slice /etc/systemd/system/
 sudo cp ~/apps/SancturAI/deploy/systemd/sancturai-relay.service /etc/systemd/system/
+sudo cp ~/apps/SancturAI/deploy/systemd/sancturai-backup.service ~/apps/SancturAI/deploy/systemd/sancturai-backup.timer /etc/systemd/system/
 sudo cp ~/apps/SancturAI/deploy/tmpfiles/sancturai.conf /etc/tmpfiles.d/
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/sancturai.conf
 sudo systemctl daemon-reload
 sudo docker info --format '{{.CgroupDriver}}'   # doit afficher "systemd" (sinon cgroup_parent ne s'applique pas)
-command -v uv                                   # doit afficher /home/elessiah/.local/bin/uv (ExecStart du relais)
+# IOWeight=20 de la tranche n'agit qu'avec l'ordonnanceur BFQ ; avec mq-deadline (défaut d'une carte SD) il est sans
+# effet et seules les limites CPU/mémoire protègent les autres services.
+cat /sys/block/$(lsblk -no pkname "$(findmnt -no source /srv)")/queue/scheduler
 sudo docker network inspect $(sudo docker network ls -q) -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' \
   | grep -F 172.31.250. && echo 'CONFLIT : changer le sous-réseau (compose + pg_hba)' || echo 'OK : 172.31.250.0/24 libre'
 ```
@@ -69,14 +91,30 @@ sudo docker network inspect $(sudo docker network ls -q) -f '{{.Name}} {{range .
 Le fichier contient déjà les lignes TLS de certbot (mêmes chemins de certificat), la redirection
 80 → 443 et l'unique définition de `log_format sancturai_nouri`. Ne pas relancer `certbot` en mode
 installation : il réécrirait le fichier. Le renouvellement automatique (`certbot renew`) n'est pas concerné.
+
+`nginx -t` ne lie aucun socket : si 127.0.0.1:8300 est déjà pris, le rechargement « réussit » mais nginx garde
+l'ancienne configuration, puis refuse de démarrer au prochain redémarrage — **tous les sites tombent**. D'où les
+deux vérifications ci-dessous (deploy.sh refuse aussi de déployer si nginx n'écoute pas sur ce port).
 ```bash
+# Avant : le port doit être libre, sinon ne pas continuer.
+sudo ss -ltnH 'sport = :8300' | grep -q . && echo 'CONFLIT : 127.0.0.1:8300 déjà pris, ne pas continuer' || echo 'OK : 8300 libre'
+ls -l /etc/nginx/snippets/security-headers.conf   # inclus par le vhost : doit exister
 sudo cp /etc/nginx/sites-available/sancturai.bluegenji-esport.fr /root/sancturai-placeholder.conf.bak
 sudo install -m 644 ~/apps/SancturAI/deploy/nginx/sancturai.conf /etc/nginx/sites-available/sancturai.bluegenji-esport.fr
 ls -l /etc/nginx/sites-enabled/sancturai.bluegenji-esport.fr   # lien déjà présent (vhost provisoire)
 sudo nginx -t && sudo systemctl reload nginx
+# Après : nginx doit écouter sur 8300, sans erreur bind() ; sinon restaurer la sauvegarde (ci-dessous).
+sleep 2; sudo ss -ltnpH 'sport = :8300' | grep -q '"nginx"' && echo 'OK : nginx écoute sur 8300' || echo 'ERREUR : nginx absent de 8300'
+sudo journalctl -u nginx --since -2min | grep -i bind
+sudo certbot renew --dry-run   # le renouvellement passe toujours par ce vhost
 ```
-En cas d'échec de `nginx -t` : `sudo cp /root/sancturai-placeholder.conf.bak /etc/nginx/sites-available/sancturai.bluegenji-esport.fr`
-(rien n'est rechargé tant que `nginx -t` échoue). Jusqu'au premier déploiement, le site répond 502.
+En cas d'échec : `sudo cp /root/sancturai-placeholder.conf.bak /etc/nginx/sites-available/sancturai.bluegenji-esport.fr`
+puis `sudo nginx -t && sudo systemctl reload nginx` (rien n'est rechargé tant que `nginx -t` échoue). Jusqu'au
+premier déploiement, le site répond 503 (JSON `SERVER_BUSY`).
+
+Plafonds de corps (identiques à ceux de l'app, même JSON en cas de dépassement) : 16 Mio sous `/api/vault/`,
+128 Kio sous `/api/forum/`, 256 Kio pour `/mcp`, 64 Kio ailleurs. Les corps en attente sont écrits dans
+`/srv/sancturai-data/nginx-body` (volume de 20 Go), jamais sur la racine.
 
 Plafonds de connexions du vhost : 20 par IP et 256 au total (requêtes en cours, flux SSE compris). Le
 plafond total est voulu : un client IPv6 qui change d'adresse dans son /64, ou un afflux d'agents, sature
@@ -93,13 +131,53 @@ ce qui protège les autres sites. Vérifier qu'il reste de la marge :
 ```bash
 # Image épinglée : SHA complet du commit de main dont la CI a publié l'image (ghcr …/sancturai:<SHA>)
 cd ~/apps/SancturAI && sudo deploy/deploy.sh "$(git rev-parse HEAD)"
-cd relay && uv sync --frozen --no-dev && uv cache dir   # doit afficher /home/elessiah/.cache/uv (BindPaths du relais)
+# venv du relais sur le Python système (3.13 sur Debian 13) : le service l'exécute directement, sans uv.
+cd relay && rm -rf .venv && UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --python /usr/bin/python3
+readlink -f .venv/bin/python                   # /usr/bin/python3.13 (hors de /home : visible du service)
+find . ! -perm -o=r -print                     # aucune ligne : le compte sancturai-relay doit tout pouvoir lire
 sudo systemctl enable --now sancturai-relay
+sudo systemctl enable --now sancturai-backup.timer   # sauvegarde quotidienne (voir « Sauvegardes »)
 cd ../deploy && sudo docker compose exec app sancturai create-founder <pseudo>   # affiche la phrase
 ```
 Déploiements suivants : `cd ~/apps/SancturAI && git pull && sudo deploy/deploy.sh "$(git rev-parse HEAD)"`
-(puis `sudo systemctl restart sancturai-relay` si `relay/` a changé, après `uv sync --frozen --no-dev`).
-deploy.sh réécrit `SANCTURAI_IMAGE` dans `deploy/.env` : les commandes `docker compose` manuelles visent l'image déployée.
+(puis, si `relay/` a changé : `cd relay && uv sync --frozen --no-dev --python /usr/bin/python3 && sudo systemctl restart sancturai-relay`).
+deploy.sh :
+- refuse de démarrer si un autre déploiement tourne, si un fichier de secrets manque ou si nginx n'écoute pas sur 8300 ;
+- sauvegarde la base (`pre-<sha>`) juste avant `alembic upgrade head` ;
+- ne réécrit `SANCTURAI_IMAGE` dans `deploy/.env` qu'après un healthcheck réussi (les commandes `docker compose`
+  manuelles visent alors l'image déployée) et garde l'image remplacée (`SANCTURAI_PREVIOUS_IMAGE`) ;
+- en cas d'échec du healthcheck, remet l'app sur l'image précédente et le signale (voir « Retour arrière »).
+
+## Sauvegardes et restauration
+`deploy/backup.sh` (minuteur quotidien `sancturai-backup.timer`, et deploy.sh avant chaque migration) écrit un
+`pg_dump` compressé dans `/srv/sancturai-data/backups/` (root, 0700 ; fichiers 0600), dans le volume de 20 Go, et
+garde les 7 plus récents. Il ne sauvegarde pas si le volume est plein à 85 % ou plus (seuil de la garde disque de
+l'app) : `systemctl status sancturai-backup` le signale. La base ne contient que des chiffrés et des empreintes,
+aucune phrase ni clé. Une copie hors du Pi est possible (`sudo scp`), à ranger hors de tout dépôt public.
+
+Restaurer (les données écrites depuis la sauvegarde sont perdues) :
+```bash
+cd ~/apps/SancturAI/deploy
+sudo ls -l /srv/sancturai-data/backups/
+sudo systemctl stop sancturai-relay && sudo docker compose stop app
+D="sudo docker compose exec -T -u postgres db"
+$D dropdb -U postgres sancturai
+$D psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE sancturai OWNER sancturai' \
+  -c 'REVOKE ALL ON DATABASE sancturai FROM PUBLIC' -c 'GRANT CONNECT ON DATABASE sancturai TO relay'
+sudo cat /srv/sancturai-data/backups/<fichier>.dump | $D pg_restore -U postgres -d sancturai --single-transaction --exit-on-error
+sudo docker compose up -d app && sudo systemctl start sancturai-relay   # image de deploy/.env
+```
+
+## Retour arrière
+- **Healthcheck en échec pendant un déploiement** : deploy.sh remet l'app sur l'image précédente (`deploy/.env`
+  n'a pas changé) et le notifie. Si la migration a modifié le schéma et que l'ancienne image ne démarre pas,
+  restaurer la sauvegarde `…-pre-<12 premiers caractères du sha>.dump` (ci-dessus) : la base revient au schéma de
+  l'image de `deploy/.env`.
+- **Revenir à la version précédente après un déploiement réussi** : `sudo deploy/deploy.sh <ancien sha>` suffit si
+  aucune migration n'a eu lieu entre-temps. Sinon l'ancienne image ne connaît pas la révision alembic courante et
+  s'arrête : restaurer d'abord la sauvegarde `…-pre-<12 premiers caractères du sha déployé>.dump`, puis
+  `sudo deploy/deploy.sh <ancien sha>` (l'image précédente, `SANCTURAI_PREVIOUS_IMAGE` dans `deploy/.env`, est
+  encore sur le Pi).
 
 ## 7. Vérifications
 ```bash
