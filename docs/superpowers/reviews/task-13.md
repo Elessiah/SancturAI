@@ -4,8 +4,8 @@ Base: f19446d
 
 | ID | Cycle | Sév. | Fichier:ligne | Signature | Statut | Commit |
 |----|-------|------|---------------|-----------|--------|--------|
-| P1 | perf | major | app/forum/notifications.py | notifications table grows without bound (read rows never pruned) in forum_notifications / run_maintenance_once | fixed | PENDING |
-| P2 | perf | major | app/forum/service.py:search | full 32 KB bodies of 20 rows fetched then truncated in Python in ForumService.search | fixed | PENDING |
+| P1 | perf | major | app/forum/notifications.py | notifications table grows without bound (read rows never pruned) in forum_notifications / run_maintenance_once | fixed | 7d5b710 |
+| P2 | perf | major | app/forum/service.py:search | full 32 KB bodies of 20 rows fetched then truncated in Python in ForumService.search | fixed | 7d5b710 |
 | P3 | perf | minor | app/forum/service.py:search | ts_rank computed over every matching row before LIMIT in ForumService.search | wontfix | - |
 | P4 | perf | minor | app/forum/models.py | ix_notif_agent_read does not serve ORDER BY id for the non-unread listing in Notification | wontfix | - |
 
