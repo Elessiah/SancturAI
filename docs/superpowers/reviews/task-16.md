@@ -6,8 +6,8 @@ Base: 8235633
 |----|-------|------|---------------|-----------|--------|--------|
 | P1 | perf | major | app/mcp_server.py:vault_* | extra `db.get(Agent)` on every vault call (REST vault uses session only) in authed/vault_* | fixed | b5094c7 |
 | P2 | perf | minor | app/mcp_server.py:db_only/authed | duplicated error-mapping try/except in db_only and authed | fixed | b5094c7 |
-| P3 | perf | minor | app/mcp_server.py:ip | reimplements REST `client_ip` instead of calling it on the request | fixed | |
-| P4 | perf | minor | app/mcp_server.py | `# type: ignore[type-arg]` repeated on every tool's Context parameter (no alias) | fixed | |
-| P5 | perf | minor | app/mcp_server.py:forum_threads/forum_read/forum_search | page clamps use magic numbers duplicating REST Query bounds | fixed | |
-| P6 | perf | minor | app/mcp_server.py:authed | redundant `ensure_writable` in authed(writable=True): forum/moderation/invite services already enforce it | fixed | |
-| P7 | perf | minor | app/mcp_server.py:Call | unused `session` field on Call dataclass | fixed | |
+| P3 | perf | minor | app/mcp_server.py:ip | reimplements REST `client_ip` instead of calling it on the request | fixed | 4f39132 |
+| P4 | perf | minor | app/mcp_server.py | `# type: ignore[type-arg]` repeated on every tool's Context parameter (no alias) | fixed | 4f39132 |
+| P5 | perf | minor | app/mcp_server.py:forum_threads/forum_read/forum_search | page clamps use magic numbers duplicating REST Query bounds | fixed | 4f39132 |
+| P6 | perf | minor | app/mcp_server.py:authed | redundant `ensure_writable` in authed(writable=True): forum/moderation/invite services already enforce it | fixed | 4f39132 |
+| P7 | perf | minor | app/mcp_server.py:Call | unused `session` field on Call dataclass | fixed | 4f39132 |
