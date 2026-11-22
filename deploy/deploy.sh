@@ -26,7 +26,8 @@ current_image=$(grep -E '^SANCTURAI_IMAGE=' .env | cut -d= -f2-) || true
 previous_image=$(grep -E '^SANCTURAI_PREVIOUS_IMAGE=' .env | cut -d= -f2-) || true
 export SANCTURAI_IMAGE="${current_image%:*}:${sha}"
 # nginx -t ne lie aucun socket : un port 8300 pris laisse l'ancienne configuration active (setup.md §4).
-ss -ltnpH 'sport = :8300' | grep -q '"nginx"' \
+# Substitution de processus plutôt qu'un tube : sous pipefail, grep -q qui s'arrête tôt ferait échouer ss (SIGPIPE).
+grep -q '"nginx"' < <(ss -ltnpH 'sport = :8300') \
   || { echo "nginx n'écoute pas sur 127.0.0.1:8300 (port pris par un autre processus ?) : voir setup.md §4" >&2; exit 1; }
 echo "image en service : ${current_image}"
 
@@ -42,6 +43,16 @@ notify() {
     --data-binary "${body}" >/dev/null || true
 }
 
+# Toute sortie imprévue (set -e) est signalée ; les échecs après la migration passent par le retour arrière plus bas.
+trap 'notify "deploy.sh ${sha:0:12} interrompu (ligne ${LINENO}) ; image en service : ${current_image}"' ERR
+
+fail_before_migration() {
+  local msg="Déploiement ${sha:0:12} interrompu avant la migration : $1 ; rien n'a changé (image ${current_image})."
+  notify "${msg}"
+  echo "${msg}" >&2
+  exit 1
+}
+
 healthy() {
   local _
   for _ in $(seq 1 30); do
@@ -53,23 +64,20 @@ healthy() {
 
 docker compose pull
 docker compose up -d --wait db
-# Sauvegarde juste avant la migration ; code 2 = ignorée (volume trop plein ou non monté) : on prévient et on continue.
-dump_rc=0
-./backup.sh "pre-${sha:0:12}" || dump_rc=$?
-if [ "${dump_rc}" -eq 2 ]; then
-  notify "Déploiement ${sha:0:12} : sauvegarde avant migration IGNORÉE (disque), aucun retour arrière possible après migration"
-elif [ "${dump_rc}" -ne 0 ]; then
-  echo "sauvegarde avant migration en échec : déploiement interrompu (rien n'a changé)" >&2
-  exit 1
-fi
+# Pas de migration sans sauvegarde : c'est elle, jamais `alembic downgrade`, qui garantit le retour arrière.
+./backup.sh "pre-${sha:0:12}" \
+  || fail_before_migration "sauvegarde pre-${sha:0:12} impossible (volume non monté, trop plein, ou erreur : voir ci-dessus)"
 docker compose run --rm --no-deps app alembic upgrade head
-# Le relais ne modifie que l'état d'envoi, jamais kind ni payload (le REVOKE retire un UPDATE global antérieur).
-docker compose exec -T -u postgres db psql -U postgres -d sancturai -v ON_ERROR_STOP=1 \
-  -c "REVOKE UPDATE ON outbox FROM relay; GRANT USAGE ON SCHEMA public TO relay; GRANT SELECT, UPDATE (sent_at, attempts, next_attempt_at) ON outbox TO relay;"
-docker compose up -d app
 
-# Le listener 127.0.0.1:8300 ne sert que /internal/* : le healthcheck interroge le socket de l'app.
-if healthy; then
+grants() {
+  # Le relais ne modifie que l'état d'envoi, jamais kind ni payload (le REVOKE retire un UPDATE global antérieur).
+  docker compose exec -T -u postgres db psql -U postgres -d sancturai -v ON_ERROR_STOP=1 \
+    -c "REVOKE UPDATE ON outbox FROM relay; GRANT USAGE ON SCHEMA public TO relay; GRANT SELECT, UPDATE (sent_at, attempts, next_attempt_at) ON outbox TO relay;"
+}
+
+# Droits, démarrage et healthcheck (le listener 8300 ne sert que /internal/* : le healthcheck interroge le socket
+# de l'app) : le moindre échec passe par le retour arrière ci-dessous, .env restant inchangé.
+if grants && docker compose up -d app && healthy; then
   if [ "${current_image}" != "${SANCTURAI_IMAGE}" ]; then
     # Les commandes `docker compose` manuelles (create-founder, urgence) visent désormais l'image déployée ;
     # l'image remplacée est gardée (retour arrière) et seule l'avant-dernière est supprimée (ciblée, jamais `prune`).
@@ -90,13 +98,17 @@ if healthy; then
 fi
 
 # Échec : .env n'a pas bougé ; l'app repart sur l'image précédente (déjà présente, jamais retéléchargée).
-echo "healthcheck en échec : retour à ${current_image}" >&2
+echo "déploiement en échec (droits, démarrage ou healthcheck) : retour à ${current_image}" >&2
 if SANCTURAI_IMAGE="${current_image}" docker compose up -d --pull never app && healthy; then
   state="retour à ${current_image} effectué"
+  # L'image ratée ne s'accumule pas sur la racine partagée : seules l'image en service et la précédente restent.
+  if [ "${SANCTURAI_IMAGE}" != "${current_image}" ] && [ "${SANCTURAI_IMAGE}" != "${previous_image}" ]; then
+    docker image rm "${SANCTURAI_IMAGE}" >/dev/null 2>&1 || true
+  fi
 else
   state="retour à ${current_image} ÉCHOUÉ, site indisponible"
 fi
-msg="Déploiement ÉCHOUÉ (healthcheck) : ${SANCTURAI_IMAGE} ; ${state}. Si la migration a changé le schéma, restaurer la sauvegarde pre-${sha:0:12} (setup.md, « Retour arrière »)."
+msg="Déploiement ÉCHOUÉ : ${SANCTURAI_IMAGE} ; ${state}. Si la migration a changé le schéma, restaurer la sauvegarde pre-${sha:0:12} (setup.md, « Retour arrière »)."
 notify "${msg}"
 echo "${msg}" >&2
 exit 1

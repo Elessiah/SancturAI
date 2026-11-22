@@ -324,9 +324,11 @@ def test_nginx_body_caps_match_app() -> None:
     locs = blocks(tls, "location")
     server_level = re.sub(r"(?s)\n\s*location .*", "", tls)  # directives avant le premier bloc location
     assert f"client_max_body_size {DEFAULT_BODY_BYTES // 1024}k;" in server_level
-    # corps en attente sur le volume borné de 20 Go (jamais la racine partagée), lecture lente coupée vite
-    assert f"client_body_temp_path {DATA}/nginx-body;" in server_level
-    assert "client_body_timeout 15s;" in server_level
+    # revue batch 6, N1 : aucun chemin de SancturAI dont dépendrait le démarrage de nginx (donc des autres sites) ;
+    # corps ≤ 64 Kio en mémoire, lecture lente coupée vite, envois au vault (sur disque) bornés à 2/IP et 8 au total
+    assert "client_body_temp_path" not in conf and "/srv/" not in re.sub(r"#[^\n]*", "", conf)
+    assert "client_body_buffer_size 64k;" in server_level and "client_body_timeout 15s;" in server_level
+    assert "limit_conn_zone $server_name zone=sancturai_vault_total:1m;" in conf
 
     def directives(block: str) -> set[str]:
         return {line.strip() for line in block.lstrip().splitlines()[1:] if line.strip() and line.strip() != "}"}
@@ -348,12 +350,16 @@ def test_nginx_body_caps_match_app() -> None:
         assert size is not None and nginx_size(size.group(1)) == body_cap(method, path), opener
         handler = re.search(r"error_page 413 = (@\w+);", loc)
         assert handler is not None and named_return(locs, handler.group(1)) == app_body(method, path), opener
-        # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` ; un error_page local remplace TOUS ceux
-        # hérités du serveur : 429 et 502/504 sont redéclarés
-        assert directives(public) <= directives(loc), opener
+        # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` (sauf le vault, plus strict) ; un error_page
+        # local remplace TOUS ceux hérités du serveur : 429 et 502/504 sont redéclarés
+        vault = opener.startswith("location ^~ /api/vault/")
+        stricter = {"limit_conn sancturai_conn 2;", "limit_conn sancturai_vault_total 8;"} if vault else set()
+        relaxed = {"limit_conn sancturai_conn 20;"} if vault else set()
+        assert directives(public) - relaxed <= directives(loc), opener
+        assert directives(public) & relaxed == relaxed and not relaxed & directives(loc), opener
         assert directives(loc) - directives(public) == {
             size.group(0), handler.group(0), "error_page 429 = @sancturai_429;",
-            "error_page 502 504 = @sancturai_busy;"}, opener
+            "error_page 502 504 = @sancturai_busy;", *stricter}, opener
     for loc in locs:
         if re.match(r"\s*location @sancturai_\w*413 ", loc):
             assert "include snippets/security-headers.conf;" in loc and "add_header Cache-Control no-store always;" in loc
@@ -382,8 +388,16 @@ def test_deploy_script_is_serialised_and_checks_prerequisites() -> None:
 
 def test_deploy_script_backs_up_and_rolls_back() -> None:
     sh = deploy_sh()
-    # revue batch 6, I2 : sauvegarde juste avant la migration
+    # revue batch 6, I2 : sauvegarde juste avant la migration ; m-N2 : sans sauvegarde, pas de migration
     assert sh.index('./backup.sh "pre-') < sh.index("alembic upgrade head")
+    assert "dump_rc" not in sh and "|| fail_before_migration" in sh
+    # m-N1 : grants ou `up -d app` en échec passent par le même retour arrière que le healthcheck ; ERR notifié
+    assert "trap 'notify" in sh and " ERR" in sh
+    assert re.search(r"if grants && docker compose up -d app && healthy; then", sh)
+    # m-N5 : l'image d'un déploiement raté est supprimée une fois le retour arrière sain
+    assert sh.count('docker image rm "${SANCTURAI_IMAGE}"') == 1
+    # m-N6 : pas de faux négatif par SIGPIPE sous pipefail
+    assert "< <(ss -ltnpH 'sport = :8300')" in sh
     # revue batch 6, I3 : .env réécrit seulement après un healthcheck réussi ; échec → retour à l'image précédente
     health = sh.index("--unix-socket /run/sancturai/app.sock")
     assert sh.index("sed -i") > health
@@ -397,10 +411,14 @@ def test_backup_script_and_timer() -> None:
     assert sh.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in sh
     assert "umask 077" in sh and f"install -d -m 700 {DATA}/backups" in sh
     assert "pg_dump -U postgres -Fc" in sh and "mountpoint -q" in sh
-    assert "tail -n +8" in sh  # les 7 plus récentes sont gardées
-    # même seuil que la garde disque de l'app : une sauvegarde n'affame jamais l'hôte
+    # m-N4 : rotation par étiquette : 7 quotidiennes, 3 d'avant migration (la sauvegarde d'un retour arrière survit)
+    assert "keep=7" in sh and "keep=3" in sh and 'tail -n +"$((keep + 1))"' in sh
+    assert "^(daily|pre-[0-9a-f]{12})$" in sh
+    # même seuil que la garde disque de l'app, taille de la base comprise (m-N3) : une sauvegarde n'affame jamais
+    # l'hôte ni Postgres (pg/ est sur le même volume)
     pct = re.search(r"max_used_pct=(\d+)", sh)
     assert pct is not None and int(pct.group(1)) == round(Settings.model_fields["disk_busy_ratio"].default * 100)
+    assert "pg_database_size('sancturai')" in sh
     assert ".tmp" in sh and "mv " in sh  # écrite à part puis renommée : jamais de sauvegarde tronquée retenue
     svc = (DEPLOY / "systemd" / "sancturai-backup.service").read_text(encoding="utf-8").splitlines()
     for line in ("Type=oneshot", "ExecStart=/home/elessiah/apps/SancturAI/deploy/backup.sh daily",
@@ -427,13 +445,33 @@ def test_setup_doc_operational_checks() -> None:
     assert "ss -ltnH 'sport = :8300'" in doc and "ss -ltnpH 'sport = :8300'" in doc
     assert doc.index("ss -ltnH 'sport = :8300'") < doc.index("sudo nginx -t && sudo systemctl reload nginx")
     assert doc.index("sudo nginx -t && sudo systemctl reload nginx") < doc.index("ss -ltnpH 'sport = :8300'")
-    # I1 : dossier des corps en attente sous le point de montage ET dans l'image (nginx démarre même sans l'image)
-    assert doc.count(f"install -d -o www-data -g www-data -m 700 {DATA}/nginx-body") == 2
-    assert doc.index(f"{DATA}/nginx-body") < doc.index("sudo chattr +i /srv/sancturai-data")
+    assert "nginx-body" not in doc  # revue batch 6, N1
+    # revue batch 6, N2 : une vérification arrête son bloc (sous-shell `set -e` + exit 1) avant l'action dangereuse
+    blocks_ = re.findall(r"```bash\n(.*?)```", doc, re.S)
+
+    def guarded(check: str, action: str) -> None:
+        block = next(b for b in blocks_ if check in b)
+        assert block.startswith("( set -e\n") and "\n)\n" in block, check
+        block = block.split("\n)\n", 1)[0]  # le sous-shell seul : la vérification et l'action y figurent toutes deux
+        line = next(ln for ln in block.splitlines() if check in ln)
+        assert "exit 1" in line, line
+        assert block.index(check) < block.index(action), check
+
+    guarded("-ge 30 ]", "sudo fallocate -l 20G")
+    guarded("ss -ltnH 'sport = :8300'", "sudo install -m 644")
+    guarded("[ -f /etc/nginx/snippets/security-headers.conf ]", "sudo install -m 644")
+    guarded('[ "$(getent group 70 | cut -d: -f1)" = sancturai-pg ]', "sudo install -d -o 70")
+    # après le rechargement : nginx absent de 8300 → vhost provisoire remis et arrêt du bloc
+    after = doc[doc.index("ss -ltnpH 'sport = :8300'"):]
+    after = after[:after.index("\n)\n")]
+    assert "sudo cp /root/sancturai-placeholder.conf.bak" in after and "exit 1" in after
+    # m-N7 : le compte du relais doit pouvoir lire le venv (copie, pas de liens durs vers le cache uv d'elessiah)
+    assert "UV_LINK_MODE=copy" in doc and "chmod -R o+rX ." in doc
+    assert r"find . \( -type d ! -perm -o=rx \) -o \( -type f ! -perm -o=r \) -print" in doc
     # m9, m10, m11
     assert doc.index("df -h /srv") < doc.index("fallocate -l 20G")
     assert "docker login ghcr.io" in doc
-    assert "certbot renew --dry-run" in doc and "/etc/nginx/snippets/security-headers.conf" in doc
+    assert "certbot renew --dry-run" in doc and "/etc/nginx/snippets/security-headers.conf" in doc and "2 par IP et 8 au total" in doc
     assert "2.24" in doc and "502" not in doc
     # I3 : retour arrière documenté
     assert "Retour arrière" in doc
