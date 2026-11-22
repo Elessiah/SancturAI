@@ -22,6 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         if: hashFiles('pyproject.toml') != ''
         with:
+          version: "0.11.32"  # = image uv de deploy/Dockerfile et `uv --version` local
           python-version: "3.13"
           enable-cache: true
       - name: Install

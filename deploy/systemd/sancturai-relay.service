@@ -1,0 +1,23 @@
+[Unit]
+Description=SancturAI outbox relay (outbox -> blueGenjiBot)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Slice=sancturai.slice
+User=elessiah
+WorkingDirectory=/home/elessiah/apps/SancturAI/relay
+EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env
+ExecStart=/home/elessiah/.local/bin/uv run --frozen --no-dev python relay.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# pg-socket : connect() sur le socket Postgres ; le répertoire est sticky (3775), le socket appartient à postgres
+ReadWritePaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv /srv/sancturai-data/pg-socket
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

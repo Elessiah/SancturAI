@@ -1,0 +1,11 @@
+[Unit]
+Description=SancturAI (bridé et sacrifiable : le reste du serveur passe en priorité)
+Before=slices.target
+
+[Slice]
+CPUWeight=20
+CPUQuota=150%
+MemoryHigh=1.2G
+MemoryMax=1.5G
+IOWeight=20
+TasksMax=512

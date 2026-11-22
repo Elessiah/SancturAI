@@ -29,6 +29,7 @@ dev = [
   "testcontainers[postgres]>=4.9",
   "ruff>=0.8",
   "mypy>=1.13",
+  "pyyaml>=6",
 ]
 
 [build-system]
