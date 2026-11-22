@@ -6,7 +6,7 @@ import yaml
 from starlette.responses import JSONResponse
 
 from app.config import Settings
-from app.middleware import DEFAULT_BODY_BYTES, body_cap, too_large_error
+from app.middleware import DEFAULT_BODY_BYTES, NGINX_MCP_BODY_BYTES, body_cap, too_large_error
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
@@ -355,9 +355,16 @@ def test_nginx_body_caps_match_app() -> None:
     for opener, method, path in routes:
         loc = next(b for b in locs if b.lstrip().startswith(opener))
         size = re.search(r"client_max_body_size (\w+);", loc)
-        assert size is not None and nginx_size(size.group(1)) == body_cap(method, path), opener
+        assert size is not None, opener
+        nginx_cap = nginx_size(size.group(1))
+        # /mcp : nginx admet plus que l'app (NGINX_MCP_BODY_BYTES), qui répond alors en JSON-RPC sans couper la
+        # session du client ; ailleurs, même plafond que l'app
+        expected = NGINX_MCP_BODY_BYTES if path.startswith("/mcp") else body_cap(method, path)
+        assert nginx_cap == expected >= body_cap(method, path), opener
         handler = re.search(r"error_page 413 = (@\w+);", loc)
-        assert handler is not None and named_return(locs, handler.group(1)) == app_body(method, path), opener
+        err = too_large_error(nginx_cap, path)  # même JSON que l'app, plafond de nginx dans le message
+        assert handler is not None and named_return(locs, handler.group(1)) == (
+            err.status, JSONResponse(err.to_dict()).body.decode()), opener
         # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` (sauf le vault, plus strict) ; un error_page
         # local remplace TOUS ceux hérités du serveur : 429 et 502/504 sont redéclarés
         vault = opener.startswith("location ^~ /api/vault/")

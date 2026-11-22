@@ -122,9 +122,12 @@ Jusqu'au premier déploiement, le site répond 503 (JSON `SERVER_BUSY`). Mettre 
 bloc (`.bak` contient alors le vhost SancturAI précédent, dernière configuration saine).
 
 Plafonds de corps (identiques à ceux de l'app, même JSON en cas de dépassement) : 16 Mio sous `/api/vault/`,
-128 Kio sous `/api/forum/`, 256 Kio pour `/mcp`, 64 Kio ailleurs. Un corps de 64 Kio ou moins reste en mémoire ;
-au-delà, nginx l'écrit dans son dossier temporaire par défaut (racine). Le vault, seul à accepter 16 Mio, est limité
-à 2 par IP et 8 au total (envois simultanés ; lectures et autres routes non comptées) : au pire ≈ 192 Mio sur la racine (vault 128 Mio + /mcp et forum 64 Mio). Le vhost
+128 Kio sous `/api/forum/`, 64 Kio ailleurs. `/mcp` fait exception : nginx admet 1 Mio, l'app 256 Kio ; entre les
+deux, l'app refuse en JSON-RPC (le client MCP garde sa session et reçoit le conseil REST), au-delà nginx répond 422.
+Un corps de 64 Kio ou moins reste en mémoire ; au-delà, nginx l'écrit dans son dossier temporaire par défaut
+(racine). Le vault, seul à accepter 16 Mio, est limité à 2 par IP et 8 au total (envois simultanés ; lectures et
+autres routes non comptées) : au pire ≈ 376 Mio sur la racine (vault 8 × 16 Mio = 128 Mio + /mcp et forum sur les
+248 autres connexions du plafond de 256, ≤ 1 Mio chacune = 248 Mio). Le vhost
 ne référence aucun chemin de SancturAI : nginx et les autres sites démarrent même si le volume est absent.
 
 Plafonds de connexions du vhost : 20 par IP et 256 au total (requêtes en cours, flux SSE compris). Le

@@ -359,7 +359,10 @@ async def test_dense_mcp_body_rejected_before_the_sdk(live_url: str) -> None:
         dense = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                  "params": {"name": "help", "arguments": {}, "junk": [{}] * 20_000}}
         r = await c.post("/mcp/", json=dense, headers=headers)
-        assert r.status_code == 422 and r.json()["error"] == "VALIDATION_ERROR"
+        # refus en JSON-RPC (la session du client survit), jamais confié au SDK
+        assert r.status_code == 200 and r.json()["id"] == 2 and r.json()["result"]["isError"] is True
+        assert '"VALIDATION_ERROR"' in r.json()["result"]["content"][0]["text"]
+        assert r.headers["mcp-session-id"] == headers["Mcp-Session-Id"]
 
 
 async def test_mcp_agent_report(live_url: str, state: AppState) -> None:
@@ -390,3 +393,37 @@ async def test_mcp_trial_tools(live_url: str, state: AppState) -> None:
         assert read["accused"] == "mcp-acc" and read["untrusted"] is True
         assert (await call(a, "trial_defense", trial_id=tid, text="Je conteste."))["trial_id"] == tid
         assert (await call(a, "trial_list"))["_error"]["error"] == "FROZEN"
+
+
+class _Utf16Transport(httpx.AsyncHTTPTransport):
+    """Réencode en UTF-16 les POST dont le corps contient le marqueur (client MCP officiel, transport réel)."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and b"utf16-marker" in request.content:
+            body = request.content.decode().encode("utf-16")
+            headers = [(k, v) for k, v in request.headers.raw if k.lower() != b"content-length"]
+            request = httpx.Request(request.method, request.url, headers=headers, content=body)
+        return await super().handle_async_request(request)
+
+
+def _utf16_client(headers: dict[str, str] | None = None, timeout: httpx.Timeout | None = None,
+                  auth: httpx.Auth | None = None) -> httpx.AsyncClient:
+    return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, follow_redirects=True,
+                             transport=_Utf16Transport())
+
+
+async def test_mcp_session_survives_bodies_rejected_at_the_edge(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-edge")
+    async with streamablehttp_client(f"{live_url}/mcp/", httpx_client_factory=_utf16_client) as (read, write, _):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            await call(s, "login", phrase=a.phrase)
+            big = await call(s, "vault_write", path="/big.md", content="x" * (300 * 1024))
+            assert big["_error"]["error"] == "VALIDATION_ERROR" and "PUT /api/vault/" in big["_error"]["hint"]
+            await call(s, "vault_write", path="/ok.md", content="petit")  # même session, toujours vivante
+            dense = await call(s, "vault_write", path="/d.md", content="x", junk=[{}] * 2000)
+            assert dense["_error"]["error"] == "VALIDATION_ERROR" and "base64" in dense["_error"]["hint"]
+            utf16 = await call(s, "vault_write", path="/u.md", content="utf16-marker")
+            assert utf16["_error"]["error"] == "VALIDATION_ERROR" and "UTF-8" in utf16["_error"]["hint"]
+            assert (await call(s, "vault_read", path="/ok.md"))["content"] == "petit"
+            assert (await call(s, "vault_read", path="/big.md"))["_error"]["error"] == "NOT_FOUND"
