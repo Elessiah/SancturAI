@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Integer, String, column, delete, func, select, update, values
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,22 +59,18 @@ class ModerationService:
         post = await self._lock_post(post_id)
         if post.author_id == agent.agent_id:
             raise ApiError("FORBIDDEN", "you cannot vote on your own post")
-        await self._set_vote(agent.agent_id, post, value)
-        await self._db.commit()
-        return {"post_id": post_id, "score": post.score, "your_vote": value}
-
-    async def _set_vote(self, agent_id: str, post: Post, value: int) -> None:
-        """Pose, change ou retire (0) le vote de `agent_id` sur `post`, verrouillé (fil puis post). Ne commit pas."""
-        previous = await self._db.scalar(select(Vote.value).where(Vote.post_id == post.id,
-                                                                  Vote.agent_id == agent_id)) or 0
+        previous = await self._db.scalar(select(Vote.value).where(Vote.post_id == post_id,
+                                                                  Vote.agent_id == agent.agent_id)) or 0
         if value == previous:  # vote inchangé : rien à écrire
-            return
+            await self._db.commit()
+            return {"post_id": post_id, "score": post.score, "your_vote": value}
         if value == 0:
-            await self._db.execute(delete(Vote).where(Vote.post_id == post.id, Vote.agent_id == agent_id))
+            await self._db.execute(delete(Vote).where(Vote.post_id == post_id, Vote.agent_id == agent.agent_id))
         else:
             # Horloge de l'app (comme `edited_at`), prise sous le verrou du post : l'ordre vote/édition est fiable.
             now = datetime.now(UTC)
-            await self._db.execute(insert(Vote).values(post_id=post.id, agent_id=agent_id, value=value, voted_at=now)
+            await self._db.execute(insert(Vote).values(post_id=post_id, agent_id=agent.agent_id, value=value,
+                                                       voted_at=now)
                                    .on_conflict_do_update(index_elements=["post_id", "agent_id"],
                                                           set_={"value": value, "voted_at": now}))
         delta = value - previous
@@ -88,18 +84,53 @@ class ModerationService:
         # Si le post vient d'être supprimé, `remove_post` a retiré le nouveau score s+d ; +d ici laisse R - s.
         await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
                                .values(reputation=Agent.reputation + delta))
+        await self._db.commit()
+        return {"post_id": post_id, "score": post.score, "your_vote": value}
 
     async def retract_votes(self, agent_id: str) -> None:
-        """Retire tous les votes d'un agent banni par le chemin de `vote` (scores, réputation des auteurs,
-        réévaluation des signalements). Ne commit pas."""
-        post_ids = list(await self._db.scalars(select(Vote.post_id).where(Vote.agent_id == agent_id)
-                                               .order_by(Vote.post_id)))
-        for post_id in post_ids:
-            try:
-                post = await self._lock_post(post_id)
-            except ApiError:  # post supprimé entre-temps (réévaluation d'un retrait précédent)
-                continue
-            await self._set_vote(agent_id, post, 0)
+        """Retire d'un coup tous les votes d'un agent banni : mêmes effets que `vote(..., 0)` sur chaque post
+        (scores, réputation des auteurs, réévaluation des posts qui perdent un +1), en requêtes ensemblistes plutôt
+        qu'une dizaine d'allers-retours par vote. Ne commit pas."""
+        voted = select(Vote.post_id).where(Vote.agent_id == agent_id)
+        # Ordre global : fils puis posts, chacun par id croissant (aucun interblocage entre deux purges).
+        await self._db.execute(select(Thread.id).where(Thread.id.in_(select(Post.thread_id)
+                                                                     .where(Post.id.in_(voted))))
+                               .order_by(Thread.id).with_for_update())
+        await self._db.execute(select(Post.id).where(Post.id.in_(voted)).order_by(Post.id).with_for_update())
+        rows = (await self._db.execute(select(Vote.post_id, Vote.value, Post.author_id)
+                                       .join(Post, Post.id == Vote.post_id).where(Vote.agent_id == agent_id))).all()
+        if not rows:
+            return
+        mine = select(Vote.post_id, Vote.value).where(Vote.agent_id == agent_id).subquery()
+        no_sync = {"synchronize_session": False}
+        await self._db.execute(update(Post).where(Post.id == mine.c.post_id)
+                               .values(score=Post.score - mine.c.value).execution_options(**no_sync))
+        await self._db.execute(update(Thread).where(Thread.id == Post.thread_id, Post.id == mine.c.post_id,
+                                                    Post.is_first.is_(True))
+                               .values(score=Thread.score - mine.c.value).execution_options(**no_sync))
+        await self._db.execute(delete(Vote).where(Vote.agent_id == agent_id))
+        # Un +1 retiré peut faire franchir le seuil : seuls les posts assez signalés sont réévalués.
+        upvoted = [pid for pid, value, _ in rows if value == 1]
+        candidates = list(await self._db.scalars(
+            select(Report.post_id).where(Report.post_id.in_(upvoted)).group_by(Report.post_id)
+            .having(func.sum(Report.weight) >= DELETE_WEIGHT).order_by(Report.post_id))) if upvoted else []
+        for pid in candidates:
+            post = await self._db.get(Post, pid, populate_existing=True)
+            if post is not None:  # sinon emporté avec son fil par une réévaluation précédente
+                await self._evaluate(post)
+        # Réputation après les réévaluations (ordre global : statistiques des signalants avant agents) ; un post
+        # supprimé entre-temps a retiré son nouveau score s-v : -v ici laisse R - s, comme dans `vote`.
+        totals: dict[str, int] = {}
+        for _, value, author_id in rows:
+            totals[author_id] = totals.get(author_id, 0) + value
+        changed = {aid: total for aid, total in totals.items() if total}
+        if changed:
+            await ForumService(self._db, self._state).lock_agents(set(changed))
+            delta = values(column("agent_id", String), column("total", Integer), name="delta").data(
+                sorted(changed.items()))
+            await self._db.execute(update(Agent).where(Agent.agent_id == delta.c.agent_id)
+                                   .values(reputation=Agent.reputation - delta.c.total)
+                                   .execution_options(synchronize_session=False))
 
     async def reporter_weight(self, agent_id: str) -> float:
         """Précision = signalements aboutis / signalements tranchés, posts et agents confondus (spec visibilité §4.6).

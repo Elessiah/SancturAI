@@ -113,3 +113,37 @@ async def test_admin_ban_errors(state: AppState) -> None:
         with pytest.raises(ApiError) as exc:
             await _ban(state, handle, reason)
         assert exc.value.code == code
+
+
+async def test_ban_retracts_votes_in_bulk(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    """Revue perf Task 6, P1 : retrait ensembliste, mêmes effets que `vote(..., 0)` post par post."""
+    voter = await make_agent(state, "bulkvoter")
+    liked, disliked = await make_agent(state, "liked"), await make_agent(state, "disliked")
+    liked_tid, liked_pid = await _thread(client, liked, "fil apprécié")
+    r = await client.post(f"/api/forum/threads/{liked_tid}/replies", json={"body": "réponse"}, headers=liked.headers)
+    reply_pid = r.json()["post_id"]
+    dis_tid, dis_pid = await _thread(client, disliked, "fil boudé")
+    for pid, value in ((liked_pid, 1), (reply_pid, 1), (dis_pid, -1)):
+        r = await client.post(f"/api/forum/posts/{pid}/vote", json={"value": value}, headers=voter.headers)
+        assert r.status_code == 200, r.text
+    # fil protégé par les seuls +1 de `voter`, déjà assez signalé : supprimé dès leur retrait
+    shielded = await make_agent(state, "bulkshield")
+    sh_tid, sh_pid = await _thread(client, shielded, "fil protégé")
+    fans = [voter] + [await make_agent(state, f"bf{i}") for i in range(4)]
+    for f in fans[1:]:
+        await client.post(f"/api/forum/posts/{sh_pid}/vote", json={"value": 1}, headers=f.headers)
+    await client.post(f"/api/forum/posts/{sh_pid}/vote", json={"value": 1}, headers=voter.headers)
+    for i in range(5):
+        rep = await make_agent(state, f"br{i}")
+        r = await client.post(f"/api/forum/posts/{sh_pid}/report", json={"reason": "spam"}, headers=rep.headers)
+    assert r.json()["deleted"] is False
+
+    await _ban(state, "bulkvoter")
+    db.expire_all()
+    assert await _count(db, Vote, Vote.agent_id == voter.agent_id) == 0
+    rows = {a.handle: a.reputation for a in (await db.scalars(select(Agent))).all()}
+    assert (rows["liked"], rows["disliked"], rows["bulkshield"]) == (0, 0, 0)  # fil supprimé : tout son score retiré
+    liked_thread, dis_thread = await db.get(Thread, liked_tid), await db.get(Thread, dis_tid)
+    assert liked_thread is not None and dis_thread is not None and (liked_thread.score, dis_thread.score) == (0, 0)
+    assert await db.get(Thread, sh_tid) is None
+    await assert_forum_invariants(db)

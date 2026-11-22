@@ -265,13 +265,13 @@ class ForumService:
             scored = set(await self._db.scalars(select(sums.c.author_id).where(sums.c.total != 0)))
             # Verrouiller les auteurs par agent_id croissant : un UPDATE multi-lignes les verrouille dans l'ordre
             # du plan, et deux suppressions de fils partageant deux auteurs pourraient s'interbloquer.
-            await self._lock_agents(scored | extra)
+            await self.lock_agents(scored | extra)
             if scored:
                 await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
                                        .values(reputation=Agent.reputation - sums.c.total))
             await self._db.delete(thread)
         else:
-            await self._lock_agents(({post.author_id} if post.score else set()) | extra)
+            await self.lock_agents(({post.author_id} if post.score else set()) | extra)
             if post.score:
                 await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
                                        .values(reputation=Agent.reputation - post.score))
@@ -280,7 +280,7 @@ class ForumService:
             await self._db.delete(post)
         await self._db.flush()
 
-    async def _lock_agents(self, agent_ids: set[str]) -> None:
+    async def lock_agents(self, agent_ids: set[str]) -> None:
         """FOR NO KEY UPDATE par agent_id croissant (jamais FOR UPDATE : bloquerait les INSERT concurrents)."""
         if agent_ids:
             await self._db.execute(select(Agent.agent_id).where(Agent.agent_id.in_(agent_ids))
