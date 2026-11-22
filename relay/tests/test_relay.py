@@ -234,6 +234,7 @@ def test_poison_rows_do_not_crash_or_stall_the_batch(conn: psycopg.Connection, r
     assert sent == (["a", "good"] if deep_ok else ["good"])
     rows = conn.execute("SELECT attempts, sent_at IS NOT NULL FROM outbox ORDER BY id").fetchall()
     assert rows == [(0, True) if deep_ok else (MAX_ATTEMPTS, False), (MAX_ATTEMPTS, False), (0, True)]
+    assert "violates the notify contract" in caplog.text
 
 
 def _decodes(raw: str) -> bool:
@@ -242,7 +243,6 @@ def _decodes(raw: str) -> bool:
     except (ValueError, RecursionError):
         return False
     return True
-    assert "violates the notify contract" in caplog.text
 
 
 def test_unexpected_error_on_one_row_does_not_stop_the_batch(conn: psycopg.Connection, rconn: psycopg.Connection,
