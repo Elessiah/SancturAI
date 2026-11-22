@@ -111,3 +111,23 @@ async def test_report_validation_and_concurrent_votes(client: httpx.AsyncClient,
     assert agent is not None and agent.reputation == 6
     stat = await db.get(ReporterStat, voters[0].agent_id)
     assert stat is None
+
+
+async def test_unresolved_reports_are_neutral(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    """S1 : un auteur qui supprime ses posts signalés ne fait pas chuter la précision de ses signalants."""
+    author = await make_agent(state, "dodger")
+    replier = await make_agent(state, "replier")
+    rep = await make_agent(state, "honest")
+    for _ in range(6):  # 6 signalements sur des posts supprimés par l'auteur avant le seuil
+        _, pid = await _thread(client, author)
+        await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"}, headers=rep.headers)
+        assert (await client.delete(f"/api/forum/posts/{pid}", headers=author.headers)).json() == {"ok": True}
+    tid, first = await _thread(client, author)  # réponse signalée, emportée avec son fil
+    r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"}, headers=replier.headers)
+    await client.post(f"/api/forum/posts/{r.json()['post_id']}/report", json={"reason": "x"}, headers=rep.headers)
+    assert (await client.delete(f"/api/forum/posts/{first}", headers=author.headers)).json() == {"ok": True}
+    db.expire_all()
+    stat = await db.get(ReporterStat, rep.agent_id)
+    assert stat is not None and stat.reports_total == 0 and stat.reports_successful == 0
+    from app.forum.moderation import ModerationService
+    assert await ModerationService(db, state).reporter_weight(rep.agent_id) == 1.0

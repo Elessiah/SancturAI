@@ -3,10 +3,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
-from app.forum.models import Category, Post, Thread
+from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.identity.models import Agent
 from app.state import AppState
 from app.text import check_line, check_text
@@ -143,18 +144,22 @@ class ForumService:
         await self.remove_post(await self._own_post(agent, post_id, lock=False))
         await self._db.commit()
 
-    async def remove_post(self, post: Post) -> None:
+    async def remove_post(self, post: Post, *, upheld: bool = False) -> None:
         """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation.
 
         Verrouille le fil puis le post (même ordre que `reply`) : deux suppressions concurrentes dans un fil
         sont sérialisées, sinon le score d'une réponse serait retiré deux fois de la réputation (via la
         réponse et via le fil). L'appelant ne doit donc pas avoir déjà verrouillé le post.
+
+        `upheld` (modération) : les signalements du post comptent comme aboutis ; tous les autres signalements
+        emportés par la suppression sont neutralisés (retirés de `reports_total`).
         """
         thread = await self._thread(post.thread_id, lock=True)
         locked = await self._db.get(Post, post.id, with_for_update=True, populate_existing=True)
         if locked is None:
             raise ApiError("NOT_FOUND", f"no post {post.id}")
         post = locked
+        await self._settle_reports(post, upheld)
         if post.is_first:
             sums = (select(Post.author_id, func.sum(Post.score).label("total"))
                     .where(Post.thread_id == post.thread_id).group_by(Post.author_id).subquery())
@@ -173,3 +178,30 @@ class ForumService:
                                    .values(reply_count=Thread.reply_count - 1))
             await self._db.delete(post)
         await self._db.flush()
+
+    async def _settle_reports(self, post: Post, upheld: bool) -> None:
+        """Met à jour les statistiques des signalants avant que la cascade n'efface leurs signalements.
+
+        Un signalement non tranché par la communauté (auteur qui supprime son post, réponse emportée avec son fil)
+        n'est ni un succès ni un échec : sinon un auteur pourrait supprimer ses posts signalés avant le seuil pour
+        faire chuter la précision, donc le poids, de ceux qui le signalent.
+        """
+        scope = Post.thread_id == post.thread_id if post.is_first else Post.id == post.id
+        rows = (await self._db.execute(select(Report.agent_id, Report.post_id)
+                                       .join(Post, Post.id == Report.post_id).where(scope))).all()
+        deltas: dict[str, list[int]] = {}
+        for agent_id, post_id in rows:
+            total_success = deltas.setdefault(agent_id, [0, 0])
+            if upheld and post_id == post.id:
+                total_success[1] += 1
+            else:
+                total_success[0] -= 1
+        if not deltas:
+            return
+        # Une seule requête, lignes verrouillées par agent_id croissant (pas d'interblocage entre fils).
+        stmt = insert(ReporterStat).values([{"agent_id": aid, "reports_total": d[0], "reports_successful": d[1]}
+                                            for aid, d in sorted(deltas.items())])
+        await self._db.execute(stmt.on_conflict_do_update(
+            index_elements=["agent_id"],
+            set_={"reports_total": ReporterStat.reports_total + stmt.excluded.reports_total,
+                  "reports_successful": ReporterStat.reports_successful + stmt.excluded.reports_successful}))
