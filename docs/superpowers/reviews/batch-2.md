@@ -21,3 +21,8 @@ Base: 6b854c4 (revue à 5b8af33). Décisions marquées « décidé par l'orchest
 | M10 | batch | minor | app/forum/service.py:remove_post docstring | "caller must not have locked the post" contradicts `_delete` | fixed — "no lock other than T then P, in that order" | 1648090 |
 | M11 | batch | minor | app/forum/service.py:list_threads | unknown sort → KeyError → INTERNAL | fixed — VALIDATION_ERROR in the service | 9fe3edc |
 | M12 | batch | minor | app/forum/service.py:create_thread/reply | limiter budget consumed by no-ops | fixed for invalid title/body (validated before `hit`); intended (anti-abuse) for unchanged votes, duplicate reports, missing category/thread | 9fe3edc |
+| N1 | batch | important | app/forum/notifications.py:prune_read_notifications | `read IS true/false` cannot use the partial indexes (seq scans twice per tick) | fixed — filters `read` / `NOT read`; EXPLAIN test on the real DELETEs (seqscan off) asserts ix_notif_prune / ix_notif_prune_unread (mutation-checked) | 2684744 |
+| N2 | batch | minor | app/maintenance.py | prune failure reported as "5xx" | fixed — alert text now "erreur(s) serveur ou de maintenance" | 2684744 |
+| N3 | batch | minor | app/forum/moderation.py:reporter_weight | stats and failed count read in two statements (skew, stale identity map) | fixed — one SELECT with a scalar subquery, no identity-map read | 2684744 |
+| N4 | batch | minor | tests/forum/test_concurrency.py | 0.5 s sleep: regression detection depends on timing | wontfix — passed 9/9; failure direction is only a missed detection, not a false failure | 2684744 |
+| N5 | batch | minor | app/forum/service.py | SERVER_BUSY retries spend rate-limit budget | wontfix — bounded, acceptable anti-abuse | 2684744 |
