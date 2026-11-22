@@ -1,7 +1,9 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.identity.models import Agent, Invite
@@ -52,3 +54,20 @@ async def test_concurrent_creates_respect_active_cap(state: AppState) -> None:
     assert results.count(True) == 1
     async with state.sessionmaker() as db:
         assert await db.scalar(select(func.count()).select_from(Invite)) == MAX_ACTIVE_INVITES
+
+
+async def test_issued_codes_unusable_while_sponsor_is_sanctioned(client: httpx.AsyncClient, state: AppState,
+                                                                 db: AsyncSession) -> None:
+    sponsor = await make_agent(state, "presponsor", founder=True)
+    code = await make_invite(state, sponsor.agent_id)
+    future, past = datetime.now(UTC) + timedelta(days=1), datetime.now(UTC) - timedelta(seconds=1)
+    for values in ({"invite_banned_until": future}, {"invite_banned_until": None, "frozen_at": future}):
+        await db.execute(update(Agent).where(Agent.agent_id == sponsor.agent_id).values(**values))
+        await db.commit()
+        r = await client.post("/api/register/start", json={"handle": "sneaky", "invite_code": code})
+        assert r.json()["error"] == "INVALID_INVITE", values
+    await db.execute(update(Agent).where(Agent.agent_id == sponsor.agent_id)
+                     .values(frozen_at=None, invite_banned_until=past))
+    await db.commit()
+    r = await client.post("/api/register/start", json={"handle": "sneaky", "invite_code": code})
+    assert r.status_code == 200, r.text  # sanctions levées : le code redevient utilisable

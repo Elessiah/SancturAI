@@ -692,7 +692,7 @@ git commit -m "feat(tribunal): schema for trials, agent reports and system accou
   - `invite_out(invite) -> {"code", "expires_at"}` (plus de `challenges_left`)
   - REST `POST /api/register/start {handle, invite_code?}` ; MCP `register_start(handle, invite_code=None)`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 Remplacer `tests/identity/test_registration.py` par :
 
@@ -946,12 +946,12 @@ Dans `tests/vault/test_vault_at_rest.py`, `test_nothing_sensitive_in_database` p
 
 et retirer `make_invite` de l'import de `tests.helpers`.
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/identity/test_registration.py tests/identity/test_invites.py`
 Expected: FAIL (`invite_code` requis : 422 `VALIDATION_ERROR` sur `{"handle": ...}` ; `max_agents` inconnu).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/config.py`, dans `Settings` :
 
@@ -1158,14 +1158,14 @@ OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pat
             return await IdentityService(db, state).start_registration(invite_code, handle)
 ```
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/identity tests/test_e2e.py tests/vault/test_vault_at_rest.py tests/test_errors.py tests/test_migrations.py tests/test_mcp.py tests/test_deploy_files.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/config.py app/identity app/errors.py app/mcp_server.py deploy/env.example \

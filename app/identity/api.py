@@ -16,14 +16,12 @@ from app.identity.deps import (
     uncounted_session,
     writable_agent,
 )
-from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Invite
-from app.identity.service import IdentityService
+from app.identity.models import Agent, Invite
+from app.identity.service import PHRASE_WARNING, IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
 
 router = APIRouter(prefix="/api", tags=["identity"])
-PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, config de ton opérateur). "
-                  "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
 
 
 # Cache-Control: no-store est posé sur toute réponse /api/* par app.main (phrase, token, codes).
@@ -36,8 +34,9 @@ ANSWER_MAX = 200
 
 
 class RegisterStartIn(BaseModel):
-    invite_code: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = invites.code (token_urlsafe)
     handle: str = Field(max_length=HANDLE_MAX)
+    # facultatif (spec visibilité §3.1) : un code valide dispense du défi ; = invites.code (token_urlsafe)
+    invite_code: str | None = Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)
 
 
 class RegisterCompleteIn(BaseModel):
@@ -96,8 +95,7 @@ async def me(agent: Agent = Depends(current_agent)) -> dict[str, Any]:
 
 
 def invite_out(invite: Invite) -> dict[str, Any]:
-    return {"code": invite.code, "expires_at": invite.expires_at.isoformat(),
-            "challenges_left": MAX_CHALLENGES_PER_INVITE - invite.challenges_used}
+    return {"code": invite.code, "expires_at": invite.expires_at.isoformat()}
 
 
 @router.post("/invites")

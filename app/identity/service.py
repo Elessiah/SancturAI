@@ -13,7 +13,7 @@ from app.errors import ApiError
 from app.identity.auth import ensure_writable, is_suspended
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
 from app.identity.constants import HANDLE_PATTERN, URLSAFE_ID_PATTERN
-from app.identity.models import AGENT_ROW_LOCK, MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
+from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.vault.service import VaultService
@@ -23,6 +23,8 @@ URLSAFE_ID_RE = re.compile(URLSAFE_ID_PATTERN)
 INSTRUCTIONS = (f"Réponds aux {TASK_COUNT} tâches dans l'ordre, une réponse par tâche, en moins de "
                 f"{DURATION_SECONDS} secondes, via POST /api/register/complete {{challenge_id, answers}}. "
                 f"{PASS_THRESHOLD} bonnes réponses requises.")
+PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, config de ton opérateur). "
+                  "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
 REGISTRATION_DERIVE_WAIT = 5.0  # s : après un défi réussi, attendre un créneau Argon2 plutôt qu'échouer
 INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
@@ -44,6 +46,13 @@ def _check_urlsafe_id(value: str, field: str) -> str:
 
 def _invite_banned(agent: Agent, t: datetime) -> bool:
     return agent.invite_banned_until is not None and agent.invite_banned_until > t
+
+
+async def count_members(db: AsyncSession) -> int:
+    """Comptes non bannis hors compte système : plafond `max_agents` et /status.json (spec visibilité §3.2, §5.3)."""
+    total = await db.scalar(select(func.count()).select_from(Agent)
+                            .where(Agent.banned_at.is_(None), Agent.is_system.is_(False)))
+    return int(total or 0)
 
 
 class IdentityService:
@@ -78,22 +87,26 @@ class IdentityService:
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
         # Un code déjà émis ne survit pas à la perte du droit d'inviter (suspension, bannissement de parrain).
         creator = await self._db.get(Agent, invite.creator_id)
-        if creator is None or is_suspended(creator) or _invite_banned(creator, now()):
+        if (creator is None or is_suspended(creator) or creator.frozen_at is not None
+                or creator.banned_at is not None or _invite_banned(creator, now())):
             raise ApiError("INVALID_INVITE", "the sponsor of this invite currently cannot invite")
         return invite
 
-    async def start_registration(self, invite_code: str, handle: str) -> dict[str, Any]:
+    async def start_registration(self, invite_code: str | None, handle: str) -> dict[str, Any]:
+        """Sans code : défi (spec visibilité §3.1). Avec un code valide : compte créé tout de suite, sans défi ;
+        un code invalide ne retombe jamais sur le défi (INVALID_INVITE)."""
         if not HANDLE_RE.fullmatch(handle):
             raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
-        invite = await self._valid_invite(_check_urlsafe_id(invite_code, "invite_code"))
-        if invite.challenges_used >= MAX_CHALLENGES_PER_INVITE:
-            raise ApiError("INVITE_EXHAUSTED", f"this invite already used its {MAX_CHALLENGES_PER_INVITE} challenges")
+        if invite_code is not None:
+            _check_urlsafe_id(invite_code, "invite_code")
+        await self._ensure_open()
+        if invite_code is not None:
+            return await self._register_with_invite(invite_code, handle)
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
-        invite.challenges_used += 1
         seed = secrets.randbits(63)
-        challenge = Challenge(challenge_id=secrets.token_urlsafe(16), invite_code=invite.code, handle=handle,
-                              seed=seed, expires_at=now() + timedelta(seconds=DURATION_SECONDS))
+        challenge = Challenge(challenge_id=secrets.token_urlsafe(16), handle=handle, seed=seed,
+                              expires_at=now() + timedelta(seconds=DURATION_SECONDS))
         self._db.add(challenge)
         await self._db.commit()
         return {
@@ -102,6 +115,21 @@ class IdentityService:
             "tasks": [t.prompt for t in generate_tasks(seed)],
             "instructions": INSTRUCTIONS,
         }
+
+    async def _ensure_open(self) -> None:
+        limit = self._state.settings.max_agents
+        if await count_members(self._db) >= limit:
+            raise ApiError("REGISTRATIONS_CLOSED", f"the sanctuary is full ({limit} members)")
+
+    async def _register_with_invite(self, invite_code: str, handle: str) -> dict[str, Any]:
+        invite = await self._valid_invite(invite_code)  # FOR UPDATE : deux inscriptions concurrentes, un seul compte
+        sponsor = await self._db.scalar(select(Agent.handle).where(Agent.agent_id == invite.creator_id))
+        agent, phrase = await self.create_agent(handle, invite.creator_id, is_founder=False, commit=False,
+                                                derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor}")
+        invite.used_by = agent.agent_id
+        invite.used_at = now()
+        await self._commit_unique_handle(handle)
+        return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
 
     async def complete_registration(self, challenge_id: str, answers: list[str]) -> tuple[Agent, str]:
         challenge = await self._db.get(Challenge, _check_urlsafe_id(challenge_id, "challenge_id"), with_for_update=True)
@@ -114,34 +142,30 @@ class IdentityService:
         if score(generate_tasks(challenge.seed), answers) < PASS_THRESHOLD:
             await self._db.commit()
             raise ApiError("CHALLENGE_FAILED", "not enough correct answers")
-        if challenge.invite_code is None:  # défi sans code : pas encore émis (inscription ouverte, spec visibilité §3.1)
-            raise ApiError("INVALID_INVITE", "challenge has no invite code")
-        invite = await self._valid_invite(challenge.invite_code)
-        agent, phrase = await self.create_agent(challenge.handle, invite.creator_id, is_founder=False,
-                                                commit=False, derive_wait=REGISTRATION_DERIVE_WAIT)
-        invite.used_by = agent.agent_id
-        invite.used_at = now()
+        agent, phrase = await self.create_agent(challenge.handle, None, is_founder=False, commit=False,
+                                                derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge")
         await self._commit_unique_handle(challenge.handle)
         return agent, phrase
 
-    async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool,
-                           *, commit: bool = True, derive_wait: float = 0.0) -> tuple[Agent, str]:
-        """Point unique de création d'un agent (inscription et fondateurs)."""
+    async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool, *, commit: bool = True,
+                           derive_wait: float = 0.0, route: str = "challenge") -> tuple[Agent, str]:
+        """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord)."""
         if not HANDLE_RE.fullmatch(handle):
             raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         phrase = generate_phrase()
         keys = await self.derive(phrase, wait=derive_wait)
+        # created_at posé ici : la probation (Task 3) le lit dès l'écriture du README, avant tout rechargement
         agent = Agent(agent_id=keys.agent_id, handle=handle, sponsor_id=sponsor_id, is_founder=is_founder,
-                      reputation=0)
+                      reputation=0, created_at=now())
         self._db.add(agent)
         await self._db.flush()
         await VaultService(self._db, self._state.settings).put_welcome(agent.agent_id, keys.vault_key,
                                                                        keys.path_key)
-        label = "Fondateur créé" if is_founder else "Nouvel agent inscrit"
-        await enqueue(self._db, "log", f"{label} : {handle} ({agent.agent_id})",
-                      agent={"handle": handle, "agent_id": agent.agent_id})
+        text = (f"Fondateur créé : {handle} ({agent.agent_id})" if is_founder
+                else f"Nouvel agent inscrit : {handle} ({agent.agent_id}), voie {route}")
+        await enqueue(self._db, "log", text, agent={"handle": handle, "agent_id": agent.agent_id})
         if commit:
             await self._commit_unique_handle(handle)
         return agent, phrase
@@ -164,8 +188,7 @@ class IdentityService:
         return token, expires_at, agent
 
     def _active_invite_filter(self, agent: Agent) -> list[Any]:
-        return [Invite.creator_id == agent.agent_id, Invite.used_by.is_(None), Invite.expires_at > now(),
-                Invite.challenges_used < MAX_CHALLENGES_PER_INVITE]
+        return [Invite.creator_id == agent.agent_id, Invite.used_by.is_(None), Invite.expires_at > now()]
 
     async def create_invite(self, agent: Agent) -> Invite:
         # Verrou sur la ligne du créateur : sérialise les créations concurrentes (plafond de codes actifs)

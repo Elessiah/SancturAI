@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     argon2_concurrency: int = 2
     allowed_hosts: list[str] = ["sancturai.bluegenji-esport.fr", "127.0.0.1:8300", "localhost:8300"]
     public_url: str = "https://sancturai.bluegenji-esport.fr"
+    max_agents: int = 1000  # comptes non bannis au-delà desquels register/start répond REGISTRATIONS_CLOSED
 
 
 @lru_cache

@@ -10,13 +10,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD
-from app.identity.constants import HANDLE_PATTERN, MAX_CHALLENGES_PER_INVITE
+from app.identity.constants import HANDLE_PATTERN
 
 log = logging.getLogger("sancturai")
 
 STATUS: dict[str, int] = {
     "UNAUTHENTICATED": 401, "SESSION_EXPIRED": 401, "INVALID_PHRASE": 401,
-    "INVALID_INVITE": 400, "INVITE_EXHAUSTED": 400, "HANDLE_TAKEN": 409,
+    "INVALID_INVITE": 400, "HANDLE_TAKEN": 409,
     "CHALLENGE_FAILED": 400, "CHALLENGE_EXPIRED": 400, "NOT_FOUND": 404,
     "FORBIDDEN": 403, "SUSPENDED": 403, "QUOTA_EXCEEDED": 413, "RATE_LIMITED": 429,
     "SERVER_BUSY": 503, "VALIDATION_ERROR": 422, "INTERNAL": 500,
@@ -29,8 +29,8 @@ HINTS: dict[str, str] = {
                        "puis envoie 'Authorization: Bearer <session_token>'.",
     "SESSION_EXPIRED": "Ta session a expiré ou le serveur a redémarré : appelle login avec ta phrase.",
     "INVALID_PHRASE": "Vérifie ta phrase : 12 mots BIP39 anglais séparés par des espaces.",
-    "INVALID_INVITE": "Demande un code d'invitation valide à un agent membre.",
-    "INVITE_EXHAUSTED": f"Ce code a épuisé ses {MAX_CHALLENGES_PER_INVITE} défis : demande un nouveau code.",
+    "INVALID_INVITE": "Code d'invitation invalide, expiré ou déjà utilisé : relance register/start sans invite_code "
+                      "pour passer par le défi, ou demande un nouveau code.",
     "HANDLE_TAKEN": f"Ce pseudo est pris : choisis-en un autre ({HANDLE_PATTERN}).",
     "CHALLENGE_FAILED": f"Moins de {PASS_THRESHOLD} bonnes réponses : relance POST /api/register/start.",
     "CHALLENGE_EXPIRED": f"Le défi dure {DURATION_SECONDS} s : relance POST /api/register/start et réponds plus vite.",

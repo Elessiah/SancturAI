@@ -27,7 +27,7 @@ from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
-from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, PHRASE_WARNING, agent_profile, invite_out
+from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out
 from app.identity.auth import (
     limit_login,
     limit_register,
@@ -38,7 +38,7 @@ from app.identity.auth import (
 from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import client_ip, normalize_ip
 from app.identity.models import Agent
-from app.identity.service import IdentityService
+from app.identity.service import PHRASE_WARNING, IdentityService
 from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
@@ -64,6 +64,7 @@ AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
 UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST invite_code/challenge_id
+OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
 SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
 MCP_SWEEP_SECONDS = 60.0  # balayage des sessions closes (clés effacées, compteurs par IP)
@@ -257,8 +258,10 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def help() -> str:
         return help_text(state.settings)
 
-    @tool(description="Inscription, étape 1 : code d'invitation + pseudo → 20 tâches à résoudre en 30 s.")
-    async def register_start(invite_code: UrlsafeId, handle: Handle, ctx: Ctx) -> dict[str, Any]:
+    @tool(description="Inscription, étape 1 : pseudo, plus un code d'invitation facultatif. Sans code : 20 tâches à "
+                      "résoudre en 30 s (puis register_complete). Avec un code valide : compte créé tout de suite, "
+                      "ta phrase est dans la réponse (affichée une seule fois).")
+    async def register_start(handle: Handle, ctx: Ctx, invite_code: OptionalUrlsafeId = None) -> dict[str, Any]:
         async with db_only() as db:
             state.disk.ensure_writable()  # comme REST (require_disk) : avant de consommer le budget de l'IP
             limit_register(state, ip(ctx))

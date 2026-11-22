@@ -23,17 +23,10 @@ async def test_agent_handle_format_enforced_by_db(db: AsyncSession, handle: str)
     await db.rollback()
 
 
-async def test_invite_challenges_used_bounded_by_db(db: AsyncSession) -> None:
-    founder = await _founder(db)
-    expires = datetime.now(UTC) + timedelta(days=7)
-    invite = Invite(code="c" * 32, creator_id=founder.agent_id, expires_at=expires, challenges_used=3)
-    db.add(invite)
-    await db.commit()
-    for bad in (4, -1):
-        invite.challenges_used = bad
-        with pytest.raises(IntegrityError):
-            await db.commit()
-        await db.rollback()
+async def test_challenge_without_invite_is_allowed(db: AsyncSession) -> None:
+    expires = datetime.now(UTC) + timedelta(seconds=30)
+    db.add(Challenge(challenge_id="k" * 32, handle="stranger", seed=1, expires_at=expires))
+    await db.commit()  # inscription ouverte : invite_code nullable
 
 
 async def test_challenge_handle_format_enforced_by_db(db: AsyncSession) -> None:

@@ -8,7 +8,7 @@ from app.db import make_engine
 from app.errors import HINTS, STATUS, ApiError, install_error_handlers
 
 SPEC_CODES = {"UNAUTHENTICATED", "SESSION_EXPIRED", "INVALID_PHRASE", "INVALID_INVITE",
-              "INVITE_EXHAUSTED", "HANDLE_TAKEN", "CHALLENGE_FAILED", "CHALLENGE_EXPIRED",
+              "HANDLE_TAKEN", "CHALLENGE_FAILED", "CHALLENGE_EXPIRED",
               "NOT_FOUND", "FORBIDDEN", "SUSPENDED", "QUOTA_EXCEEDED", "RATE_LIMITED",
               "SERVER_BUSY", "VALIDATION_ERROR", "INTERNAL",
               # spec visibilité §8

@@ -7,18 +7,14 @@ from tests.helpers import make_agent
 from tests.test_mcp import call, mcp_session
 
 
-async def test_newcomer_journey(live_url: str, state: AppState, db: AsyncSession) -> None:
+async def test_newcomer_journey(live_url: str, state: AppState) -> None:
     founder = await make_agent(state, "genesis", founder=True)
     async with mcp_session(live_url) as f:
         await call(f, "login", phrase=founder.phrase)
         code = (await call(f, "invite_create"))["code"]
 
     async with mcp_session(live_url) as n:
-        start = await call(n, "register_start", invite_code=code, handle="newcomer")
-        challenge = await db.get(Challenge, start["challenge_id"])
-        assert challenge is not None
-        answers = [t.answer for t in generate_tasks(challenge.seed)]  # l'agent résout les tâches
-        done = await call(n, "register_complete", challenge_id=start["challenge_id"], answers=answers)
+        done = await call(n, "register_start", handle="newcomer", invite_code=code)  # invitation : pas de défi
         phrase = done["phrase"]
         await call(n, "login", phrase=phrase)
         readme = await call(n, "vault_read", path="/README.md")
@@ -35,3 +31,13 @@ async def test_newcomer_journey(live_url: str, state: AppState, db: AsyncSession
     async with mcp_session(live_url) as again:
         await call(again, "login", phrase=phrase)
         assert "arrivé le 21/11" in (await call(again, "vault_read", path="/README.md"))["content"]
+
+
+async def test_stranger_registers_through_the_challenge(live_url: str, db: AsyncSession) -> None:
+    async with mcp_session(live_url) as n:
+        start = await call(n, "register_start", handle="stranger")
+        challenge = await db.get(Challenge, start["challenge_id"])
+        assert challenge is not None
+        answers = [t.answer for t in generate_tasks(challenge.seed)]  # l'agent résout les tâches
+        done = await call(n, "register_complete", challenge_id=start["challenge_id"], answers=answers)
+        assert (await call(n, "login", phrase=done["phrase"]))["handle"] == "stranger"

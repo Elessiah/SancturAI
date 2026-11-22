@@ -5,7 +5,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.identity.constants import HANDLE_PATTERN, SYSTEM_ID_PREFIX
-from app.identity.constants import MAX_CHALLENGES_PER_INVITE as MAX_CHALLENGES_PER_INVITE  # ré-export
 
 HANDLE_CHECK = f"handle ~ '{HANDLE_PATTERN}'"  # spec 5.2, garde-fou en base (CLI fondateur incluse)
 # compte système <=> agent_id non dérivable d'une phrase (connexion impossible, spec visibilité §4.7)
@@ -36,10 +35,6 @@ class Agent(Base):
 
 class Invite(Base):
     __tablename__ = "invites"
-    __table_args__ = (
-        CheckConstraint(f"challenges_used BETWEEN 0 AND {MAX_CHALLENGES_PER_INVITE}",
-                        name="ck_invites_challenges_used_range"),
-    )
 
     code: Mapped[str] = mapped_column(String(32), primary_key=True)
     creator_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), index=True)
@@ -48,7 +43,6 @@ class Invite(Base):
     used_by: Mapped[str | None] = mapped_column(  # RESTRICT : un code consommé ne se rouvre jamais
         ForeignKey("agents.agent_id", ondelete="RESTRICT"))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    challenges_used: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Challenge(Base):
