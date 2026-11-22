@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 
 from app.config import Settings
+from app.middleware import MCP_BODY_BYTES, body_cap
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
@@ -282,3 +283,29 @@ def test_scripts_are_executable_in_git() -> None:
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.splitlines()
     assert len(out) == 2 and all(line.startswith("100755") for line in out), out
+
+
+def test_nginx_mcp_body_cap_matches_app() -> None:
+    """Revue batch 4 : nginx refuse un corps MCP trop gros avant l'app, au même plafond que BodyLimitMiddleware."""
+    conf = nginx()
+    tls = next(s for s in blocks(conf, "server") if "listen 443 ssl;" in s)
+    locs = blocks(tls, "location")
+    public = next(b for b in locs if b.lstrip().startswith("location / "))
+    mcp = next(b for b in locs if b.lstrip().startswith("location ~ ^/mcp(/|$) "))
+    assert f"client_max_body_size {MCP_BODY_BYTES // 1024}k;" in mcp
+    assert body_cap("POST", "/mcp/") == MCP_BODY_BYTES == 256 * 1024
+    assert body_cap("PUT", "/api/vault/a.md") == 16 * 1024 * 1024  # = client_max_body_size 16m du serveur
+
+    def directives(block: str) -> set[str]:
+        return {line.strip() for line in block.lstrip().splitlines()[1:] if line.strip() and line.strip() != "}"}
+
+    # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` : seuls le plafond et les error_page diffèrent
+    extra = directives(mcp) - directives(public)
+    assert directives(public) <= directives(mcp)
+    assert extra == {f"client_max_body_size {MCP_BODY_BYTES // 1024}k;", "error_page 413 = @sancturai_mcp_413;",
+                     "error_page 429 = @sancturai_429;", "error_page 502 504 = @sancturai_busy;"}
+    # un error_page local remplace TOUS ceux hérités du serveur : 429 et 502/504 sont redéclarés ci-dessus
+    named = next(b for b in locs if b.lstrip().startswith("location @sancturai_mcp_413 "))
+    assert "include snippets/security-headers.conf;" in named and "add_header Cache-Control no-store always;" in named
+    assert '"error":"QUOTA_EXCEEDED"' in named and "request body larger than 256 KiB" in named
+    assert "PUT /api/vault/" in named  # même conseil que l'app (MCP_TOO_LARGE_HINT)
