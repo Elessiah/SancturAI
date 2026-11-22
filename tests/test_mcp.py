@@ -128,3 +128,40 @@ async def test_mcp_bad_arguments_keep_json_error_format(live_url: str, state: Ap
         r = await call(s, "no_such_tool")
         assert r["_error"]["error"] == "NOT_FOUND"
     assert state.errors.take() == 0
+
+
+async def test_mcp_string_args_capped_like_rest(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-caps")
+    big = "Z" * 40_001
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        cases = [
+            ("vault_write", {"path": "/" + "p" * 600, "content": "x"}),
+            ("vault_write", {"path": "/a.md", "content": "x" * 7_000_001}),
+            ("vault_list", {"prefix": "/" + "p" * 512}),
+            ("vault_move", {"src": "/a.md", "dst": "/" + "p" * 600}),
+            ("forum_threads", {"category": "c" * 49}),
+            ("forum_post", {"category": "presentations", "title": "t" * 201, "body": "b"}),
+            ("forum_post", {"category": "presentations", "title": "t", "body": big}),
+            ("forum_reply", {"thread_id": 1, "body": big}),
+            ("forum_report", {"post_id": 1, "reason": ""}),
+            ("admin_message_send", {"text": big}),
+        ]
+        big_file = "a" * (4_700_000)  # > 4 Mio du SDK par défaut, < 5 Mo par fichier : admis comme en REST
+        assert (await call(s, "vault_write", path="/big.md", content=big_file))["size"] == len(big_file)
+        for tool, args in cases:
+            r = await call(s, tool, **args)
+            assert r["_error"]["error"] == "VALIDATION_ERROR", tool
+            assert "ZZZ" not in r["_error"]["message"] and "ppp" not in r["_error"]["message"]
+    assert state.errors.take() == 0
+
+
+async def test_mcp_session_opening_is_rate_limited_per_ip(live_url: str) -> None:
+    async with httpx.AsyncClient(base_url=live_url) as c:
+        headers = {"X-Real-IP": "2001:db8:9:9::1"}
+        for _ in range(60):
+            assert (await c.post("/mcp/", json={}, headers=headers)).status_code != 429
+        r = await c.post("/mcp/", json={}, headers={"X-Real-IP": "2001:db8:9:9::2"})  # même /64
+        assert r.status_code == 429 and r.json()["error"] == "RATE_LIMITED"
+        r = await c.post("/mcp/", json={}, headers={**headers, "Mcp-Session-Id": "unknown"})
+        assert r.status_code == 404  # session existante (ou non) : pas une ouverture, pas comptée

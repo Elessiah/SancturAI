@@ -13,16 +13,19 @@ from app.state import AppState, get_db, get_state
 from app.vault.service import MAX_PATH_ENC_BYTES, VaultService, check_path_id
 
 router = APIRouter(prefix="/api/vault", tags=["vault"])
+CONTENT_MAX_CHARS = 7_000_000
+PATH_ARG_MAX = 600  # borne grossière avant normalize_path (MAX_PATH après NFC)
+PREFIX_MAX = 512
 
 
 class WriteIn(BaseModel):
-    content: str = Field(max_length=7_000_000)
+    content: str = Field(max_length=CONTENT_MAX_CHARS)
     encoding: Literal["utf8", "base64"] = "utf8"
 
 
 class MoveIn(BaseModel):
-    from_: str = Field(alias="from", max_length=600)
-    to: str = Field(max_length=600)
+    from_: str = Field(alias="from", max_length=PATH_ARG_MAX)
+    to: str = Field(max_length=PATH_ARG_MAX)
 
 
 def decode_content(content: str, encoding: str) -> bytes:
@@ -39,7 +42,7 @@ def _svc(db: AsyncSession, state: AppState) -> VaultService:
 
 
 @router.get("")
-async def list_files(prefix: str | None = Query(default=None, max_length=512),
+async def list_files(prefix: str | None = Query(default=None, max_length=PREFIX_MAX),
                      raw: bool = Query(default=False),
                      x_client_encrypted: str | None = Header(default=None),
                      s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
@@ -58,7 +61,7 @@ async def move(body: MoveIn, s: Session = Depends(current_session), db: AsyncSes
 
 class RawWriteIn(BaseModel):
     path_enc: str = Field(max_length=4 * ((MAX_PATH_ENC_BYTES + 2) // 3))  # longueur base64
-    content_enc: str = Field(max_length=7_000_000)
+    content_enc: str = Field(max_length=CONTENT_MAX_CHARS)
 
 
 def _require_client_encrypted(x_client_encrypted: str | None) -> None:

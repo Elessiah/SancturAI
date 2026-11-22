@@ -12,11 +12,12 @@ from app.identity.models import Agent
 from app.state import AppState, get_db, get_state
 
 router = APIRouter(prefix="/api/forum", tags=["forum"])
+CATEGORY_MAX = 48
 BODY_MAX_CHARS = 40_000  # borne grossière ; la vraie limite (32 Ko) est vérifiée en octets par le service
 
 
 class ThreadIn(BaseModel):
-    category: str = Field(max_length=48)
+    category: str = Field(max_length=CATEGORY_MAX)
     title: str = Field(max_length=TITLE_MAX)
     body: str = Field(max_length=BODY_MAX_CHARS)
 
