@@ -6,7 +6,7 @@
 # Code 2 : sauvegarde ignorée (volume non monté ou trop plein) ; tout autre échec : 1.
 set -euo pipefail
 cd "$(dirname "$0")"
-if [ "$(id -u)" -ne 0 ]; then
+if [[ "$(id -u)" -ne 0 ]]; then
   echo "lancer avec sudo : sudo deploy/backup.sh daily|pre-<sha12>" >&2
   exit 1
 fi
@@ -16,7 +16,7 @@ data=/srv/sancturai-data
 dir=${data}/backups
 # Même seuil que la garde disque de l'app (disk_busy_ratio = 0.85), sauvegarde comprise.
 max_used_pct=85
-if [ "${label}" = daily ]; then
+if [[ "${label}" = daily ]]; then
   kind=daily keep=7
   # Le minuteur attend la fin d'un déploiement en cours (deploy.sh tient ce verrou et appelle ce script lui-même).
   exec 9>/run/lock/sancturai-deploy.lock
@@ -31,7 +31,7 @@ mountpoint -q "${data}" || { echo "AVERTISSEMENT : ${data} non monté, sauvegard
 db_bytes=$(docker compose exec -T -u postgres db psql -U postgres -Atc "SELECT pg_database_size('sancturai')")
 [[ "${db_bytes}" =~ ^[0-9]+$ ]] || { echo "taille de la base illisible" >&2; exit 1; }
 read -r total used < <(df --output=size,used -B1 "${data}" | tail -n 1)
-if [ $(( (used + db_bytes) * 100 )) -ge $(( total * max_used_pct )) ]; then
+if [[ $(( (used + db_bytes) * 100 )) -ge $(( total * max_used_pct )) ]]; then
   echo "AVERTISSEMENT : ${data} dépasserait ${max_used_pct} % avec la sauvegarde (${db_bytes} octets) : ignorée" >&2
   exit 2
 fi
@@ -43,7 +43,7 @@ tmp="${dir}/.${name}.tmp"
 trap 'rm -f "${tmp}"' EXIT
 # -T : pas de pseudo-terminal (flux binaire intact) ; mot de passe inutile, `peer` sur le socket du conteneur.
 docker compose exec -T -u postgres db pg_dump -U postgres -Fc -Z 6 sancturai > "${tmp}"
-[ -s "${tmp}" ] || { echo "sauvegarde vide" >&2; exit 1; }
+[[ -s "${tmp}" ]] || { echo "sauvegarde vide" >&2; exit 1; }
 mv "${tmp}" "${dir}/${name}"
 trap - EXIT
 # Rotation dans la famille de l'étiquette (noms horodatés UTC, donc triables).

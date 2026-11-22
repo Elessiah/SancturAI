@@ -8,8 +8,8 @@ set -eu
 psql -v ON_ERROR_STOP=1 --username postgres --dbname postgres <<'SQL'
 \getenv db_pw SANCTURAI_DB_PASSWORD
 \getenv relay_pw SANCTURAI_RELAY_PASSWORD
-CREATE ROLE sancturai LOGIN PASSWORD :'db_pw';
-CREATE ROLE relay LOGIN PASSWORD :'relay_pw';
+SELECT format('CREATE ROLE sancturai LOGIN PASSWORD %L', :'db_pw') \gexec
+SELECT format('CREATE ROLE relay LOGIN PASSWORD %L', :'relay_pw') \gexec
 CREATE DATABASE sancturai OWNER sancturai;
 REVOKE ALL ON DATABASE sancturai FROM PUBLIC;
 GRANT CONNECT ON DATABASE sancturai TO relay;

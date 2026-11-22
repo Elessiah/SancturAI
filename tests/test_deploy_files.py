@@ -223,7 +223,7 @@ def test_db_socket_not_world_accessible() -> None:
 
 def test_roles_script_passes_passwords_as_psql_variables() -> None:
     sh = (DEPLOY / "postgres" / "init" / "01-roles.sh").read_text(encoding="utf-8")
-    assert "PASSWORD :'db_pw'" in sh and "PASSWORD :'relay_pw'" in sh
+    assert "PASSWORD %L', :'db_pw')" in sh and "PASSWORD %L', :'relay_pw')" in sh
     heredoc = sh.split("<<'SQL'", 1)[1]
     assert "${" not in heredoc  # heredoc littéral : aucun mot de passe interpolé dans le SQL
     # lus dans l'environnement par psql, jamais en argument (ligne de commande visible via ps sur l'hôte)

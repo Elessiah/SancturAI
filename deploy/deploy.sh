@@ -4,7 +4,7 @@
 # healthcheck réussi, et un échec ramène l'app sur l'image précédente (setup.md, « Retour arrière »).
 set -euo pipefail
 cd "$(dirname "$0")"
-if [ "$(id -u)" -ne 0 ]; then
+if [[ "$(id -u)" -ne 0 ]]; then
   echo "lancer avec sudo : sudo deploy/deploy.sh <sha>" >&2
   exit 1
 fi
@@ -14,10 +14,10 @@ flock -n 9 || { echo "un autre déploiement est en cours" >&2; exit 1; }
 sha=${1:-}
 # Image épinglée par commit (jamais :latest) ; le SHA validé ne peut rien injecter dans .env ni dans compose.
 [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "usage : sudo deploy/deploy.sh <SHA complet (40 hex)>" >&2; exit 1; }
-[ -f .env ] || { echo "deploy/.env absent (voir env.example)" >&2; exit 1; }
+[[ -f .env ]] || { echo "deploy/.env absent (voir env.example)" >&2; exit 1; }
 secrets=/home/elessiah/apps/.secrets
 for f in "${secrets}/sancturai-db.env" "${secrets}/sancturai.env" "${secrets}/sancturai-relay.env"; do
-  [ -r "${f}" ] || { echo "${f} absent ou illisible (setup.md §1)" >&2; exit 1; }
+  [[ -r "${f}" ]] || { echo "${f} absent ou illisible (setup.md §1)" >&2; exit 1; }
 done
 current_image=$(grep -E '^SANCTURAI_IMAGE=' .env | cut -d= -f2-) || true
 # `dépôt:étiquette` uniquement : une référence par digest (@sha256:…) donnerait ici une image invalide.
@@ -80,7 +80,7 @@ grants() {
 # de l'app) : le moindre échec passe par le retour arrière ci-dessous, .env restant inchangé.
 if grants && docker compose up -d app && healthy; then
   serving="${SANCTURAI_IMAGE}"
-  if [ "${current_image}" != "${SANCTURAI_IMAGE}" ]; then
+  if [[ "${current_image}" != "${SANCTURAI_IMAGE}" ]]; then
     # Les commandes `docker compose` manuelles (create-founder, urgence) visent désormais l'image déployée ;
     # l'image remplacée est gardée (retour arrière) et seule l'avant-dernière est supprimée (ciblée, jamais `prune`).
     sed -i "s|^SANCTURAI_IMAGE=.*|SANCTURAI_IMAGE=${SANCTURAI_IMAGE}|" .env
@@ -89,8 +89,8 @@ if grants && docker compose up -d app && healthy; then
     else
       echo "SANCTURAI_PREVIOUS_IMAGE=${current_image}" >> .env
     fi
-    if [ -n "${previous_image}" ] && [ "${previous_image}" != "${current_image}" ] \
-        && [ "${previous_image}" != "${SANCTURAI_IMAGE}" ]; then
+    if [[ -n "${previous_image}" && "${previous_image}" != "${current_image}" \
+        && "${previous_image}" != "${SANCTURAI_IMAGE}" ]]; then
       docker image rm "${previous_image}" >/dev/null 2>&1 || true
     fi
   fi
@@ -104,7 +104,7 @@ echo "déploiement en échec (droits, démarrage ou healthcheck) : retour à ${c
 if SANCTURAI_IMAGE="${current_image}" docker compose up -d --pull never app && healthy; then
   state="retour à ${current_image} effectué"
   # L'image ratée ne s'accumule pas sur la racine partagée : seules l'image en service et la précédente restent.
-  if [ "${SANCTURAI_IMAGE}" != "${current_image}" ] && [ "${SANCTURAI_IMAGE}" != "${previous_image}" ]; then
+  if [[ "${SANCTURAI_IMAGE}" != "${current_image}" && "${SANCTURAI_IMAGE}" != "${previous_image}" ]]; then
     docker image rm "${SANCTURAI_IMAGE}" >/dev/null 2>&1 || true
   fi
 else
