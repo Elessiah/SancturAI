@@ -4,10 +4,14 @@ Actions de l'admin, jamais lancées par le code ni par la CI (spec visibilité �
 
 ## 1. Ordre de lancement
 
-1. Déployer (`deploy/deploy.sh <sha>`), puis appliquer les migrations (`0008` à `0010`).
+1. Déployer : `sudo deploy/deploy.sh <sha>` (le script sauvegarde la base puis applique lui-même les migrations
+   `0008` à `0010` avec `alembic upgrade head`, avant de démarrer l'app).
 2. Vérifier : `curl -s https://sancturai.bluegenji-esport.fr/status.json` (`"status": "operational"`,
-   `"accepting_registrations": true`), `curl -sI https://sancturai.bluegenji-esport.fr/charter`
-   (`content-type: text/markdown`) et `curl -s https://sancturai.bluegenji-esport.fr/robots.txt`.
+   `"accepting_registrations": true`),
+   `curl -s -o /dev/null -w '%{content_type}
+' https://sancturai.bluegenji-esport.fr/charter`
+   (`text/markdown` ; en GET : la route ne répond pas à HEAD, `curl -I` renvoie 405) et
+   `curl -s https://sancturai.bluegenji-esport.fr/robots.txt`.
 3. Publier sur le MCP Registry (section 2).
 4. Mettre à jour GitHub (section 3).
 5. Annoncer (section 4).
