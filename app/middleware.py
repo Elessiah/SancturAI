@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 
 import anyio
@@ -93,15 +94,19 @@ MAX_JSON_STRUCTURE = 1000
 # Budget global des corps en vol (REST + MCP), compté sur la longueur déclarée AVANT tout parsing : il borne la
 # concurrence (nginx admet 256 connexions × 16 Mio).
 BODY_BUDGET_BYTES = 17 * MIB  # un corps REST maximal (16 Mio) + 1 Mio de petits corps simultanés
-# Pire cas mémoire, conteneur 896 Mio, 1 worker :
+# Pire cas mémoire (tas, pas RSS), conteneur 896 Mio, 1 worker :
 #   socle Python/FastAPI/SQLAlchemy/SDK MCP ≈ 150 Mio ; Argon2 2 × 64 Mio = 128 Mio ;
-#   corps en vol : ≈ 5 × le budget (tampon ici, copie du framework, chaîne JSON, base64 décodé, chiffré)
-#   = 5 × 17 Mio ≈ 85 Mio ;
-#   sessions MCP inactives : état ~60 Kio de tas (≈ 120 Kio de RSS) + dernier message gardé par le SDK
-#   (corps brut, chaîne json.loads et copie model_dump ≈ 4 × 256 Kio = 1 Mio) → 300 × 1,12 Mio ≈ 336 Mio ;
-#   total ≈ 700 Mio < 896 Mio. Un outil MCP qui survit à son échange HTTP (client parti) garde ≤ 1 Mio
-#   d'arguments ; leur nombre est borné par AGENT_RATE (60/min, comptes sur invitation) et la durée d'un outil
-#   (pool_timeout 30 s) : quelques dizaines de Mio au pire par agent, couverts par la marge ≈ 196 Mio.
+#   corps en vol : un emoji dans une chaîne la fait stocker à 4 octets/caractère par CPython : json.loads d'un corps
+#   REST de 16 Mio culmine à 128 Mio (texte décodé + valeur, mesuré), + le corps brut 16, puis encodé et chiffré
+#   (≤ 2 × 16) une fois le texte décodé libéré → ≈ 175 Mio ; + 1 Mio de petits corps × ≈ 8 → ≈ 185 Mio. Le scan
+#   (json_structure) copie au plus 2 × le corps, libérées avant le parsing : pas cumulé ;
+#   sessions MCP inactives (150, décidé par l'utilisateur) : état ~60 Kio + dernier message gardé par le SDK
+#   (arbre, modèle et model_dump qui partage les chaînes ≈ 0,96 Mio élargis pour 244 Kio, + corps brut 256 Kio)
+#   ≈ 1,3 Mio → 150 × 1,3 ≈ 195 Mio ;
+#   total ≈ 660 Mio < 896 Mio, marge ≈ 235 Mio. Elle couvre les outils MCP qui survivent à leur échange HTTP (client
+#   parti, ≤ 256 Kio d'arguments chacun, ≈ 1,3 Mio parsés) : authentifiés, bornés par AGENT_RATE (60/min, comptes
+#   sur invitation) et la durée d'un outil (pool_timeout 30 s) ; non authentifiés (login, register_start/complete),
+#   refusés par leur limiteur IP en mémoire avant toute requête DB, donc brefs (i9) ; et la fragmentation du tas.
 BODY_BUDGET_WAIT = 10.0  # attente bornée d'une place dans le budget, puis SERVER_BUSY
 # Détention bornée de l'échange (lecture du corps comprise) : sans borne, un client qui envoie son corps ou lit sa
 # réponse au compte-gouttes (sans nginx) garderait sa réservation.
@@ -111,14 +116,29 @@ MCP_TOO_LARGE_HINT = (f"Une requête MCP est limitée à {MCP_BODY_BYTES // KIB}
                       "(jusqu'à la limite du vault), utilise l'API REST : PUT /api/vault/<chemin>.")
 DENSE_HINT = (f"Corps JSON trop structuré (plus de {MAX_JSON_STRUCTURE} objets, listes ou champs) : mets le contenu "
               "dans une chaîne (encoding base64 pour un fichier).")
+UTF8_HINT = "Envoie le corps JSON encodé en UTF-8 (UTF-16 et UTF-32 sont refusés)."
 assert MAX_UPLOAD_BYTES <= BODY_BUDGET_BYTES
-_JSON_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+_JSON_STRING = re.compile(rb'"[^"]*"')
 
 
 def json_structure(body: bytes) -> int:
-    """Nombre de { [ , : hors chaînes JSON (échappements compris ; une chaîne non fermée compte comme structure)."""
-    bare = _JSON_STRING.sub(b"", body)
+    """Nombre de { [ , : hors chaînes JSON (une chaîne non fermée compte comme structure). Linéaire (N5) : les
+    échappements (barre oblique doublée, puis guillemet échappé) sont retirés d'abord ; en JSON valide ils n'existent
+    que dans les chaînes et s'apparient de gauche à droite. Chaque chaîne restante est alors un simple "…".
+    s chaînes d'un JSON valide sont séparées par au moins s - 1 , ou : : au-delà du seuil, le score est ce minorant,
+    sans retirer les chaînes une à une (≈ 0,7 s par 16 Mio de guillemets sinon). Un thread n'aiderait pas : re et
+    bytes gardent le GIL (mesuré, m6)."""
+    bare = body.replace(b"\\\\", b"").replace(b'\\"', b"")
+    strings_floor = bare.count(b'"') // 2 - 1
+    if strings_floor > MAX_JSON_STRUCTURE:
+        return strings_floor
+    bare = _JSON_STRING.sub(b"", bare)
     return bare.count(b"{") + bare.count(b"[") + bare.count(b",") + bare.count(b":")
+
+
+def is_utf8_json(body: bytes) -> bool:
+    """Même détection que json.loads(bytes) (Starlette, SDK MCP) : UTF-16/32 refusés, le scan ne lit que l'UTF-8 (N4)."""
+    return json.detect_encoding(body) in ("utf-8", "utf-8-sig")
 
 
 def _is_mcp(path: str) -> bool:
@@ -210,6 +230,10 @@ class BodyLimitMiddleware:
                 if chunked:  # réservation ramenée à la taille réelle
                     self.budget.release(reserved - len(body))
                     reserved = len(body)
+                if not is_utf8_json(body):
+                    utf8 = ApiError("VALIDATION_ERROR", "request body must be UTF-8 JSON", hint=UTF8_HINT)
+                    await _reject(utf8, scope, receive, watched_send)
+                    return
                 if json_structure(body) > MAX_JSON_STRUCTURE:
                     dense = ApiError("VALIDATION_ERROR", "request body is too structured", hint=DENSE_HINT)
                     await _reject(dense, scope, receive, watched_send)

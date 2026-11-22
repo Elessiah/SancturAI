@@ -1,5 +1,7 @@
 import asyncio
 import json
+import random
+import time
 from typing import Any
 
 import httpx
@@ -352,3 +354,83 @@ async def test_single_hold_never_sends_a_second_response(monkeypatch: pytest.Mon
     send = Recorder()
     await asyncio.wait_for(guard(scope("/api/vault/a.md", method="PUT", chunked=True), slow_receive, send), 2)
     assert [x["type"] for x in send.messages] == ["http.response.start"] and guard.budget.used == 0
+
+
+def _structure(v: Any) -> int:
+    """Oracle indépendant du scan : { [ , : que le parseur a réellement vus."""
+    if isinstance(v, dict):
+        return (2 * len(v) if v else 1) + sum(_structure(x) for x in v.values())
+    if isinstance(v, list):
+        return 1 + max(len(v) - 1, 0) + sum(_structure(x) for x in v)
+    return 0
+
+
+def _random_json(rng: random.Random, depth: int = 0) -> Any:
+    alphabet = ['"', "\\", "{", "[", ",", ":", "a", "é", "Ģ", "😀", "\n", "\\\\", '\\"', "u"]
+    kind = rng.randrange(5 if depth < 3 else 3)
+    if kind == 0:
+        return "".join(rng.choice(alphabet) for _ in range(rng.randrange(12)))
+    if kind == 1:
+        return rng.choice([1, -2.5, True, None])
+    if kind == 2:
+        return ""
+    if kind == 3:
+        return [_random_json(rng, depth + 1) for _ in range(rng.randrange(4))]
+    return {str(_random_json(rng, 3)): _random_json(rng, depth + 1) for _ in range(rng.randrange(4))}
+
+
+def test_json_structure_matches_the_parser_on_valid_json() -> None:
+    rng = random.Random(4)  # noqa: S311 - fuzz déterministe
+    for _ in range(3000):
+        value = _random_json(rng)
+        raw = json.dumps(value, ensure_ascii=rng.random() < 0.5, indent=rng.choice([None, 1])).encode()
+        assert m.json_structure(raw) == _structure(json.loads(raw)), raw
+
+
+def test_json_structure_is_linear_on_adversarial_strings() -> None:
+    # N5 : une chaîne non fermée faite de \" était rebalayée à chaque guillemet (O(N²) : 6,7 s pour 64 Kio)
+    t = time.perf_counter()
+    m.json_structure(b'"' + b'\\"' * (32 * KIB))
+    assert time.perf_counter() - t < 0.5
+    n = m.MAX_UPLOAD_BYTES  # plus grand plafond de route, scanné avant toute authentification
+    for body in (b'"' + b'\\"' * (n // 2), b'"' * n, b'"' + b"\\" * n, b'"\\' * (n // 2), b'"a"' * (n // 3)):
+        t = time.perf_counter()
+        m.json_structure(body)
+        assert time.perf_counter() - t < 1.0, body[:8]
+
+
+async def test_non_utf8_bodies_rejected_before_the_scan() -> None:
+    # N4 : en UTF-16, un caractère comme Ģ (22 01) fournit un faux octet guillemet et cache la structure au scan,
+    # alors que json.loads (Starlette, SDK MCP) décode ces corps sans broncher.
+    called = False
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal called
+        called = True
+        await ok(scope, receive, send)
+
+    value = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "help", "arguments": {}, "a": "Ģ", "junk": [{}] * 5000, "z": "Ģ"}}
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    guard = BodyLimitMiddleware(inner)
+    for codec in ("utf-16-le", "utf-16-be", "utf-16", "utf-32-le", "utf-32"):
+        raw = text.encode(codec)
+        assert len(raw) <= m.MCP_BODY_BYTES and json.loads(raw) == value
+
+        async def receive(raw: bytes = raw) -> Any:
+            return {"type": "http.request", "body": raw, "more_body": False}
+
+        for path, method in (("/mcp/", "POST"), ("/api/vault/a.md", "PUT")):
+            send = Recorder()
+            await guard(scope(path, len(raw), method), receive, send)
+            assert send.status == 422 and send.json["error"] == "VALIDATION_ERROR", (codec, path)
+            assert "UTF-8" in send.json["hint"] and "Ģ" not in json.dumps(send.json), codec
+    assert not called and guard.budget.used == 0
+    bom = b"\xef\xbb\xbf" + json.dumps(INIT_FULL).encode()  # utf-8-sig : accepté par json.loads, scanné normalement
+
+    async def receive_bom() -> Any:
+        return {"type": "http.request", "body": bom, "more_body": False}
+
+    send = Recorder()
+    await guard(scope("/mcp/", len(bom)), receive_bom, send)
+    assert send.status == 200 and called

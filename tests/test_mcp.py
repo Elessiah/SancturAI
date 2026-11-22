@@ -234,7 +234,7 @@ async def test_mcp_session_cap_sized_for_container(state: AppState) -> None:
 
     mcp = build_mcp(state)
     mcp.streamable_http_app()
-    assert MCP_MAX_SESSIONS == 300 and mcp.session_manager.max_sessions == MCP_MAX_SESSIONS
+    assert MCP_MAX_SESSIONS == 150 and mcp.session_manager.max_sessions == MCP_MAX_SESSIONS
     assert MCP_IDLE_TIMEOUT == 1800 and mcp.session_manager.session_idle_timeout == MCP_IDLE_TIMEOUT
 
 
