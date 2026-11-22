@@ -8,10 +8,10 @@ Base: 8a97dd1
 | P2 | perf | minor | app/tribunal/proceedings.py:117 | trial thread reply insertion (lock, Post, reply_count, last_activity) duplicated from system_reply in TrialService.defend | fixed | c2f10cf |
 | P3 | perf | minor | app/tribunal/proceedings.py:85 | four sequential queries (row, dossier, defense, your_vote) folded into one select with scalar subqueries in TrialService.read_trial | fixed | c2f10cf |
 | P4 | perf | minor | app/cli.py:25 | chained add_parser/add_argument split by a run of spaces mid-line for unfreeze in _parser | fixed | c2f10cf |
-| S1 | secu | major | app/tribunal/proceedings.py:143 | vote accepted after the deadline until the periodic task runs, can flip the deadline verdict (tie/zero = reactivate) in TrialService.vote | fixed | SHA |
-| S2 | secu | minor | app/tribunal/proceedings.py:125 | defense accepted after the deadline in TrialService.defend | fixed | SHA |
-| S3 | secu | minor | app/tribunal/proceedings.py:66 | votes of a voter frozen during the trial (no longer eligible) still counted in TrialService._tally | fixed | SHA |
-| S4 | secu | minor | app/forum/service.py:207 | trial defense editable by the accused after reactivation (spec: non modifiable) in ForumService.edit | fixed | SHA |
+| S1 | secu | major | app/tribunal/proceedings.py:143 | vote accepted after the deadline until the periodic task runs, can flip the deadline verdict (tie/zero = reactivate) in TrialService.vote | fixed | 1584f30 |
+| S2 | secu | minor | app/tribunal/proceedings.py:125 | defense accepted after the deadline in TrialService.defend | fixed | 1584f30 |
+| S3 | secu | minor | app/tribunal/proceedings.py:66 | votes of a voter frozen during the trial (no longer eligible) still counted in TrialService._tally | fixed | 1584f30 |
+| S4 | secu | minor | app/forum/service.py:207 | trial defense editable by the accused after reactivation (spec: non modifiable) in ForumService.edit | fixed | 1584f30 |
 
 P1 wontfix : la seule alternative correcte (verrou du procès d'abord, puis pg_try_advisory_xact_lock exclusif et repli par ROLLBACK TO SAVEPOINT, qui libère le verrou du procès sans relâcher le verrou partagé du votant) ajoute un chemin de reprise pour un gain négligeable ; prendre le verrou après le procès sans repli rouvre l'interblocage avec la défense, et un rollback complet relâcherait le verrou de statut du votant (S1 Task 6). Les votes sont bornés par eligible_count par procès, déjà sérialisés par la ligne trials, et l'accusé gelé n'a en vol que me/trial_read/trial_defense.
 Revu sans finding : décompte agrégé GROUP BY sur la clé primaire (trial_id, voter_id) ; échéances par une requête sur ix_trials_status_deadline puis une transaction par procès dû ; trial_list paginée (count + page jointe, sans N+1) ; outils MCP délégués à TrialService (pas de doublon avec REST) ; aucune I/O bloquante (disque mis en cache par DiskGuard).
