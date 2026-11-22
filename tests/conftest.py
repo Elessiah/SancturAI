@@ -1,7 +1,10 @@
+import asyncio
+import socket
 from collections.abc import AsyncIterator, Iterator
 
 import httpx
 import pytest
+import uvicorn
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -77,3 +80,18 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 async def db(state: AppState) -> AsyncIterator[AsyncSession]:
     async with state.sessionmaker() as session:
         yield session
+
+
+@pytest.fixture(scope="session")
+async def live_url(app: FastAPI) -> AsyncIterator[str]:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, lifespan="off", log_level="warning"))
+    task = asyncio.create_task(server.serve())
+    while not server.started:  # noqa: ASYNC110
+        await asyncio.sleep(0.05)
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    await task

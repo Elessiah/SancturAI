@@ -14,7 +14,7 @@ dependencies = [
   "cryptography>=44",
   "mnemonic>=0.21",
   "base58>=2.1",
-  "mcp>=1.20",
+  "mcp>=1.20,<2",
 ]
 
 [project.scripts]

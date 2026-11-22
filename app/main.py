@@ -13,6 +13,7 @@ from app.errors import install_error_handlers
 from app.forum.api import router as forum_router
 from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
+from app.mcp_server import build_mcp
 from app.middleware import InternalGuardMiddleware, NoStoreMiddleware
 from app.state import AppState
 from app.vault.api import router as vault_router
@@ -26,13 +27,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.warning("internal_token is shorter than %d characters: /internal is closed (every request gets 404)",
                     MIN_INTERNAL_TOKEN)
     state = AppState.build(settings)
+    mcp = build_mcp(state)
+    mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task = (asyncio.create_task(maintenance_loop(state, state.settings.maintenance_interval_seconds))
                 if state.settings.maintenance_interval_seconds > 0 else None)
         try:
-            yield
+            async with mcp.session_manager.run():
+                yield
         finally:
             if task:
                 task.cancel()
@@ -54,4 +58,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(forum_router)
     app.include_router(vault_router)
     app.include_router(admin_router)
+    app.mount("/mcp", mcp_app)  # /mcp/ ; NoStoreMiddleware et InternalGuardMiddleware l'enveloppent aussi
     return app
