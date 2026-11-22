@@ -11,11 +11,11 @@ Base: 3aa2664
 | P5 | perf | minor | deploy/deploy.sh:8 | `.env` relu par grep alors que compose le lit déjà, échec cryptique si absent in deploy.sh | fixed | 12d68c8 |
 | P6 | perf | minor | deploy/nginx/sancturai.conf:upstream | pas de keepalive sur l'upstream sancturai_app in nginx | wontfix |  |
 | P7 | perf | minor | deploy/nginx/sancturai.conf:44 | commentaire client_max_body_size verbeux avec référence de revue, blocs @sancturai_* répétitifs in nginx | fixed | 12d68c8 |
-| S1 | secu | major | deploy/docker-compose.yml:networks | l'hôte garde une IP (passerelle) sur le pont `internal` : les conteneurs joignent tous ses services en 0.0.0.0 (vérifié Docker 29) in networks.internal | fixed |  |
-| S2 | secu | major | deploy/postgres/init/01-roles.sh:8 | mots de passe des rôles passés en argument psql (`-v db_pw=…`), lisibles par tout compte de l'hôte via ps in 01-roles.sh | fixed |  |
-| S3 | secu | major | deploy/systemd/sancturai-relay.service | relais non confiné réseau (pas d'IPAddressDeny/Allow, RestrictAddressFamilies, CapabilityBoundingSet, Protect*) alors qu'il ne doit parler qu'au bot (§4.1) in sancturai-relay.service | fixed |  |
-| S4 | secu | major | deploy/nginx/sancturai.conf:location / | aucun plafond de connexions par IP : flux SSE de 300 s, une IP épuise worker_connections partagé avec les autres sites in nginx location / | fixed |  |
-| S5 | secu | major | deploy/docker-compose.yml:db | conteneur db sans `read_only` (§4.2) in db | fixed |  |
+| S1 | secu | major | deploy/docker-compose.yml:networks | l'hôte garde une IP (passerelle) sur le pont `internal` : les conteneurs joignent tous ses services en 0.0.0.0 (vérifié Docker 29) in networks.internal | fixed | b26ca7f |
+| S2 | secu | major | deploy/postgres/init/01-roles.sh:8 | mots de passe des rôles passés en argument psql (`-v db_pw=…`), lisibles par tout compte de l'hôte via ps in 01-roles.sh | fixed | b26ca7f |
+| S3 | secu | major | deploy/systemd/sancturai-relay.service | relais non confiné réseau (pas d'IPAddressDeny/Allow, RestrictAddressFamilies, CapabilityBoundingSet, Protect*) alors qu'il ne doit parler qu'au bot (§4.1) in sancturai-relay.service | fixed | b26ca7f |
+| S4 | secu | major | deploy/nginx/sancturai.conf:location / | aucun plafond de connexions par IP : flux SSE de 300 s, une IP épuise worker_connections partagé avec les autres sites in nginx location / | fixed | b26ca7f |
+| S5 | secu | major | deploy/docker-compose.yml:db | conteneur db sans `read_only` (§4.2) in db | fixed | b26ca7f |
 | S6 | secu | major | deploy/docker-compose.yml:db | db démarre en root avec CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID alors que §4.2 exige un utilisateur non-root (plan-mandated) in db.cap_add | open |  |
 | S7 | secu | minor | deploy/deploy.sh:30 | relay a UPDATE sur toutes les colonnes d'outbox (payload, kind) au lieu de `UPDATE (sent_at, attempts, next_attempt_at)` (plan-mandated) in deploy.sh GRANT | open |  |
 | S8 | secu | minor | docs/ops/setup.md:14 | `install -d -m 700 ~/apps/.secrets` re-chmode un dossier de secrets existant partagé avec d'autres services in setup.md §1 | open |  |
