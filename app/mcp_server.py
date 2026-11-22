@@ -191,11 +191,22 @@ class SessionOpenLimit:
             busy = ApiError("SERVER_BUSY", "another large MCP request is in progress", retry_after=5)
             await error_response(busy)(scope, receive, send)
             return
+        started = False
+
+        async def watched_send(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        # Annuler le transport ne coupe que la réponse : l'outil s'exécute dans la tâche de session du SDK.
         try:
-            with anyio.move_on_after(MCP_LARGE_BODY_HOLD):
-                await self.app(scope, receive, send)
+            with anyio.move_on_after(MCP_LARGE_BODY_HOLD) as hold:
+                await self.app(scope, receive, watched_send)
         finally:
             self.large_body.release()
+        if hold.cancelled_caught and not started:  # sinon : 500 texte brut d'uvicorn (aucune réponse émise)
+            slow = ApiError("SERVER_BUSY", "large MCP request took too long", retry_after=5)
+            await error_response(slow)(scope, receive, send)
 
 
 def build_mcp(state: AppState) -> FastMCP[Any]:
@@ -248,7 +259,11 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def with_session(ctx: Ctx) -> AsyncIterator[tuple[AsyncSession, Session]]:
         """Session MCP authentifiée sans charger l'agent (comme `current_session` en REST : vault)."""
         async with db_only() as db:
-            yield db, resolve_session(state, state.sessions.token_for_mcp(mcp_id(ctx)))
+            sid = mcp_id(ctx)
+            token = state.sessions.token_for_mcp(sid)
+            if token is None and state.sessions.mcp_expired(sid):  # comme REST : token révoqué ou expiré
+                raise ApiError("SESSION_EXPIRED", "unknown or expired session")
+            yield db, resolve_session(state, token)
 
     @asynccontextmanager
     async def authed(ctx: Ctx) -> AsyncIterator[Call]:

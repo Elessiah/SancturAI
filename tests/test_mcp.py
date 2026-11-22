@@ -74,7 +74,7 @@ async def test_mcp_isolation(live_url: str, state: AppState) -> None:
         await call(sb, "vault_write", path="/private.md", content="à b")
         assert (await call(sa, "vault_read", path="/private.md"))["content"] == "à a"
         await call(sa, "logout")
-        assert (await call(sa, "vault_list"))["_error"]["error"] == "UNAUTHENTICATED"
+        assert (await call(sa, "vault_list"))["_error"]["error"] == "SESSION_EXPIRED"  # comme REST
 
 
 async def test_mcp_ip_limits_are_normalized_and_shared_with_rest(live_url: str, client: httpx.AsyncClient) -> None:
@@ -287,4 +287,28 @@ async def test_session_open_limit_bounds_large_body_lock(state: AppState, monkey
     statuses.clear()
     await asyncio.gather(guard(scope, receive, send), guard(scope, receive, send))
     assert sorted(statuses) == [200, 503]  # attente bornée : SERVER_BUSY
+    assert not guard.large_body.locked()
+
+
+async def test_large_body_hold_expiry_before_response_is_json(state: AppState,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.mcp_server as m
+
+    async def slow_upload(scope: Any, receive: Any, send: Any) -> None:  # aucune réponse avant la borne
+        await asyncio.sleep(3600)
+
+    guard = m.SessionOpenLimit(slow_upload, state, lambda sid: True)
+    big = [(b"mcp-session-id", b"s"), (b"content-length", str(m.MCP_SMALL_BODY_BYTES + 1).encode())]
+    sent: list[Any] = []
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 0.05)
+    await guard({"type": "http", "method": "POST", "headers": big, "client": ("127.0.0.1", 1)}, receive, send)
+    assert sent[0]["status"] == 503 and (b"retry-after", b"5") in sent[0]["headers"]
+    assert json.loads(sent[1]["body"])["error"] == "SERVER_BUSY"
     assert not guard.large_body.locked()

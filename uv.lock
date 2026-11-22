@@ -1589,7 +1589,7 @@ requires-dist = [
     { name = "base58", specifier = ">=2.1" },
     { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.120" },
-    { name = "mcp", specifier = ">=1.20,<2" },
+    { name = "mcp", specifier = ">=1.30,<1.31" },
     { name = "mnemonic", specifier = ">=0.21" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pynacl", specifier = ">=1.5" },

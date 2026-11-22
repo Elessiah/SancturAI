@@ -38,6 +38,23 @@ def test_mcp_binding() -> None:
     assert store.token_for_mcp("mcp-1") == token
     store.revoke(token)
     assert store.token_for_mcp("mcp-1") is None
+    assert store.mcp_expired("mcp-1") and not store.mcp_expired("never-bound")
+
+
+def test_mcp_expired_marker_is_bounded() -> None:
+    clock = Clock()
+    store = SessionStore(ttl_seconds=10, clock=clock)
+    token, _ = store.create("a", b"v" * 32, b"p" * 32)
+    store.bind_mcp("m", token)
+    clock.t += 11
+    assert store.token_for_mcp("m") is None and store.mcp_expired("m")  # expiré : marqué
+    t2, _ = store.create("a", b"v" * 32, b"p" * 32)
+    store.bind_mcp("m", t2)
+    assert not store.mcp_expired("m")  # reconnecté : marque levée
+    store.revoke(t2)
+    clock.t += 11
+    store.create("b", b"v" * 32, b"p" * 32)  # purge
+    assert not store.mcp_expired("m") and not store._mcp_revoked
 
 
 def test_unknown_token() -> None:
