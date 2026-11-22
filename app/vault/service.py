@@ -79,8 +79,11 @@ class VaultService:
         return agent
 
     async def _quota(self, agent_id: str) -> int:
+        # ligne déjà chargée par member_session / with_session : lue dans l'identity map, sans requête
         agent = await self._db.get(Agent, agent_id)
-        return vault_limits(self._settings, agent)[0] if agent is not None else self._settings.vault_quota_bytes
+        if agent is None:
+            raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+        return vault_limits(self._settings, agent)[0]
 
     async def _get(self, agent_id: str, pid: str, *, blobs: bool = True) -> VaultFile | None:
         # blobs=False : ne charge ni le contenu (jusqu'à 5 Mo) ni le nom chiffré

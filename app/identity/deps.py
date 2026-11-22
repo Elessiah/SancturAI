@@ -5,7 +5,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.identity.auth import check_session_standing, ensure_writable, load_agent, resolve_session
+from app.identity.auth import ensure_writable, load_agent, resolve_session
 from app.identity.models import Agent
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
@@ -51,8 +51,8 @@ async def uncounted_session(token: str | None = Depends(current_token),
 
 async def member_session(session: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                          state: AppState = Depends(get_state)) -> Session:
-    """Session d'un agent ni gelé ni banni (vault : pas d'agent chargé, statut lu en base)."""
-    await check_session_standing(db, state, session)
+    """Session d'un agent ni gelé ni banni (vault : les routes travaillent sur la session, statut lu en base)."""
+    await load_agent(db, state, session)
     return session
 
 

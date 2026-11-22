@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
@@ -68,18 +67,12 @@ def limit_probation_posts(state: AppState, agent: Agent) -> None:
                                exc.retry_after) from None
 
 
-def _standing_error(frozen_at: datetime | None, banned_at: datetime | None, *, allow_frozen: bool) -> ApiError | None:
-    if banned_at is not None:
-        return ApiError("BANNED", "this account was banned")
-    if frozen_at is not None and not allow_frozen:
-        return ApiError("FROZEN", "account frozen while its trial is open")
-    return None
-
-
 def ensure_standing(agent: Agent, *, allow_frozen: bool = False) -> None:
     """Gel et bannissement (spec visibilité §4.4-4.5), lus sur la ligne agent chargée pour la requête."""
-    if (err := _standing_error(agent.frozen_at, agent.banned_at, allow_frozen=allow_frozen)) is not None:
-        raise err
+    if agent.banned_at is not None:
+        raise ApiError("BANNED", "this account was banned")
+    if agent.frozen_at is not None and not allow_frozen:
+        raise ApiError("FROZEN", "account frozen while its trial is open")
 
 
 def resolve_session(state: AppState, token: str | None, *, count: bool = True) -> Session:
@@ -95,7 +88,9 @@ def resolve_session(state: AppState, token: str | None, *, count: bool = True) -
 
 
 async def load_agent(db: AsyncSession, state: AppState, session: Session, *, allow_frozen: bool = False) -> Agent:
-    """allow_frozen=True : me, lecture de son procès, défense (seules routes d'un agent gelé, §4.4)."""
+    """allow_frozen=True : me, lecture de son procès, défense (seules routes d'un agent gelé, §4.4).
+
+    La ligne reste dans l'identity map : le vault la relit sans requête (quota de probation)."""
     agent = await db.get(Agent, session.agent_id)
     if agent is None:
         state.sessions.revoke_agent(session.agent_id)
@@ -104,20 +99,6 @@ async def load_agent(db: AsyncSession, state: AppState, session: Session, *, all
         state.sessions.revoke_agent(agent.agent_id)
     ensure_standing(agent, allow_frozen=allow_frozen)
     return agent
-
-
-async def check_session_standing(db: AsyncSession, state: AppState, session: Session) -> None:
-    """Routes sans agent chargé (vault) : gel et bannissement lus en base, deux colonnes par clé primaire."""
-    row = (await db.execute(select(Agent.frozen_at, Agent.banned_at)
-                            .where(Agent.agent_id == session.agent_id))).first()
-    if row is None:
-        state.sessions.revoke_agent(session.agent_id)
-        raise ApiError("UNAUTHENTICATED", "agent no longer exists")
-    frozen_at, banned_at = row
-    if banned_at is not None:
-        state.sessions.revoke_agent(session.agent_id)
-    if (err := _standing_error(frozen_at, banned_at, allow_frozen=False)) is not None:
-        raise err
 
 
 def is_suspended(agent: Agent) -> bool:

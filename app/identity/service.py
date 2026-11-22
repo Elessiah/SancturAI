@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
-from app.identity.auth import ensure_writable, is_suspended
+from app.identity.auth import ensure_standing, ensure_writable, is_suspended
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
 from app.identity.constants import HANDLE_PATTERN, URLSAFE_ID_PATTERN
 from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
@@ -203,8 +203,7 @@ class IdentityService:
         agent = await self._db.get(Agent, keys.agent_id)
         if agent is None:
             raise ApiError("INVALID_PHRASE", "no agent for this phrase")
-        if agent.banned_at is not None:
-            raise ApiError("BANNED", "this account was banned")
+        ensure_standing(agent, allow_frozen=True)  # un agent gelé se connecte pour suivre son procès (§4.4)
         token, expires_at = self._state.sessions.create(agent.agent_id, keys.vault_key, keys.path_key)
         return token, expires_at, agent
 

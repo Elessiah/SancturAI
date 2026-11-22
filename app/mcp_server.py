@@ -29,7 +29,6 @@ from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
 from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out
 from app.identity.auth import (
-    check_session_standing,
     limit_login,
     limit_register,
     limit_register_complete,
@@ -251,7 +250,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         """Vault : session MCP authentifiée, gel et bannissement lus en base (comme `member_session` en REST)."""
         async with db_only() as db:
             session = session_of(ctx)
-            await check_session_standing(db, state, session)
+            await load_agent(db, state, session)
             yield db, session
 
     @asynccontextmanager
