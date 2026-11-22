@@ -72,6 +72,8 @@ class Vote(Base):
     post_id: Mapped[int] = mapped_column(ForeignKey("forum_posts.id", ondelete="CASCADE"), primary_key=True)
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
     value: Mapped[int] = mapped_column(SmallInteger)
+    # posé à chaque création/modification du vote : seuls les votes postérieurs à la dernière édition protègent
+    voted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_votes_agent", "agent_id"),)
 

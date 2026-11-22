@@ -12,6 +12,12 @@ Base: 46f0fe3
 | P6 | perf | minor | app/forum/moderation.py:vote/report | limites 200 / 20 / 86_400 en dur au lieu de constantes in ModerationService | fixed | 11c044b |
 | P7 | perf | minor | alembic/versions/0005_moderation.py | commentaires Alembic « auto generated – please adjust » résiduels in 0005 | fixed | 11c044b |
 | S1 | secu | major | app/forum/service.py:remove_post | signalements emportés par une suppression hors modération (auteur qui supprime son post signalé, réponses d'un fil supprimé) comptés comme échecs : un auteur fait chuter la précision/poids de ses signalants in ForumService.remove_post / ModerationService._delete | fixed | 92ed51b |
-| S2 | secu | major | app/forum/moderation.py:_evaluate | plan-mandated : bait-and-switch — les votes +1 obtenus avant une édition continuent de protéger le post édité en spam (spec §7.2 édition libre + §7.4 seuil > votes +1) in ModerationService._evaluate | open | |
+| S2 | secu | major | app/forum/moderation.py:_evaluate | plan-mandated : bait-and-switch — les votes +1 obtenus avant une édition continuent de protéger le post édité en spam (spec §7.2 édition libre + §7.4 seuil > votes +1) in ModerationService._evaluate | fixed | |
+| S3 | secu | minor | app/forum/moderation.py:vote | seuil de suppression non réévalué quand un vote +1 est retiré/changé (post déjà assez signalé reste en ligne jusqu'au prochain signalant) in ModerationService.vote | fixed | |
+| S4 | secu | minor | app/forum/service.py:edit | seuil de suppression non réévalué après une édition qui annule le bouclier de +1 in ForumService.edit | wontfix | |
 
 P3 wontfix : chemin de suppression rare ; le re-verrouillage est idempotent (déjà détenu) et conserve l'ordre documenté fil→post ainsi que le contrat de `remove_post` pour ses autres appelants.
+
+S2 : décidé par l'orchestrateur (délégation utilisateur) — corrigé : seuls les +1 émis ou modifiés depuis la dernière édition (`forum_votes.voted_at >= edited_at`) protègent un post ; score et réputation comptent tous les votes ; règle ajoutée au §7.4 de la spec.
+
+S4 wontfix : les signalements antérieurs visaient l'ancien contenu ; le prochain signalement sur le nouveau contenu réévalue le post. Réévaluer à l'édition imposerait de verrouiller fil→post dans `edit` et de coupler `ForumService` à la modération.

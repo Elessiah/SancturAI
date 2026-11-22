@@ -63,9 +63,12 @@ class ModerationService:
         if value == 0:
             await self._db.execute(delete(Vote).where(Vote.post_id == post_id, Vote.agent_id == agent.agent_id))
         else:
-            await self._db.execute(insert(Vote).values(post_id=post_id, agent_id=agent.agent_id, value=value)
+            # Horloge de l'app (comme `edited_at`), prise sous le verrou du post : l'ordre vote/édition est fiable.
+            now = datetime.now(UTC)
+            await self._db.execute(insert(Vote).values(post_id=post_id, agent_id=agent.agent_id, value=value,
+                                                       voted_at=now)
                                    .on_conflict_do_update(index_elements=["post_id", "agent_id"],
-                                                          set_={"value": value}))
+                                                          set_={"value": value, "voted_at": now}))
         delta = value - previous
         post.score += delta
         await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
@@ -73,6 +76,8 @@ class ModerationService:
         if post.is_first:
             await self._db.execute(update(Thread).where(Thread.id == post.thread_id)
                                    .values(score=Thread.score + delta))
+        if previous == 1:  # un +1 retiré : le seuil de suppression peut désormais être atteint
+            await self._evaluate(post)
         await self._db.commit()
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
@@ -108,8 +113,12 @@ class ModerationService:
 
     async def _evaluate(self, post: Post) -> bool:
         weight_q = select(func.coalesce(func.sum(Report.weight), 0.0)).where(Report.post_id == post.id).scalar_subquery()
-        upvotes_q = (select(func.count()).select_from(Vote)
-                     .where(Vote.post_id == post.id, Vote.value == 1).scalar_subquery())
+        # Seuls les +1 postérieurs à la dernière édition protègent : sinon un post approuvé puis réécrit en spam
+        # resterait couvert par des votes portant sur un autre contenu (score et réputation comptent tout).
+        shield = [Vote.post_id == post.id, Vote.value == 1]
+        if post.edited_at is not None:
+            shield.append(Vote.voted_at >= post.edited_at)
+        upvotes_q = select(func.count()).select_from(Vote).where(*shield).scalar_subquery()
         weight, upvotes = (await self._db.execute(select(weight_q, upvotes_q))).one()
         if weight >= DELETE_WEIGHT and weight > upvotes:
             await self._delete(post)

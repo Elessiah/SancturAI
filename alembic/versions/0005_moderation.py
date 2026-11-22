@@ -45,6 +45,7 @@ def upgrade() -> None:
     sa.Column('post_id', sa.BigInteger(), nullable=False),
     sa.Column('agent_id', sa.String(length=64), nullable=False),
     sa.Column('value', sa.SmallInteger(), nullable=False),
+    sa.Column('voted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['post_id'], ['forum_posts.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('post_id', 'agent_id')

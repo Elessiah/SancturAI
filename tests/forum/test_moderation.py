@@ -131,3 +131,51 @@ async def test_unresolved_reports_are_neutral(client: httpx.AsyncClient, state: 
     assert stat is not None and stat.reports_total == 0 and stat.reports_successful == 0
     from app.forum.moderation import ModerationService
     assert await ModerationService(db, state).reporter_weight(rep.agent_id) == 1.0
+
+
+
+async def test_edit_voids_earlier_upvote_shield(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    """S2 : seuls les +1 émis ou modifiés depuis la dernière édition protègent ; score et réputation comptent tout."""
+    async def scenario(name: str, *, edit: bool, revoters: int) -> bool:
+        author = await make_agent(state, f"{name}a")
+        fans = [await make_agent(state, f"{name}f{i}") for i in range(5)]
+        reporters = [await make_agent(state, f"{name}r{i}") for i in range(5)]
+        _, pid = await _thread(client, author)
+        for f in fans:
+            await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=f.headers)
+        if edit:
+            r = await client.patch(f"/api/forum/posts/{pid}", json={"body": "spam"}, headers=author.headers)
+            assert r.json()["edited_at"] is not None
+        for f in fans[:revoters]:  # vote modifié après l'édition : protège de nouveau
+            await client.post(f"/api/forum/posts/{pid}/vote", json={"value": -1}, headers=f.headers)
+            await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=f.headers)
+        db.expire_all()
+        agent = await db.get(Agent, author.agent_id)
+        assert agent is not None and agent.reputation == 5  # tous les votes, édition ou non
+        deleted = False
+        for rep in reporters:  # Σ poids = 5
+            deleted = (await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"},
+                                         headers=rep.headers)).json()["deleted"]
+        return bool(deleted)
+
+    assert await scenario("ke", edit=False, revoters=0) is False  # 5 > 5 faux : protégé
+    assert await scenario("de", edit=True, revoters=0) is True  # +1 antérieurs à l'édition ignorés
+    assert await scenario("rv", edit=True, revoters=5) is False  # +1 re-posés après l'édition
+    assert await scenario("pa", edit=True, revoters=4) is True  # 5 > 4
+
+
+async def test_withdrawn_upvote_reevaluates(client: httpx.AsyncClient, state: AppState) -> None:
+    """S3 : retirer un +1 qui protégeait un post déjà assez signalé le supprime aussitôt."""
+    author = await make_agent(state, "shielded")
+    fans = [await make_agent(state, f"sf{i}") for i in range(5)]
+    _, pid = await _thread(client, author)
+    for f in fans:
+        await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=f.headers)
+    for i in range(5):
+        rep = await make_agent(state, f"sr{i}")
+        r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"}, headers=rep.headers)
+    assert r.json()["deleted"] is False  # 5 > 5 faux
+    await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=fans[0].headers)  # inchangé
+    await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 0}, headers=fans[0].headers)
+    r = await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=fans[1].headers)
+    assert r.json()["error"] == "NOT_FOUND"
