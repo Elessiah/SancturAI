@@ -4,11 +4,11 @@ import secrets
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+# ré-export : le CHECK ck_agents_system_id lit la même constante
+from app.identity.constants import SYSTEM_ID_PREFIX as SYSTEM_ID_PREFIX
 from app.identity.models import Agent
 
 SYSTEM_HANDLE = "tribunal"
-# ':' n'appartient pas à l'alphabet base58 : aucun agent_id dérivé d'une phrase ne peut valoir cet identifiant.
-SYSTEM_ID_PREFIX = "system:"
 
 
 def system_agent_row() -> dict[str, object]:

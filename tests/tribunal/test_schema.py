@@ -79,3 +79,18 @@ async def test_one_trial_vote_per_voter(state: AppState, db: AsyncSession) -> No
         with pytest.raises(IntegrityError):
             await db.execute(insert(TrialVote).values(trial_id=tid, **values))
         await db.rollback()
+
+
+async def test_self_report_is_refused(state: AppState, db: AsyncSession) -> None:
+    a = await make_agent(state, "selfrep")
+    db.add(AgentReport(reporter_id=a.agent_id, target_id=a.agent_id, reason=REASON, weight=1.0))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+
+
+@pytest.mark.parametrize(("agent_id", "is_system"), [(f"{SYSTEM_ID_PREFIX}x", False), ("C" * 44, True)])
+async def test_system_flag_matches_system_id_prefix(db: AsyncSession, agent_id: str, is_system: bool) -> None:
+    # un compte système porte toujours un agent_id non dérivable d'une phrase, et réciproquement
+    db.add(Agent(agent_id=agent_id, handle="sysflag", is_system=is_system))
+    with pytest.raises(IntegrityError):
+        await db.commit()

@@ -50,6 +50,7 @@ async def test_migrations_match_models(pg_url: str) -> None:
     assert {"ck_admin_threads_short_id", "ck_admin_msg_sender"} <= checks
     # spec visibilité §7 : procès, signalements d'agent, votes de procès
     assert {"ck_trials_status", "ck_trials_trigger", "ck_trials_verdict", "ck_trials_closed_by",
-            "ck_trials_closed_shape", "ck_trial_votes_verdict", "ck_reporter_stats_agent_range"} <= checks
+            "ck_trials_closed_shape", "ck_trial_votes_verdict", "ck_reporter_stats_agent_range",
+            "ck_agent_reports_not_self", "ck_agents_system_id"} <= checks
     assert {"uq_trials_open_accused", "ix_trials_status_deadline", "uq_agent_reports_pending",
             "ix_agent_reports_target_pending", "ix_trial_votes_voter"} <= indexes

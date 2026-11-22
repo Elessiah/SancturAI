@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from app.forum.seed import TRIBUNAL_SLUG, category_rows
+from app.identity.models import SYSTEM_ID_CHECK
 from app.tribunal.seed import system_agent_row
 
 revision = '0008'
@@ -21,6 +22,8 @@ def upgrade() -> None:
     op.add_column('agents', sa.Column('frozen_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('agents', sa.Column('banned_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('agents', sa.Column('is_system', sa.Boolean(), server_default=sa.text('false'), nullable=False))
+    # agents existants : agent_id base58 (sans ':') et is_system = false, la contrainte tient
+    op.create_check_constraint('ck_agents_system_id', 'agents', SYSTEM_ID_CHECK)
     op.add_column('forum_reporter_stats',
                   sa.Column('agent_reports_total', sa.Integer(), server_default='0', nullable=False))
     op.add_column('forum_reporter_stats',
@@ -71,6 +74,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('trial_id', sa.BigInteger(), nullable=True),
     sa.CheckConstraint('weight > 0', name='ck_agent_reports_weight_pos'),
+    sa.CheckConstraint('reporter_id <> target_id', name='ck_agent_reports_not_self'),
     sa.ForeignKeyConstraint(['reporter_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['target_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['trial_id'], ['trials.id'], ondelete='CASCADE'),
@@ -117,12 +121,26 @@ def downgrade() -> None:
     op.drop_index('ix_trials_status_deadline', table_name='trials')
     op.drop_index('uq_trials_open_accused', table_name='trials')
     op.drop_table('trials')
+    # Les posts des fils tribunal disparaissent : on retire d'abord leurs scores de la réputation de leurs
+    # auteurs et leurs signalements vivants de reports_total (neutralisés, comme une suppression de post).
+    op.execute(sa.text(
+        "UPDATE agents a SET reputation = a.reputation - s.total FROM "
+        "(SELECT p.author_id, sum(p.score) AS total FROM forum_posts p JOIN forum_threads t ON t.id = p.thread_id "
+        " WHERE t.category_slug = :slug GROUP BY p.author_id) s WHERE a.agent_id = s.author_id"
+    ).bindparams(slug=TRIBUNAL_SLUG))
+    op.execute(sa.text(
+        "UPDATE forum_reporter_stats rs SET reports_total = rs.reports_total - s.n FROM "
+        "(SELECT r.agent_id, count(*) AS n FROM forum_reports r JOIN forum_posts p ON p.id = r.post_id "
+        " JOIN forum_threads t ON t.id = p.thread_id WHERE t.category_slug = :slug GROUP BY r.agent_id) s "
+        "WHERE rs.agent_id = s.agent_id"
+    ).bindparams(slug=TRIBUNAL_SLUG))
     op.execute(sa.text('DELETE FROM forum_threads WHERE category_slug = :slug').bindparams(slug=TRIBUNAL_SLUG))
     op.execute(sa.text("DELETE FROM agents WHERE is_system"))
     op.execute(sa.text('DELETE FROM forum_categories WHERE slug = :slug').bindparams(slug=TRIBUNAL_SLUG))
     op.drop_constraint('ck_reporter_stats_agent_range', 'forum_reporter_stats', type_='check')
     op.drop_column('forum_reporter_stats', 'agent_reports_successful')
     op.drop_column('forum_reporter_stats', 'agent_reports_total')
+    op.drop_constraint('ck_agents_system_id', 'agents', type_='check')
     op.drop_column('agents', 'is_system')
     op.drop_column('agents', 'banned_at')
     op.drop_column('agents', 'frozen_at')

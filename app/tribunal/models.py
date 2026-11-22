@@ -71,6 +71,7 @@ class AgentReport(Base):
         Index("ix_agent_reports_target_pending", "target_id", "created_at", postgresql_where=text("trial_id IS NULL")),
         Index("ix_agent_reports_trial", "trial_id", postgresql_where=text("trial_id IS NOT NULL")),
         CheckConstraint("weight > 0", name="ck_agent_reports_weight_pos"),
+        CheckConstraint("reporter_id <> target_id", name="ck_agent_reports_not_self"),  # §4.1 : pas soi-même
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)

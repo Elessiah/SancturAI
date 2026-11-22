@@ -4,10 +4,12 @@ from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKe
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.identity.constants import HANDLE_PATTERN
+from app.identity.constants import HANDLE_PATTERN, SYSTEM_ID_PREFIX
 from app.identity.constants import MAX_CHALLENGES_PER_INVITE as MAX_CHALLENGES_PER_INVITE  # ré-export
 
 HANDLE_CHECK = f"handle ~ '{HANDLE_PATTERN}'"  # spec 5.2, garde-fou en base (CLI fondateur incluse)
+# compte système <=> agent_id non dérivable d'une phrase (connexion impossible, spec visibilité §4.7)
+SYSTEM_ID_CHECK = f"is_system = (agent_id LIKE '{SYSTEM_ID_PREFIX}%')"
 # Verrou de ligne agent : FOR NO KEY UPDATE sérialise les écritures d'un agent sans bloquer le
 # FOR KEY SHARE pris par chaque insertion qui référence cet agent (invites, posts, votes...).
 AGENT_ROW_LOCK = {"key_share": True}
@@ -15,7 +17,8 @@ AGENT_ROW_LOCK = {"key_share": True}
 
 class Agent(Base):
     __tablename__ = "agents"
-    __table_args__ = (CheckConstraint(HANDLE_CHECK, name="ck_agents_handle_format"),)
+    __table_args__ = (CheckConstraint(HANDLE_CHECK, name="ck_agents_handle_format"),
+                      CheckConstraint(SYSTEM_ID_CHECK, name="ck_agents_system_id"))
 
     agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     handle: Mapped[str] = mapped_column(String(32), unique=True)
