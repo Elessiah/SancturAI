@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -228,3 +229,62 @@ async def test_session_open_limit_serializes_large_bodies(state: AppState) -> No
     assert peak == 1  # gros corps (ou longueur inconnue) : un à la fois
     await asyncio.gather(*(guard(scope("100"), noop, noop) for _ in range(3)))
     assert peak == 3  # petits corps : en parallèle
+
+
+async def test_session_open_limit_counts_concurrent_opens(state: AppState) -> None:
+    from app.mcp_server import MCP_SESSIONS_PER_IP, SessionOpenLimit
+
+    n = 0
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:  # ouverture lente : id après 50 ms
+        nonlocal n
+        await asyncio.sleep(0.05)
+        n += 1
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"mcp-session-id", b"s%d" % n)]})
+        await send({"type": "http.response.body", "body": b""})
+
+    guard = SessionOpenLimit(inner, state, lambda sid: True)
+    statuses: list[int] = []
+
+    async def send(message: Any) -> None:
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "headers": [(b"x-real-ip", b"192.0.2.77")], "client": ("127.0.0.1", 1)}
+    await asyncio.gather(*(guard(dict(scope), receive, send) for _ in range(MCP_SESSIONS_PER_IP + 5)))
+    assert statuses.count(200) == MCP_SESSIONS_PER_IP and statuses.count(429) == 5
+    assert guard.opening == {}
+
+
+async def test_session_open_limit_bounds_large_body_lock(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.mcp_server as m
+
+    async def stalled(scope: Any, receive: Any, send: Any) -> None:  # lecteur lent : la réponse ne finit jamais
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await asyncio.sleep(3600)
+
+    guard = m.SessionOpenLimit(stalled, state, lambda sid: True)
+    big = [(b"mcp-session-id", b"s"), (b"content-length", str(m.MCP_SMALL_BODY_BYTES + 1).encode())]
+    scope = {"type": "http", "method": "POST", "headers": big, "client": ("127.0.0.1", 1)}
+    statuses: list[int] = []
+
+    async def send(message: Any) -> None:
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 0.05)
+    await asyncio.wait_for(asyncio.gather(guard(scope, receive, send), guard(scope, receive, send)), 2)
+    assert statuses == [200, 200] and not guard.large_body.locked()  # détention bornée, verrou rendu
+
+    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 1.0)
+    monkeypatch.setattr(m, "MCP_LARGE_BODY_WAIT", 0.05)
+    statuses.clear()
+    await asyncio.gather(guard(scope, receive, send), guard(scope, receive, send))
+    assert sorted(statuses) == [200, 503]  # attente bornée : SERVER_BUSY
+    assert not guard.large_body.locked()

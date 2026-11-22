@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
+import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.streamable_http_manager import DEFAULT_MAX_SESSIONS
@@ -68,6 +69,10 @@ MCP_OPEN_RATE = (60, 3600.0)
 MCP_MAX_BODY_BYTES = 16 * 1024 * 1024
 MCP_SMALL_BODY_BYTES = 1024 * 1024  # au-delà (ou longueur inconnue) : un seul corps traité à la fois
 MCP_SESSIONS_PER_IP = 20  # sessions MCP ouvertes simultanément par IP
+# Le verrou « gros corps » couvre toute la requête (le SDK garde le corps parsé jusqu'à la fin de la réponse) :
+# borne l'attente (SERVER_BUSY) et la détention (sinon un client qui lit sa réponse au compte-gouttes le garde).
+MCP_LARGE_BODY_WAIT = 30.0
+MCP_LARGE_BODY_HOLD = 60.0
 
 
 @dataclass
@@ -119,6 +124,7 @@ class SessionOpenLimit:
         self.state = state
         self.is_live = is_live  # l'id de session est-il encore ouvert côté SDK ?
         self.open_by_ip: dict[str, set[str]] = {}
+        self.opening: dict[str, int] = {}  # ouvertures en cours, pas encore d'id : comptées contre le plafond
         self.large_body = asyncio.Semaphore(1)
 
     def _prune(self, ip: str) -> set[str]:
@@ -135,34 +141,61 @@ class SessionOpenLimit:
             return
         headers = Headers(scope=scope)
         if headers.get("mcp-session-id"):
-            outer_send = send
-        else:
-            ip = client_ip(Request(scope))
-            if len(self.open_by_ip) > DEFAULT_MAX_SESSIONS:  # IP dont toutes les sessions sont closes
-                for known in list(self.open_by_ip):
-                    self._prune(known)
-            try:
-                if len(self._prune(ip)) >= MCP_SESSIONS_PER_IP:
-                    raise ApiError("RATE_LIMITED", f"at most {MCP_SESSIONS_PER_IP} open MCP sessions per address",
-                                   retry_after=60)
-                self.state.limiter.hit(f"mcp-open:{ip}", *MCP_OPEN_RATE)
-            except ApiError as err:
-                await error_response(err)(scope, receive, send)
-                return
+            await self._dispatch(scope, receive, send, headers)
+            return
+        ip = client_ip(Request(scope))
+        if len(self.open_by_ip) > DEFAULT_MAX_SESSIONS:  # IP dont toutes les sessions sont closes
+            for known in list(self.open_by_ip):
+                self._prune(known)
+        try:
+            if len(self._prune(ip)) + self.opening.get(ip, 0) >= MCP_SESSIONS_PER_IP:
+                raise ApiError("RATE_LIMITED", f"at most {MCP_SESSIONS_PER_IP} open MCP sessions per address",
+                               retry_after=60)
+            self.state.limiter.hit(f"mcp-open:{ip}", *MCP_OPEN_RATE)
+        except ApiError as err:
+            await error_response(err)(scope, receive, send)
+            return
+        self.opening[ip] = self.opening.get(ip, 0) + 1  # sans await depuis le contrôle : pas de course
+        pending = True
 
-            async def outer_send(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    sid = Headers(raw=message.get("headers", [])).get("mcp-session-id")
-                    if sid:
-                        self.open_by_ip.setdefault(ip, set()).add(sid)
-                await send(message)
+        def settle() -> None:
+            nonlocal pending
+            if pending:
+                pending = False
+                if self.opening[ip] > 1:
+                    self.opening[ip] -= 1
+                else:
+                    del self.opening[ip]
 
+        async def outer_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                sid = Headers(raw=message.get("headers", [])).get("mcp-session-id")
+                if sid:
+                    self.open_by_ip.setdefault(ip, set()).add(sid)
+                settle()
+            await send(message)
+
+        try:
+            await self._dispatch(scope, receive, outer_send, headers)
+        finally:
+            settle()
+
+    async def _dispatch(self, scope: Scope, receive: Receive, send: Send, headers: Headers) -> None:
         length = headers.get("content-length", "")
-        if scope["method"] == "POST" and not (length.isdigit() and int(length) <= MCP_SMALL_BODY_BYTES):
-            async with self.large_body:
-                await self.app(scope, receive, outer_send)
-        else:
-            await self.app(scope, receive, outer_send)
+        if scope["method"] != "POST" or (length.isdigit() and int(length) <= MCP_SMALL_BODY_BYTES):
+            await self.app(scope, receive, send)
+            return
+        try:
+            await asyncio.wait_for(self.large_body.acquire(), MCP_LARGE_BODY_WAIT)
+        except TimeoutError:
+            busy = ApiError("SERVER_BUSY", "another large MCP request is in progress", retry_after=5)
+            await error_response(busy)(scope, receive, send)
+            return
+        try:
+            with anyio.move_on_after(MCP_LARGE_BODY_HOLD):
+                await self.app(scope, receive, send)
+        finally:
+            self.large_body.release()
 
 
 def build_mcp(state: AppState) -> FastMCP[Any]:
