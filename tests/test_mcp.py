@@ -139,7 +139,6 @@ async def test_mcp_string_args_capped_like_rest(live_url: str, state: AppState) 
         await call(s, "login", phrase=a.phrase)
         cases = [
             ("vault_write", {"path": "/" + "p" * 600, "content": "x"}),
-            ("vault_write", {"path": "/a.md", "content": "x" * 7_000_001}),
             ("vault_list", {"prefix": "/" + "p" * 512}),
             ("vault_move", {"src": "/a.md", "dst": "/" + "p" * 600}),
             ("forum_threads", {"category": "c" * 49}),
@@ -149,8 +148,8 @@ async def test_mcp_string_args_capped_like_rest(live_url: str, state: AppState) 
             ("forum_report", {"post_id": 1, "reason": ""}),
             ("admin_message_send", {"text": big}),
         ]
-        big_file = "a" * (4_700_000)  # > 4 Mio du SDK par défaut, < 5 Mo par fichier : admis comme en REST
-        assert (await call(s, "vault_write", path="/big.md", content=big_file))["size"] == len(big_file)
+        near_cap = "a" * 1_000_000  # corps MCP ≤ 1 Mio (décidé par l'utilisateur) : au-delà, API REST du vault
+        assert (await call(s, "vault_write", path="/big.md", content=near_cap))["size"] == len(near_cap)
         for tool, args in cases:
             r = await call(s, tool, **args)
             assert r["_error"]["error"] == "VALIDATION_ERROR", tool
@@ -334,3 +333,38 @@ async def test_dict_tools_return_payload_once(live_url: str, state: AppState) ->
         await call(s, "vault_write", path="/a.md", content="souvenir")
         result = await s.call_tool("vault_read", {"path": "/a.md"})
         assert result.structuredContent is None and len(result.content) == 1
+
+
+async def test_tool_keeps_body_budget_after_client_disconnect(live_url: str, app: Any,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.errors import ApiError
+    from app.identity.service import IdentityService
+
+    budget = app.state.body_budget
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def blocked(self: Any, phrase: str) -> Any:
+        entered.set()
+        await gate.wait()
+        raise ApiError("INVALID_PHRASE")
+
+    monkeypatch.setattr(IdentityService, "login", blocked)
+    headers = {**MCP_HEADERS, "X-Real-IP": "192.0.2.93"}
+    async with httpx.AsyncClient(base_url=live_url) as c:
+        r = await c.post("/mcp/", json=INIT, headers=headers)
+        headers = {**headers, "Mcp-Session-Id": r.headers["mcp-session-id"], "Mcp-Protocol-Version": "2025-06-18"}
+        await c.post("/mcp/", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers)
+        call_body = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "login", "arguments": {"phrase": "x" * 900}}}
+        with pytest.raises(httpx.ReadTimeout):
+            await c.post("/mcp/", json=call_body, headers=headers, timeout=0.5)
+    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.sleep(0.3)  # le transport a vu la déconnexion ; l'outil tourne encore
+    assert budget.used > 0
+    gate.set()
+    for _ in range(50):
+        if budget.used == 0:
+            break
+        await asyncio.sleep(0.02)
+    assert budget.used == 0

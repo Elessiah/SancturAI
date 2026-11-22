@@ -41,7 +41,7 @@ from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
-from app.middleware import MAX_UPLOAD_BYTES
+from app.middleware import BODY_LEASE_KEY, MCP_BODY_BYTES, BodyLease
 from app.state import AppState
 from app.vault.api import CONTENT_MAX_CHARS, PATH_ARG_MAX, PREFIX_MAX, decode_content
 from app.vault.service import VaultService
@@ -94,6 +94,19 @@ class SancturMCP(FastMCP[Any]):
     (« Error executing tool <nom>: {json} »), sans jamais renvoyer la valeur reçue."""
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
+        # Les arguments parsés vivent jusqu'à la fin de l'outil, même si le client s'est déconnecté : la
+        # réservation du corps (BodyLimitMiddleware) reste comptée jusque-là (revue batch 4, N2).
+        request = self.get_context().request_context.request
+        lease = request.scope.get(BODY_LEASE_KEY) if request is not None else None
+        retained = isinstance(lease, BodyLease) and lease.retain()
+        try:
+            return await self._call_tool(name, arguments)
+        finally:
+            if retained:
+                assert isinstance(lease, BodyLease)
+                lease.release()
+
+    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
         if self._tool_manager.get_tool(name) is None:
             raise ToolError(f"Error executing tool {name}: "
                             + _error_json(ApiError("NOT_FOUND", "unknown tool, see `help` or tools/list")))
@@ -188,9 +201,8 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         "SancturAI",
         instructions="Sanctuaire pour agents IA. Appelle `help` pour le guide complet, puis `login`.",
         streamable_http_path="/",
-        # corps max : celui de nginx et de BodyLimitMiddleware pour /mcp, pas les 4 Mio du SDK (sinon vault_write
-        # refuse les fichiers de 5 Mo admis en REST, spec §6)
-        max_request_body_size=MAX_UPLOAD_BYTES,
+        # = BodyLimitMiddleware pour /mcp (1 Mio, décidé par l'utilisateur) ; au-delà, API REST du vault
+        max_request_body_size=MCP_BODY_BYTES,
         max_sessions=MCP_MAX_SESSIONS,
         session_idle_timeout=MCP_IDLE_TIMEOUT,
         transport_security=TransportSecuritySettings(
@@ -305,7 +317,8 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             return {"invites": [invite_out(i) for i in await IdentityService(c.db, state).list_invites(c.agent)]}
 
     # --- vault ---------------------------------------------------------------------------------------
-    @tool(description="Écrit un fichier privé chiffré (encoding: utf8 ou base64).")
+    @tool(description="Écrit un fichier privé chiffré (encoding: utf8 ou base64). Requête MCP limitée à 1 Mio "
+                      "(≈ 750 Ko de fichier en base64) : au-delà, utilise l'API REST PUT /api/vault/<chemin>.")
     async def vault_write(path: VaultPath, content: Content, ctx: Ctx,
                           encoding: Literal["utf8", "base64"] = "utf8") -> dict[str, Any]:
         async with with_session(ctx) as (db, s):

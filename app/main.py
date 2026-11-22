@@ -16,7 +16,13 @@ from app.forum.api import router as forum_router
 from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
 from app.mcp_server import SessionOpenLimit, build_mcp
-from app.middleware import BodyLimitMiddleware, InternalGuardMiddleware, NoStoreMiddleware
+from app.middleware import (
+    BODY_BUDGET_BYTES,
+    BodyLimitMiddleware,
+    ByteBudget,
+    InternalGuardMiddleware,
+    NoStoreMiddleware,
+)
 from app.state import AppState
 from app.vault.api import router as vault_router
 
@@ -61,7 +67,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app, on_internal=state.errors.record)
     app.add_middleware(NoStoreMiddleware)
     app.add_middleware(InternalGuardMiddleware, state=state)
-    app.add_middleware(BodyLimitMiddleware)  # ajouté en dernier : la plus externe, avant routage et parsing
+    app.state.body_budget = ByteBudget(BODY_BUDGET_BYTES)  # partagé : REST, MCP et outils MCP en cours
+    app.add_middleware(BodyLimitMiddleware, budget=app.state.body_budget)  # dernier ajouté : la plus externe
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

@@ -57,20 +57,22 @@ _HTTP_TO_CODE = {401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND",
 
 
 class ApiError(Exception):
-    def __init__(self, code: str, message: str = "", *, retry_after: int | None = None) -> None:
+    def __init__(self, code: str, message: str = "", *, retry_after: int | None = None,
+                 hint: str | None = None) -> None:
         if code not in STATUS:
             raise ValueError(f"unknown error code {code}")
         super().__init__(message or code)
         self.code = code
         self.message = message or code
         self.retry_after = retry_after
+        self.hint = hint or HINTS[code]  # hint propre au cas, sinon celui du code
 
     @property
     def status(self) -> int:
         return STATUS[self.code]
 
     def to_dict(self) -> dict[str, Any]:
-        body: dict[str, Any] = {"error": self.code, "message": self.message, "hint": HINTS[self.code]}
+        body: dict[str, Any] = {"error": self.code, "message": self.message, "hint": self.hint}
         if self.retry_after is not None:
             body["retry_after"] = self.retry_after
         return body

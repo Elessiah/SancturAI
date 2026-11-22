@@ -51,8 +51,8 @@ async def ok(scope: Any, receive: Any, send: Any) -> None:
 def test_route_caps_follow_each_route_need() -> None:
     assert body_cap("PUT", "/api/vault/notes/a.md") == 16 * MIB
     assert body_cap("PUT", "/api/vault/by-id/abc") == 16 * MIB
-    assert body_cap("POST", "/mcp/") == 16 * MIB
-    assert body_cap("POST", "/mcp") == 16 * MIB
+    assert body_cap("POST", "/mcp/") == MIB  # décidé par l'utilisateur : gros fichiers par l'API REST
+    assert body_cap("POST", "/mcp") == MIB
     assert body_cap("POST", "/api/forum/threads") == 128 * KIB
     assert body_cap("PATCH", "/api/forum/posts/1") == 128 * KIB
     assert body_cap("POST", "/api/login") == 64 * KIB
@@ -70,11 +70,12 @@ async def test_declared_length_over_route_cap_rejected_before_app() -> None:
 
     guard = BodyLimitMiddleware(inner)
     for path, length in (("/api/login", 64 * KIB + 1), ("/api/forum/threads", 128 * KIB + 1),
-                         ("/mcp/", 16 * MIB + 1), ("/api/vault/a.md", 16 * MIB + 1)):
+                         ("/mcp/", MIB + 1), ("/api/vault/a.md", 16 * MIB + 1)):
         method = "PUT" if path.startswith("/api/vault") else "POST"
         send = Recorder()
         await guard(scope(path, length, method), empty_receive, send)
         assert send.status == 422 and send.json["error"] == "VALIDATION_ERROR", path
+        assert (b"cache-control", b"no-store") in send.headers
     assert not called and guard.budget.used == 0
 
 
@@ -121,7 +122,7 @@ async def test_chunked_body_under_cap_is_replayed_to_the_app() -> None:
 
     guard = BodyLimitMiddleware(inner)
     send = Recorder()
-    await guard(scope("/mcp/", chunked=True), receive, send)
+    await guard(scope("/api/vault/a.md", method="PUT", chunked=True), receive, send)
     assert send.status == 200 and got == [b"abcdef"]
     assert reserved == [6]  # surplus de la réservation (plafond de la route) rendu après lecture
     assert guard.budget.used == 0
@@ -135,13 +136,17 @@ async def test_in_flight_budget_is_shared_then_server_busy(monkeypatch: pytest.M
         await release.wait()
         await ok(scope, receive, send)
 
-    guard = BodyLimitMiddleware(inner, budget_bytes=18 * MIB)
+    guard = BodyLimitMiddleware(inner, budget_bytes=17 * MIB)  # valeur de production
     first, small = Recorder(), Recorder()
-    big = asyncio.create_task(guard(scope("/mcp/", 16 * MIB), empty_receive, first))
+    big = asyncio.create_task(guard(scope("/api/vault/b.md", 16 * MIB, "PUT"), empty_receive, first))
     await asyncio.sleep(0.01)
     busy = Recorder()
-    await guard(scope("/api/vault/a.md", 4 * MIB, "PUT"), empty_receive, busy)  # REST et MCP : même budget
+    await guard(scope("/api/vault/a.md", 4 * MIB, "PUT"), empty_receive, busy)
     assert busy.status == 503 and busy.json["error"] == "SERVER_BUSY"
+    assert (b"cache-control", b"no-store") in busy.headers
+    mcp_busy = Recorder()
+    await guard(scope("/mcp/", MIB), empty_receive, mcp_busy)  # REST et MCP : même budget (MCP compté double)
+    assert mcp_busy.status == 503
     assert (b"retry-after", b"5") in busy.headers
     small_task = asyncio.create_task(guard(scope("/api/login", KIB), empty_receive, small))  # tient dans le reste
     await asyncio.sleep(0.01)
@@ -166,7 +171,7 @@ async def test_waiter_proceeds_when_budget_frees(monkeypatch: pytest.MonkeyPatch
 
     guard = BodyLimitMiddleware(inner, budget_bytes=18 * MIB)
     sends = [Recorder() for _ in range(3)]
-    await asyncio.gather(*(guard(scope("/mcp/", 10 * MIB), empty_receive, s) for s in sends))
+    await asyncio.gather(*(guard(scope("/api/vault/a.md", 10 * MIB, "PUT"), empty_receive, s) for s in sends))
     assert [s.status for s in sends] == [200, 200, 200] and peak == 1  # gros corps : un à la fois
     sends = [Recorder() for _ in range(3)]
     await asyncio.gather(*(guard(scope("/mcp/", 100), empty_receive, s) for s in sends))
@@ -181,7 +186,7 @@ async def test_hold_is_bounded_and_json_when_no_response_yet(monkeypatch: pytest
 
     guard = BodyLimitMiddleware(slow_upload)
     send = Recorder()
-    await asyncio.wait_for(guard(scope("/mcp/", 2 * MIB), empty_receive, send), 2)
+    await asyncio.wait_for(guard(scope("/mcp/", MIB), empty_receive, send), 2)
     assert send.status == 503 and (b"retry-after", b"5") in send.headers
     assert send.json["error"] == "SERVER_BUSY" and guard.budget.used == 0
 
@@ -191,7 +196,7 @@ async def test_hold_is_bounded_and_json_when_no_response_yet(monkeypatch: pytest
 
     guard = BodyLimitMiddleware(stalled)
     send = Recorder()
-    await asyncio.wait_for(guard(scope("/mcp/", 2 * MIB), empty_receive, send), 2)
+    await asyncio.wait_for(guard(scope("/mcp/", MIB), empty_receive, send), 2)
     assert [x["type"] for x in send.messages] == ["http.response.start"] and guard.budget.used == 0
 
 
@@ -222,3 +227,77 @@ async def test_rest_routes_get_their_cap(client: httpx.AsyncClient) -> None:
     assert r.json()["error"] == "VALIDATION_ERROR"
     r = await client.put("/api/vault/a.md", json={"content": "x" * 1_000_000})
     assert r.json()["error"] == "UNAUTHENTICATED"  # écriture vault : 16 Mio admis
+
+
+async def test_mcp_bodies_are_charged_double() -> None:
+    seen: list[int] = []
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        seen.append(guard.budget.used)
+        await ok(scope, receive, send)
+
+    guard = BodyLimitMiddleware(inner)
+    await guard(scope("/mcp/", 1000), empty_receive, Recorder())
+    await guard(scope("/api/login", 1000), empty_receive, Recorder())
+    assert seen == [2000, 1000]  # SDK : json.loads + copie model_dump ≈ 2 × le coût REST
+    assert guard.budget.used == 0
+
+
+async def test_oversized_mcp_body_points_to_rest(client: httpx.AsyncClient) -> None:
+    r = await client.post("/mcp/", content=b"x" * (MIB + 1), headers={"content-type": "application/json"})
+    assert r.status_code == 422 and r.json()["error"] == "VALIDATION_ERROR"
+    assert "/api/vault/" in r.json()["hint"] and r.headers["cache-control"] == "no-store"
+
+
+async def test_transfer_encoding_wins_over_content_length() -> None:
+    reads = 0
+
+    async def receive() -> Any:
+        nonlocal reads
+        reads += 1
+        return {"type": "http.request", "body": b"x" * KIB, "more_body": True}
+
+    called = False
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal called
+        called = True
+
+    guard = BodyLimitMiddleware(inner)
+    sc = scope("/api/login", 0, chunked=True)  # CL: 0 + TE: chunked (h11 l'admet et lit en chunked)
+    send = Recorder()
+    await guard(sc, receive, send)
+    assert send.status == 422 and not called and reads == 65
+    send = Recorder()
+    bad = {**scope("/api/login"), "headers": [(b"content-length", b"12x")]}
+    await guard(bad, empty_receive, send)
+    assert send.status == 422 and not called and guard.budget.used == 0
+
+
+async def test_slow_chunked_upload_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(m, "BODY_HOLD", 0.05)
+
+    async def stuck() -> Any:
+        await asyncio.sleep(3600)
+
+    guard = BodyLimitMiddleware(ok)
+    send = Recorder()
+    await asyncio.wait_for(guard(scope("/api/vault/a.md", method="PUT", chunked=True), stuck, send), 2)
+    assert send.status == 503 and send.json["error"] == "SERVER_BUSY" and guard.budget.used == 0
+
+
+async def test_lease_keeps_budget_until_last_holder_releases() -> None:
+    leases: list[Any] = []
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        lease = scope[m.BODY_LEASE_KEY]
+        assert lease.retain()  # usage au-delà de l'échange HTTP (outil MCP encore en cours)
+        leases.append(lease)
+        await ok(scope, receive, send)
+
+    guard = BodyLimitMiddleware(inner)
+    await guard(scope("/api/login", 100), empty_receive, Recorder())
+    assert guard.budget.used == 100  # échange HTTP fini, usage retenu : toujours compté
+    leases[0].release()
+    assert guard.budget.used == 0
+    assert not leases[0].retain()  # réservation rendue : plus rien à retenir
