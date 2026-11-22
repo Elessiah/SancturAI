@@ -23,9 +23,13 @@ Base: bb54565
 | M13 | batch | minor | plan T19 nginx | client_max_body_size 8m < worst-case JSON of 5 MB non-ASCII text; HTML 413 not §9.2 | fixed (plan) | 288cfbc |
 | M14 | batch | minor | tests/vault/test_vault_at_rest.py | §9.3 dump test bypasses create_agent/README/outbox and ignores the session token | fixed | f053c6a |
 | M15 | batch | minor | tests/helpers.py:make_agent | pool index = count(agents): deletion then make_agent reuses a live identity | fixed | f053c6a |
+| N1 | batch | minor | app/errors.py:is_data_error | SQLSTATE class 22 mapped wholesale to VALIDATION_ERROR, silent (server bugs hidden) | fixed | SHA |
+| N2 | batch | minor | plan T19 nginx | client_max_body_size 12m too small for 5 MB of 2/4-byte chars as ASCII JSON | fixed (plan) | SHA |
+| N3 | batch | minor | plan T18 quoteBlock | splits only on 
+ while check_text keeps  | fixed | appliqué dans la Task 18 (bot) |
 
 Notes:
-- I1: pattern `^[A-Za-z0-9_-]{1,32}$` (REST Pydantic + `IdentityService`, so MCP is covered); `register-complete:{ip}` 10/h; DBAPIError SQLSTATE class 22 / `DataError` → `VALIDATION_ERROR` (fixed message, no value); shared sanitizer `app.text.check_text(value, field)` (reject) / `strip_control(text)` (strip), wired into plan T11/T12/T14.
+- I1: pattern `^[A-Za-z0-9_-]{1,32}$` (REST Pydantic + `IdentityService`, so MCP is covered); `register-complete:{ip}` 10/h; DBAPIError SQLSTATE 22021 / 22P05 only (N1) → `VALIDATION_ERROR` (fixed message, no value); shared sanitizer `app.text.check_text(value, field)` (reject) / `strip_control(text)` (strip), wired into plan T11/T12/T14.
 - M8: CHECKs added by editing migrations 0002/0003 in place (nothing deployed yet; 0004+ revision ids are reserved by plan Tasks 11-14).
 - M9: `VaultService` has no access to the session store, so the session is not revoked (it expires within 24 h); every vault write answers `UNAUTHENTICATED`.
 - M1: the `INTERNAL` 500 rendered by the outermost `_CatchAll`/`ServerErrorMiddleware` lies outside the middleware and carries no `no-store` (body is a fixed, secret-free message).

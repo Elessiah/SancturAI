@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import DataError, DBAPIError
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -44,7 +44,9 @@ HINTS: dict[str, str] = {
 
 # SQLSTATE classe 22 (« data exception ») : la valeur reçue est invalide pour la base, p. ex. un NUL
 # (22021 « invalid byte sequence ») ou un dépassement de longueur (22001). C'est une erreur client.
-_DATA_EXCEPTION_CLASS = "22"
+# SQLSTATE d'entrée client uniquement : 22021 (octet invalide / NUL), 22P05 (caractère non traduisible).
+# Toute autre erreur de classe 22 (22012, 22003, 22P02...) est un bug serveur -> INTERNAL.
+_CLIENT_DATA_SQLSTATES = frozenset({"22021", "22P05"})
 
 _HTTP_TO_CODE = {401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND",
                  405: "NOT_FOUND", 413: "QUOTA_EXCEEDED", 422: "VALIDATION_ERROR", 429: "RATE_LIMITED"}
@@ -77,7 +79,7 @@ def _response(err: ApiError) -> JSONResponse:
 
 def is_data_error(exc: DBAPIError) -> bool:
     sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-    return isinstance(exc, DataError) or (isinstance(sqlstate, str) and sqlstate.startswith(_DATA_EXCEPTION_CLASS))
+    return isinstance(sqlstate, str) and sqlstate in _CLIENT_DATA_SQLSTATES
 
 
 def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> None:

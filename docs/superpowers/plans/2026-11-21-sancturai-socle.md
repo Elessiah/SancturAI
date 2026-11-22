@@ -5709,7 +5709,7 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     assert "access_log /var/log/nginx/sancturai.access.log sancturai_nouri" in conf
     assert "error_log /var/log/nginx/sancturai.error.log crit" in conf
     # revue batch 1, M13 : 5 Mo de texte non ASCII échappé en JSON (\uXXXX) dépasse 8 Mo
-    assert "client_max_body_size 12m;" in conf
+    assert "client_max_body_size 16m;" in conf
     assert "error_page 413 = @sancturai_413;" in conf and '"error":"QUOTA_EXCEEDED"' in conf
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text()
     for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
@@ -5902,8 +5902,8 @@ server {
     # `certbot --nginx -d sancturai.bluegenji-esport.fr` ajoute ensuite le bloc 443 et la redirection.
 
     # 5 Mo par fichier (§6.2) : un texte non ASCII encodé en JSON avec ensure_ascii (\uXXXX) pèse
-    # jusqu'à ~12 Mo ; au-delà, l'app répondrait de toute façon QUOTA_EXCEEDED (revue batch 1, M13).
-    client_max_body_size 12m;
+    # jusqu'à ~15 Mo (5 Mo de texte 2 ou 4 octets, échappé en JSON ASCII) ; au-delà, l'app répondrait de toute façon QUOTA_EXCEEDED (revue batch 1, M13).
+    client_max_body_size 16m;
     # 413 émis par nginx lui-même : corps au format §9.2, pas la page HTML par défaut.
     error_page 413 = @sancturai_413;
     access_log /var/log/nginx/sancturai.access.log sancturai_nouri;

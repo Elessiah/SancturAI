@@ -68,6 +68,27 @@ async def test_db_data_errors_are_validation_errors(state: AppState) -> None:
     assert count == 0
 
 
+async def test_other_class_22_db_errors_are_internal(state: AppState) -> None:
+    count = 0
+
+    def record() -> None:
+        nonlocal count
+        count += 1
+
+    app = FastAPI()
+    install_error_handlers(app, record)
+
+    @app.get("/div")
+    async def div() -> None:
+        async with state.sessionmaker() as db:
+            await db.execute(text("SELECT 1 / (:v - :v)"), {"v": 1})  # 22012 division_by_zero
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/div")
+    assert (r.status_code, r.json()["error"]) == (500, "INTERNAL")
+    assert count == 1
+
+
 async def test_logout_is_not_rate_limited(client: httpx.AsyncClient, state: AppState) -> None:
     a = await make_agent(state, "limited")
     for _ in range(60):
