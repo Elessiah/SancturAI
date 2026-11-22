@@ -80,6 +80,14 @@ async def test_reply_and_mention_notifications(client: httpx.AsyncClient, state:
     assert n_bob == []  # pas de notification pour soi-même
 
 
+async def test_mention_of_system_account_creates_no_notification(
+        client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    alice = await make_agent(state, "alice")
+    await client.post("/api/forum/threads", json={"category": "entraide", "title": "Q", "body": "salut @tribunal"},
+                      headers=alice.headers)
+    assert (await db.scalars(select(Notification))).all() == []  # compte système jamais connecté : rien à lire
+
+
 async def test_mention_in_first_post_and_isolation(client: httpx.AsyncClient, state: AppState) -> None:
     alice = await make_agent(state, "alice")
     bob = await make_agent(state, "bob")
