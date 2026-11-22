@@ -1,6 +1,6 @@
 import asyncio
 from collections import namedtuple
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, select, text
@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.disk import DiskGuard
 from app.forum.models import Notification
 from app.forum.notifications import prune_read_notifications
-from app.maintenance import maintenance_loop, run_maintenance_once
-from app.outbox.models import OutboxEvent
+from app.maintenance import maintenance_loop, purge_old_rows, run_maintenance_once
+from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.state import AppState
 
 Usage = namedtuple("Usage", "total used free")
@@ -77,6 +77,39 @@ async def test_disk_probe_failure_alerts_and_flushes(state: AppState, db: AsyncS
     assert any("disque" in t.lower() for t in texts)
 
 
+async def test_purges_old_sent_events(state: AppState, db: AsyncSession) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime.now(UTC) - timedelta(days=31)
+    db.add(OutboxEvent(kind="log", payload={"text": "old"}, sent_at=old))
+    db.add(OutboxEvent(kind="log", payload={"text": "pending"}))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-old"}, attempts=RELAY_MAX_ATTEMPTS, created_at=old))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-recent"}, attempts=RELAY_MAX_ATTEMPTS))
+    db.add(OutboxEvent(kind="log", payload={"text": "retrying-old"}, attempts=3, created_at=old))
+    await db.commit()
+    await purge_old_rows(state)
+    texts = sorted(e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all())
+    assert texts == ["abandoned-recent", "pending", "retrying-old"]
+
+
+async def test_purges_expired_challenges(state: AppState, db: AsyncSession) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.identity.models import Challenge, Invite
+    from tests.helpers import make_agent
+
+    founder = await make_agent(state, "founder", founder=True)
+    now = datetime.now(UTC)
+    db.add(Invite(code="c" * 32, creator_id=founder.agent_id, expires_at=now + timedelta(days=7)))
+    await db.flush()
+    for cid, delta in (("old", timedelta(days=2)), ("recent", timedelta(hours=2)), ("live", -timedelta(hours=1))):
+        db.add(Challenge(challenge_id=cid, invite_code="c" * 32, handle="newbie", seed=1, expires_at=now - delta))
+    await db.commit()
+    await purge_old_rows(state)
+    ids = sorted((await db.scalars(select(Challenge.challenge_id))).all())
+    assert ids == ["live", "recent"]
+
+
 async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) -> None:
     from datetime import timedelta
 
@@ -88,7 +121,7 @@ async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) 
                 Notification(agent_id=a.agent_id, kind="moderation", detail="old unread", read=False, created_at=old),
                 Notification(agent_id=a.agent_id, kind="moderation", detail="new read", read=True, created_at=new)])
     await db.commit()
-    await run_maintenance_once(state)
+    await purge_old_rows(state)
     details = {n.detail for n in (await db.scalars(select(Notification))).all()}
     assert details == {"old unread", "new read"}
 
@@ -106,19 +139,31 @@ async def test_prunes_unread_notifications_after_90_days(state: AppState, db: As
                 Notification(agent_id=a.agent_id, kind="moderation", detail="read 31", read=True,
                              created_at=now - timedelta(days=31))])
     await db.commit()
-    await run_maintenance_once(state)
+    await purge_old_rows(state)
     details = {n.detail for n in (await db.scalars(select(Notification))).all()}
     assert details == {"unread 89"}
 
 
 async def test_prune_failure_is_counted(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
-    """M6 (partiel) : une purge en échec persistant se voit dans le compteur d'erreurs (log Discord)."""
+    """M6 : une purge en échec persistant se voit dans le compteur d'erreurs (log Discord)."""
     async def boom(*_a: object, **_k: object) -> int:
         raise RuntimeError("prune down")
 
     monkeypatch.setattr("app.maintenance.prune_read_notifications", boom)
-    await run_maintenance_once(state)
+    await purge_old_rows(state)
     assert state.errors.take() == 1
+
+
+async def test_prune_failure_does_not_block_outbox_purge(state: AppState, db: AsyncSession,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("prune down")
+
+    db.add(OutboxEvent(kind="log", payload={"text": "old"}, sent_at=datetime.now(UTC) - timedelta(days=31)))
+    await db.commit()
+    monkeypatch.setattr("app.maintenance.prune_read_notifications", boom)
+    await purge_old_rows(state)
+    assert (await db.scalars(select(OutboxEvent))).all() == []
 
 
 async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
@@ -145,3 +190,13 @@ async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
     assert "ix_notif_prune" in plans[0] and "ix_notif_prune_unread" not in plans[0], plans[0]
     assert "ix_notif_prune_unread" in plans[1], plans[1]
     await db.rollback()
+
+
+async def test_outbox_purge_failure_is_counted(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch 5, M4 : l'échec de la purge outbox/défis est compté comme celui de la purge des notifications."""
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("delete down")
+
+    monkeypatch.setattr("app.maintenance.delete", boom)
+    await purge_old_rows(state)
+    assert state.errors.take() == 1
