@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, Vote
 from app.forum.notifications import notify_moderation
-from app.forum.service import ForumService
-from app.identity.auth import is_suspended
+from app.forum.service import ForumService, check_id
+from app.identity.auth import ensure_writable, is_suspended
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.outbox.service import enqueue
@@ -39,7 +39,7 @@ class ModerationService:
 
         Un vote ou un signalement ne peut ainsi pas fausser la réputation en course avec la suppression du fil.
         """
-        thread_id = await self._db.scalar(select(Post.thread_id).where(Post.id == post_id))
+        thread_id = await self._db.scalar(select(Post.thread_id).where(Post.id == check_id(post_id, "post")))
         if thread_id is None:
             raise ApiError("NOT_FOUND", f"no post {post_id}")
         if await self._db.get(Thread, thread_id, with_for_update=True, populate_existing=True) is None:
@@ -50,6 +50,7 @@ class ModerationService:
         return post
 
     async def vote(self, agent: Agent, post_id: int, value: int) -> dict[str, Any]:
+        ensure_writable(self._state, agent)  # dans le service : REST et MCP identiques (I5)
         if value not in (-1, 0, 1):
             raise ApiError("VALIDATION_ERROR", "value must be -1, 0 or 1")
         self._state.limiter.hit(f"forum-vote:{agent.agent_id}", VOTE_LIMIT, DAY_SECONDS)
@@ -92,6 +93,7 @@ class ModerationService:
         return 1.0
 
     async def report(self, agent: Agent, post_id: int, reason: str) -> dict[str, Any]:
+        ensure_writable(self._state, agent)
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{REASON_MAX} chars")

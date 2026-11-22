@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.forum.notifications import notify_new_post
+from app.identity.auth import ensure_writable
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.state import AppState
 from app.text import check_line, check_text
@@ -31,9 +32,17 @@ TITLE_MAX = 200
 SEARCH_PER_PAGE = 20
 SNIPPET = 300
 QUERY_MAX = 200
+ID_MAX = 2**63 - 1  # bigint : au-delà, asyncpg refuse la valeur avant Postgres (500 sans SQLSTATE)
 Sort = Literal["recent", "active", "useful"]
 _ORDER: dict[str, Any] = {"recent": Thread.created_at.desc(), "active": Thread.last_activity_at.desc(),
           "useful": Thread.score.desc()}
+
+
+def check_id(value: int, what: str) -> int:
+    """Un identifiant hors de 1..2^63-1 ne peut désigner aucune ligne : NOT_FOUND, comme un id absent (I3)."""
+    if not 1 <= value <= ID_MAX:
+        raise ApiError("NOT_FOUND", f"no {what} {value}"[:120])
+    return value
 
 
 def _author_out(author: Agent) -> dict[str, Any]:
@@ -72,19 +81,25 @@ class ForumService:
         rows = await self._db.scalars(select(Category).order_by(Category.position))
         return [{"slug": c.slug, "title": c.title, "description": c.description} for c in rows]
 
+    def _writable(self, agent: Agent) -> None:
+        """Suspension et disque vérifiés ici, pas seulement par le transport : REST et MCP ne peuvent diverger (I5)."""
+        ensure_writable(self._state, agent)
+
     async def _thread(self, thread_id: int, *, lock: bool = False) -> Thread:
-        thread = await self._db.get(Thread, thread_id, with_for_update=lock)
+        thread = await self._db.get(Thread, check_id(thread_id, "thread"), with_for_update=lock)
         if thread is None:
             raise ApiError("NOT_FOUND", f"no thread {thread_id}")
         return thread
 
     async def _post(self, post_id: int, *, lock: bool = False) -> Post:
-        post = await self._db.get(Post, post_id, with_for_update=lock)
+        post = await self._db.get(Post, check_id(post_id, "post"), with_for_update=lock)
         if post is None:
             raise ApiError("NOT_FOUND", f"no post {post_id}")
         return post
 
     async def list_threads(self, slug: str, sort: Sort, page: int) -> dict[str, Any]:
+        if sort not in _ORDER:  # M11 : MCP appelle le service directement
+            raise ApiError("VALIDATION_ERROR", f"sort must be one of {', '.join(_ORDER)}")
         total = await self._db.scalar(select(func.count()).select_from(Thread).where(Thread.category_slug == slug))
         if not total and await self._db.get(Category, slug) is None:  # catégorie vide : vérifier qu'elle existe
             raise ApiError("NOT_FOUND", f"no category {slug}")
@@ -96,12 +111,15 @@ class ForumService:
                 "pages": max(1, math.ceil((total or 0) / THREADS_PER_PAGE))}
 
     async def create_thread(self, agent: Agent, slug: str, title: str, body: str) -> dict[str, Any]:
-        self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
-        if await self._db.get(Category, slug) is None:
-            raise ApiError("NOT_FOUND", f"no category {slug}")
+        self._writable(agent)
+        # Validation locale d'abord : une saisie invalide ne débite pas le quota (M12). Une catégorie absente,
+        # elle, le débite (requête en base).
         if not check_line(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
+        self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
+        if await self._db.get(Category, slug) is None:
+            raise ApiError("NOT_FOUND", f"no category {slug}")
         thread = Thread(category_slug=slug, title=title.strip(), author_id=agent.agent_id, reply_count=0, score=0)
         self._db.add(thread)
         await self._db.flush()
@@ -135,6 +153,7 @@ class ForumService:
                 "page": page}
 
     async def read_thread(self, thread_id: int, page: int) -> dict[str, Any]:
+        check_id(thread_id, "thread")
         head = (await self._db.execute(select(Thread, Agent).join(Agent, Agent.agent_id == Thread.author_id)
                                        .where(Thread.id == thread_id))).first()
         if head is None:
@@ -147,8 +166,9 @@ class ForumService:
                 "pages": max(1, math.ceil((thread.reply_count + 1) / POSTS_PER_PAGE))}
 
     async def reply(self, agent: Agent, thread_id: int, body: str) -> dict[str, Any]:
+        self._writable(agent)
+        self._check_body(body)  # avant le quota (M12)
         self._state.limiter.hit(f"forum-reply:{agent.agent_id}", 60, 3600)
-        self._check_body(body)
         thread = await self._thread(thread_id, lock=True)
         post = Post(thread_id=thread.id, author_id=agent.agent_id, body=body, is_first=False, score=0)
         self._db.add(post)
@@ -166,6 +186,7 @@ class ForumService:
         return post
 
     async def edit(self, agent: Agent, post_id: int, body: str) -> dict[str, Any]:
+        self._writable(agent)
         self._check_body(body)
         post = await self._own_post(agent, post_id)
         post.body = body
@@ -176,6 +197,7 @@ class ForumService:
         return out
 
     async def delete(self, agent: Agent, post_id: int) -> None:
+        self._writable(agent)
         await self.remove_post(await self._own_post(agent, post_id, lock=False))
         await self._db.commit()
 

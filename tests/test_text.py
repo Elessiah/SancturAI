@@ -24,3 +24,13 @@ def test_check_line_rejects_any_control_or_line_separator() -> None:
         with pytest.raises(ApiError) as exc:
             check_line(bad, "title")
         assert exc.value.code == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("char", ["‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨",
+                                  "⁩", "‎", "‏", "؜"])
+def test_check_line_rejects_bidi_and_invisible_format_chars(char: str) -> None:
+    """M2 (revue batch 2) : un titre ne peut pas inverser ou masquer visuellement l'affichage d'une liste."""
+    with pytest.raises(ApiError) as exc:
+        check_line(f"titre{char}nocif", "title")
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert check_text(f"corps{char}ok", "body")  # les corps (markdown multilingue) les gardent
