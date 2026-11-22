@@ -13,6 +13,12 @@ MAX_ATTEMPTS = 60  # = app.outbox.models.RELAY_MAX_ATTEMPTS ; avec le plafond 1 
 BACKOFF_BASE, BACKOFF_CAP = 5, 3600
 HTTP_TIMEOUT = 10
 LEASE_SECONDS = BATCH * HTTP_TIMEOUT + 30  # un relais mort libère ses événements après ce délai
+# Frontière de privilèges : les lignes de l'outbox viennent de l'app (bac à sable) et le texte des agents.
+# Bornes alignées sur app.outbox.service.MAX_TEXT et le contrat du bot ; tout écart => abandon sans envoi.
+MAX_TEXT = {"log": 1800, "agent_message": 4000}
+MAX_PAYLOAD_BYTES = 32_768  # mesuré côté Postgres : une ligne géante n'est jamais chargée sur l'hôte
+AGENT_FIELDS = {"handle": 32, "agent_id": 64}
+MAX_SHORT_ID = 16
 
 # Réservation (bail) : une seule requête courte met next_attempt_at dans le futur, puis chaque
 # événement est réglé dans sa propre transaction autocommit. Aucun verrou de ligne n'est tenu pendant
@@ -24,7 +30,7 @@ WHERE id IN (
   SELECT id FROM outbox
   WHERE sent_at IS NULL AND attempts < %s AND next_attempt_at <= now()
   ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED)
-RETURNING id, kind, payload, attempts
+RETURNING id, kind, CASE WHEN octet_length(payload::text) <= %s THEN payload END, attempts
 """
 MARK_SENT = "UPDATE outbox SET sent_at = now() WHERE id = %s"
 MARK_FAILED = """
@@ -39,21 +45,45 @@ def backoff_seconds(attempts: int) -> int:
     return BACKOFF_CAP if attempts >= 12 else min(BACKOFF_CAP, BACKOFF_BASE * 2**attempts)
 
 
+def _bounded_str(value: object, limit: int) -> str:
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError("invalid field")
+    return value
+
+
 def format_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {"kind": kind, "text": str(payload.get("text", ""))}
+    """Corps envoyé au bot : liste blanche stricte de champs typés et bornés (jamais le JSONB brut).
+
+    Lève ValueError si la ligne ne respecte pas le contrat (le message ne contient aucune donnée de la ligne).
+    """
+    if kind not in MAX_TEXT or not isinstance(payload, dict):
+        raise ValueError("invalid event")
+    out: dict[str, Any] = {"kind": kind, "text": _bounded_str(payload.get("text", ""), MAX_TEXT[kind])}
     if kind == "agent_message":
-        out["short_id"] = payload.get("short_id")
-        out["agent"] = payload.get("agent")
+        out["short_id"] = _bounded_str(payload.get("short_id"), MAX_SHORT_ID)
+        agent = payload.get("agent")
+        if not isinstance(agent, dict):
+            raise ValueError("invalid agent")
+        out["agent"] = {name: _bounded_str(agent.get(name), limit) for name, limit in AGENT_FIELDS.items()}
     return out
 
 
 def process_batch(conn: psycopg.Connection, http: httpx.Client, bot_url: str, token: str) -> int:
     """Traite un lot (`conn` en autocommit) ; renvoie le nombre d'événements réservés."""
-    rows = sorted(conn.execute(CLAIM_PENDING, (LEASE_SECONDS, MAX_ATTEMPTS, BATCH)).fetchall())
+    rows = sorted(conn.execute(CLAIM_PENDING, (LEASE_SECONDS, MAX_ATTEMPTS, BATCH, MAX_PAYLOAD_BYTES)).fetchall())
     for event_id, kind, payload, attempts in rows:
+        try:
+            if payload is None:
+                raise ValueError("payload too large")
+            body = format_payload(kind, payload)
+        except ValueError:
+            # ligne hors contrat (app compromise ?) : abandon sans envoi ; ni le texte ni le kind ne sont journalisés
+            conn.execute(MARK_ABANDONED, (MAX_ATTEMPTS, event_id))
+            log.warning("event %s violates the notify contract, abandoning", event_id)
+            continue
         status: int | None
         try:
-            response = http.post(bot_url, json=format_payload(kind, payload),
+            response = http.post(bot_url, json=body,
                                  headers={"x-internal-token": token})
             status = response.status_code
         except httpx.HTTPError:

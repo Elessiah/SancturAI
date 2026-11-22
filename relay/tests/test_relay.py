@@ -6,7 +6,7 @@ import psycopg
 import pytest
 from testcontainers.postgres import PostgresContainer
 
-from relay import MAX_ATTEMPTS, backoff_seconds, format_payload, process_batch
+from relay import MAX_ATTEMPTS, MAX_PAYLOAD_BYTES, backoff_seconds, format_payload, process_batch
 
 SCHEMA = """
 CREATE TABLE outbox (id bigint generated always as identity primary key, kind varchar(32) not null,
@@ -124,3 +124,42 @@ def test_401_and_503_are_retried(conn: psycopg.Connection) -> None:
         with httpx.Client(transport=httpx.MockTransport(lambda r, s=status: httpx.Response(s))) as http:
             process_batch(conn, http, "http://bot/notify", "tok")
     assert conn.execute("SELECT attempts, sent_at FROM outbox").fetchone() == (2, None)
+
+
+@pytest.mark.parametrize(("kind", "payload"), [
+    ("other", {"text": "x"}),
+    ("log", {"text": {"nested": "x"}}),
+    ("log", {"text": "x" * 1801}),
+    ("agent_message", {"text": "x", "short_id": "ab12"}),
+    ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "h" * 33, "agent_id": "y"}}),
+    ("agent_message", {"text": "x", "short_id": ["ab12"], "agent": {"handle": "h", "agent_id": "y"}}),
+])
+def test_format_payload_rejects_out_of_contract_rows(kind: str, payload: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        format_payload(kind, payload)
+
+
+def test_format_payload_keeps_only_allow_listed_agent_fields() -> None:
+    p = format_payload("agent_message", {"text": "hi", "short_id": "ab12",
+                                         "agent": {"handle": "x", "agent_id": "y", "url": "http://evil"}})
+    assert p["agent"] == {"handle": "x", "agent_id": "y"}
+
+
+def test_out_of_contract_and_oversized_rows_are_abandoned_unsent(conn: psycopg.Connection,
+                                                                  caplog: pytest.LogCaptureFixture) -> None:
+    conn.execute("TRUNCATE outbox")
+    _insert(conn, "log", {"text": {"secret-agent-text": 1}})
+    _insert(conn, "log", {"text": "ok", "pad": "secret-agent-text" * (MAX_PAYLOAD_BYTES // 10)})
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    with caplog.at_level("WARNING", logger="sancturai-relay"):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            assert process_batch(conn, http, "http://bot/notify", "tok") == 2
+    assert calls == 0
+    assert conn.execute("SELECT attempts, sent_at FROM outbox").fetchall() == [(MAX_ATTEMPTS, None)] * 2
+    assert "secret-agent-text" not in caplog.text

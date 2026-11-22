@@ -8,5 +8,9 @@ Base: f19446d
 | P2 | perf | major | app/maintenance.py:run_maintenance_once | purge_old_rows seq-scans outbox (no sent_at/created_at index) every 60 s and its failure blocks the error/disk-alert flush | fixed | b41791f |
 | P3 | perf | minor | relay/relay.py:main | sleep(interval) after a full batch caps backlog drain at 20 events / 5 s; per-call timeout set per request instead of on the client | fixed | b41791f |
 | P4 | perf | minor | app/maintenance.py:purge_old_rows | unbatched DELETEs | wontfix | |
+| S1 | secu | major | relay/relay.py:format_payload | agent/short_id forwarded as raw attacker-controlled JSONB, text/kind neither typed nor bounded (no strict allow-list) in format_payload | fixed | |
+| S2 | secu | major | relay/relay.py:process_batch | unbounded payload (up to ~255 MB jsonb x BATCH) loaded into host memory by CLAIM_PENDING in process_batch; a malformed row raised out of the loop | fixed | |
+| S3 | secu | minor | relay/relay.py:main | empty/missing SANCTURAI_BOT_TOKEN not refused at startup in main (crash loop or 401 retries burning attempts) | open | |
+| S4 | secu | minor | relay/relay.py:main | httpx.Client trust_env=True in main honors HTTP(S)_PROXY/ALL_PROXY/.netrc (token + agent text could leave via a proxy) | open | |
 
 P4 wontfix: outbox is bounded to ~30 days of low-volume events; hourly purge now, batching would be over-engineering.
