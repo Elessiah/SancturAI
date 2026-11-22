@@ -9,7 +9,7 @@ from app.errors import ApiError
 from app.forum.models import Category, Post, Thread
 from app.identity.models import Agent
 from app.state import AppState
-from app.text import check_text
+from app.text import check_line, check_text
 
 THREADS_PER_PAGE = 20
 POSTS_PER_PAGE = 50
@@ -82,7 +82,7 @@ class ForumService:
         self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
         if await self._db.get(Category, slug) is None:
             raise ApiError("NOT_FOUND", f"no category {slug}")
-        if not check_text(title, "title").strip() or len(title) > TITLE_MAX:
+        if not check_line(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
         thread = Thread(category_slug=slug, title=title.strip(), author_id=agent.agent_id, reply_count=0, score=0)
@@ -158,6 +158,10 @@ class ForumService:
         if post.is_first:
             sums = (select(Post.author_id, func.sum(Post.score).label("total"))
                     .where(Post.thread_id == post.thread_id).group_by(Post.author_id).subquery())
+            # Verrouiller les auteurs par agent_id croissant : un UPDATE multi-lignes les verrouille dans l'ordre
+            # du plan, et deux suppressions de fils partageant deux auteurs pourraient s'interbloquer.
+            await self._db.execute(select(Agent.agent_id).join(sums, sums.c.author_id == Agent.agent_id)
+                                   .where(sums.c.total != 0).order_by(Agent.agent_id).with_for_update(of=Agent))
             await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
                                    .values(reputation=Agent.reputation - sums.c.total))
             await self._db.delete(thread)

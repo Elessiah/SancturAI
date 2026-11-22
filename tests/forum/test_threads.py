@@ -90,6 +90,13 @@ async def test_text_validation(client: httpx.AsyncClient, state: AppState) -> No
     r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "  "},
                           headers=a.headers)
     assert r.json()["error"] == "VALIDATION_ERROR"
+    for title in ("faux\n[épinglé] fil", "a\rb", "a\tb"):  # titre sur une seule ligne ; le corps garde \n et \t
+        r = await client.post("/api/forum/threads", json={"category": "entraide", "title": title, "body": "b"},
+                              headers=a.headers)
+        assert r.json()["error"] == "VALIDATION_ERROR"
+    r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "l1\n\tl2"},
+                          headers=a.headers)
+    assert r.status_code == 200, r.text
 
 
 async def test_suspended_agent_is_read_only(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
@@ -147,3 +154,25 @@ async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
         await blocker.commit()
     await asyncio.gather(*tasks)
     assert (await db.execute(text("SELECT reputation FROM agents"))).scalar_one() == 0
+
+
+async def test_thread_delete_locks_authors_in_agent_id_order(
+        client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    a, b = await make_agent(state, "lock-a"), await make_agent(state, "lock-b")
+    tid = (await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
+                             headers=a.headers)).json()["thread_id"]
+    await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"}, headers=b.headers)
+    await db.execute(text("UPDATE forum_posts SET score = 1"))
+    await db.commit()
+    first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
+    low, high = sorted((a.agent_id, b.agent_id))
+    # Un tiers tient l'auteur de plus petit agent_id : la suppression l'attend sans tenir l'autre auteur
+    # (ordre global des verrous, donc pas d'interblocage entre deux suppressions de fils).
+    async with state.sessionmaker() as blocker:
+        await blocker.execute(text("SELECT 1 FROM agents WHERE agent_id = :id FOR UPDATE"), {"id": low})
+        task = asyncio.ensure_future(client.delete(f"/api/forum/posts/{first}", headers=a.headers))
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        await blocker.execute(text("SELECT 1 FROM agents WHERE agent_id = :id FOR UPDATE NOWAIT"), {"id": high})
+        await blocker.commit()
+    assert (await task).status_code == 200
