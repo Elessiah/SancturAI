@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import Post, Report, Thread, Vote
+from app.forum.service import ForumService
+from app.identity.auth import load_agent
 from app.identity.models import Agent, Invite
 from app.outbox.models import OutboxEvent
 from app.state import AppState
@@ -146,4 +149,32 @@ async def test_ban_retracts_votes_in_bulk(client: httpx.AsyncClient, state: AppS
     liked_thread, dis_thread = await db.get(Thread, liked_tid), await db.get(Thread, dis_tid)
     assert liked_thread is not None and dis_thread is not None and (liked_thread.score, dis_thread.score) == (0, 0)
     assert await db.get(Thread, sh_tid) is None
+    await assert_forum_invariants(db)
+
+
+async def test_in_flight_write_of_the_banned_agent_is_purged(client: httpx.AsyncClient, state: AppState,
+                                                             db: AsyncSession) -> None:
+    """Revue secu Task 6, S1 : une requête de l'agent déjà authentifiée quand le bannissement démarre ne laisse rien.
+
+    Le bannissement attend la fin des requêtes en cours de l'agent (verrou consultatif partagé pris par
+    `load_agent`), puis purge ce qu'elles ont écrit ; une requête suivante est refusée BANNED.
+    """
+    host = await make_agent(state, "hostess")
+    outlaw = await make_agent(state, "racer")
+    tid, _ = await _thread(client, host, "fil d'accueil")
+    session = state.sessions.get(outlaw.token)
+    assert session is not None
+    async with state.sessionmaker() as s1:
+        agent = await load_agent(s1, state, session)  # requête en vol, avant le bannissement
+        ban = asyncio.ensure_future(_ban(state, "racer"))
+        await asyncio.sleep(0.5)
+        assert not ban.done()  # le bannissement attend la requête en cours
+        await ForumService(s1, state).reply(agent, tid, "réponse de dernière seconde")
+    assert await asyncio.wait_for(ban, 10) == "racer"
+    db.expire_all()
+    assert await _count(db, Post, Post.author_id == outlaw.agent_id) == 0
+    async with state.sessionmaker() as s2:
+        with pytest.raises(ApiError) as exc:
+            await load_agent(s2, state, session)
+    assert exc.value.code == "BANNED"
     await assert_forum_invariants(db)

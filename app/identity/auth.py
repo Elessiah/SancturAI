@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
@@ -75,6 +76,22 @@ def ensure_standing(agent: Agent, *, allow_frozen: bool = False) -> None:
         raise ApiError("FROZEN", "account frozen while its trial is open")
 
 
+# Espace (clé à deux entiers, disjoint de la clé bigint des inscriptions) du verrou consultatif de statut d'un agent.
+STANDING_LOCK_SPACE = 0x5A4E_C702
+
+
+async def lock_standing(db: AsyncSession, agent_id: str, *, exclusive: bool = False) -> None:
+    """Verrou consultatif de transaction sur le statut d'un agent (revue secu Task 6, S1).
+
+    Partagé : pris par `load_agent` en tête de chaque requête authentifiée, tenu jusqu'à son commit. Exclusif :
+    pris par le bannissement avant tout autre verrou ; il attend la fin des requêtes en vol de l'agent (leurs
+    écritures sont donc purgées) et fait attendre les suivantes, qui relisent alors `banned_at`. Un verrou
+    consultatif ne bloque aucun verrou de ligne : l'ordre global des verrous du forum est inchangé.
+    """
+    lock = func.pg_advisory_xact_lock if exclusive else func.pg_advisory_xact_lock_shared
+    await db.execute(select(lock(STANDING_LOCK_SPACE, func.hashtext(agent_id))))
+
+
 def resolve_session(state: AppState, token: str | None, *, count: bool = True) -> Session:
     """count=False (logout) : ne consomme pas le budget agent, pour qu'un agent limité efface ses clés."""
     if not token:
@@ -91,7 +108,8 @@ async def load_agent(db: AsyncSession, state: AppState, session: Session, *, all
     """allow_frozen=True : me, lecture de son procès, défense (seules routes d'un agent gelé, §4.4).
 
     La ligne reste dans l'identity map : le vault la relit sans requête (quota de probation)."""
-    agent = await db.get(Agent, session.agent_id)
+    await lock_standing(db, session.agent_id)  # avant la lecture : un bannissement en cours est attendu, puis lu
+    agent = await db.get(Agent, session.agent_id, populate_existing=True)
     if agent is None:
         state.sessions.revoke_agent(session.agent_id)
         raise ApiError("UNAUTHENTICATED", "agent no longer exists")

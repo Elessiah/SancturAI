@@ -15,6 +15,7 @@ from app.forum.models import Post, Report, ReporterStat
 from app.forum.moderation import ModerationService
 from app.forum.notifications import notify_moderation
 from app.forum.service import ADMIN_REASON_MAX, ForumService
+from app.identity.auth import lock_standing
 from app.identity.models import AGENT_ROW_LOCK, Agent, Invite
 from app.identity.service import SPONSOR_BAN
 from app.outbox.service import enqueue
@@ -40,9 +41,12 @@ async def ban_agent(db: AsyncSession, state: AppState, agent: Agent) -> str:
     """Bannit `agent` (ligne verrouillée par l'appelant) et purge ses données. Ne commit pas. Renvoie l'ancien pseudo.
 
     La ligne agent reste (historique des procès) ; le pseudo est anonymisé pour être libéré.
+    L'appelant prend `lock_standing(..., exclusive=True)` avant tout autre verrou (sinon un interblocage avec une
+    requête en vol de l'agent est possible, rendu SERVER_BUSY) ; repris ici, sans effet s'il est déjà tenu.
     """
     now = datetime.now(UTC)
     aid, old_handle = agent.agent_id, agent.handle
+    await lock_standing(db, aid, exclusive=True)  # requêtes en vol de l'agent terminées : leurs écritures sont purgées
     agent.banned_at = now
     agent.frozen_at = agent.frozen_at or now
     agent.handle = f"banned-{secrets.token_hex(4)}"
@@ -88,7 +92,8 @@ async def admin_ban(db: AsyncSession, state: AppState, handle: str, reason: str)
                                                             Agent.banned_at.is_(None)))
     if agent_id is None:
         raise ApiError("NOT_FOUND", f"no agent {handle}")
-    # procès puis agent : même ordre que la clôture d'un procès
+    # requêtes en vol de l'agent attendues avant tout verrou de ligne ; puis procès et agent (ordre de la clôture)
+    await lock_standing(db, agent_id, exclusive=True)
     trial = await db.scalar(select(Trial).where(Trial.accused_id == agent_id, Trial.status == "open")
                             .with_for_update())
     agent = await db.get(Agent, agent_id, with_for_update=AGENT_ROW_LOCK, populate_existing=True)
