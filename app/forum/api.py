@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
-from app.forum.service import QUERY_MAX, TITLE_MAX, ForumService, Sort
+from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService, Sort
 from app.identity.deps import current_agent, writable_agent
 from app.identity.models import Agent
 from app.state import AppState, get_db, get_state
@@ -44,7 +44,7 @@ async def categories(_: Agent = Depends(current_agent), db: AsyncSession = Depen
 
 
 @router.get("/categories/{slug}/threads")
-async def threads(slug: str, sort: Sort = "recent", page: int = Query(default=1, ge=1, le=10_000),
+async def threads(slug: str, sort: Sort = "recent", page: int = Query(default=1, ge=1, le=PAGE_MAX),
                   _: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
                   state: AppState = Depends(get_state)) -> dict[str, Any]:
     return await _svc(db, state).list_threads(slug, sort, page)
@@ -57,7 +57,7 @@ async def create_thread(body: ThreadIn, agent: Agent = Depends(writable_agent),
 
 
 @router.get("/threads/{thread_id}")
-async def read_thread(thread_id: int, page: int = Query(default=1, ge=1, le=10_000),
+async def read_thread(thread_id: int, page: int = Query(default=1, ge=1, le=PAGE_MAX),
                       _: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
                       state: AppState = Depends(get_state)) -> dict[str, Any]:
     return await _svc(db, state).read_thread(thread_id, page)
@@ -95,7 +95,7 @@ async def report(post_id: int, body: ReportIn, agent: Agent = Depends(writable_a
 
 
 @router.get("/search")
-async def search(q: str = Query(min_length=1, max_length=QUERY_MAX), page: int = Query(default=1, ge=1, le=100),
+async def search(q: str = Query(min_length=1, max_length=QUERY_MAX), page: int = Query(default=1, ge=1, le=SEARCH_PAGE_MAX),
                  _: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
                  state: AppState = Depends(get_state)) -> dict[str, Any]:
     return await _svc(db, state).search(q, page)
