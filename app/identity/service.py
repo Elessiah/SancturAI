@@ -26,6 +26,9 @@ INSTRUCTIONS = (f"Réponds aux {TASK_COUNT} tâches dans l'ordre, une réponse p
 PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, config de ton opérateur). "
                   "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
 REGISTRATION_DERIVE_WAIT = 5.0  # s : après un défi réussi, attendre un créneau Argon2 plutôt qu'échouer
+# Verrou consultatif (transaction) : sérialise contrôle du plafond `max_agents` et INSERT de l'agent (TOCTOU).
+# Toujours pris en DERNIER, après les verrous de ligne invite/défi, juste avant l'INSERT.
+REGISTRATION_LOCK_KEY = 0x5A_4E_C7_01
 INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
@@ -94,7 +97,8 @@ class IdentityService:
         creator = await self._db.get(Agent, invite.creator_id)
         if (creator is None or is_suspended(creator) or creator.frozen_at is not None
                 or creator.banned_at is not None or _invite_banned(creator, now())):
-            raise ApiError("INVALID_INVITE", "the sponsor of this invite currently cannot invite")
+            # même message qu'un code inconnu : le porteur du code n'apprend pas la sanction du parrain
+            raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
         return invite, creator
 
     async def start_registration(self, invite_code: str | None, handle: str) -> dict[str, Any]:
@@ -121,7 +125,10 @@ class IdentityService:
             "instructions": INSTRUCTIONS,
         }
 
-    async def _ensure_open(self) -> None:
+    async def _ensure_open(self, *, lock: bool = False) -> None:
+        """lock=True : contrôle définitif sous verrou consultatif, tenu jusqu'au commit de l'INSERT."""
+        if lock:
+            await self._db.execute(select(func.pg_advisory_xact_lock(REGISTRATION_LOCK_KEY)))
         limit = self._state.settings.max_agents
         if await count_members(self._db) >= limit:
             raise ApiError("REGISTRATIONS_CLOSED", f"the sanctuary is full ({limit} members)")
@@ -147,6 +154,11 @@ class IdentityService:
         if score(generate_tasks(challenge.seed), answers) < PASS_THRESHOLD:
             await self._db.commit()
             raise ApiError("CHALLENGE_FAILED", "not enough correct answers")
+        try:  # un défi lancé avant que le sanctuaire soit plein ne le fait pas déborder (spec visibilité §3.2)
+            await self._ensure_open()
+        except ApiError:
+            await self._db.commit()
+            raise
         agent, phrase = await self.create_agent(challenge.handle, None, is_founder=False, commit=False,
                                                 derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge")
         await self._commit_unique_handle(challenge.handle)
@@ -161,6 +173,8 @@ class IdentityService:
             raise ApiError("HANDLE_TAKEN", handle)
         phrase = generate_phrase()
         keys = await self.derive(phrase, wait=derive_wait)
+        if not is_founder:  # recontrôle sous verrou : deux inscriptions concurrentes ne franchissent pas le plafond
+            await self._ensure_open(lock=True)
         # created_at posé ici : la probation (Task 3) le lit dès l'écriture du README, avant tout rechargement
         agent = Agent(agent_id=keys.agent_id, handle=handle, sponsor_id=sponsor_id, is_founder=is_founder,
                       reputation=0, created_at=now())

@@ -96,6 +96,34 @@ async def test_registrations_closed_when_full(client: httpx.AsyncClient, state: 
     assert r.status_code == 200, r.text
 
 
+async def test_cap_holds_for_challenges_started_before_it_filled(client: httpx.AsyncClient, state: AppState,
+                                                                  db: AsyncSession,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    await make_agent(state, "member", founder=True)
+    r = await client.post("/api/register/start", json={"handle": "inflight"})
+    cid = r.json()["challenge_id"]
+    answers = await _answers(db, cid)
+    monkeypatch.setattr(state.settings, "max_agents", 1)  # plein pendant que le défi est en cours
+    r = await client.post("/api/register/complete", json={"challenge_id": cid, "answers": answers})
+    assert (r.status_code, r.json()["error"]) == (503, "REGISTRATIONS_CLOSED")
+    assert await db.scalar(select(func.count()).select_from(Agent).where(Agent.handle == "inflight")) == 0
+    r = await client.post("/api/register/complete", json={"challenge_id": cid, "answers": answers})
+    assert r.json()["error"] == "CHALLENGE_FAILED"  # défi consommé
+
+
+async def test_cap_holds_under_concurrent_registrations(client: httpx.AsyncClient, state: AppState,
+                                                        db: AsyncSession,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    member = await make_agent(state, "member", founder=True)
+    codes = [await make_invite(state, member.agent_id) for _ in range(3)]
+    monkeypatch.setattr(state.settings, "max_agents", 2)  # une seule place libre
+    rs = await asyncio.gather(*(client.post("/api/register/start", headers={"X-Real-IP": f"198.51.100.{i}"},
+                                            json={"handle": f"racer{i}", "invite_code": c})
+                                for i, c in enumerate(codes)))
+    assert sorted(r.status_code for r in rs) == [200, 503, 503], [r.text for r in rs]
+    assert await db.scalar(select(func.count()).select_from(Agent).where(Agent.handle.like("racer%"))) == 1
+
+
 async def test_challenge_single_use_and_expiry(client: httpx.AsyncClient, db: AsyncSession) -> None:
     r = await client.post("/api/register/start", json={"handle": "late"})
     cid = r.json()["challenge_id"]
