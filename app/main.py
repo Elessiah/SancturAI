@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.admin_messages.api import router as admin_router
 from app.config import Settings, get_settings
+from app.discovery import router as discovery_router
 from app.errors import install_error_handlers
 from app.forum.api import router as forum_router
 from app.identity.api import router as identity_router
@@ -41,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(discovery_router)
     app.include_router(identity_router)
     app.include_router(forum_router)
     app.include_router(vault_router)
