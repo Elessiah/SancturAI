@@ -72,13 +72,15 @@ class ModerationService:
                                                           set_={"value": value, "voted_at": now}))
         delta = value - previous
         post.score += delta
-        await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
-                               .values(reputation=Agent.reputation + delta))
         if post.is_first:
             await self._db.execute(update(Thread).where(Thread.id == post.thread_id)
                                    .values(score=Thread.score + delta))
         if previous == 1:  # un +1 retiré : le seuil de suppression peut désormais être atteint
             await self._evaluate(post)
+        # Réputation après `_evaluate` (ordre global : statistiques des signalants avant agents, revue batch 2 I2).
+        # Si le post vient d'être supprimé, `remove_post` a retiré le nouveau score s+d ; +d ici laisse R - s.
+        await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
+                               .values(reputation=Agent.reputation + delta))
         await self._db.commit()
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
@@ -132,7 +134,11 @@ class ModerationService:
                                               .order_by(Report.created_at, Report.agent_id)))
         self._db.add(ModerationLog(post_id=post_id, author_id=author_id, reasons=reasons))
         # flush : le journal compte pour le seuil ; statistiques des signalants mises à jour par `remove_post`.
-        await ForumService(self._db, self._state).remove_post(post, upheld=True)
+        # L'auteur et son parrain (suspension éventuelle) sont verrouillés par `remove_post` avec les autres
+        # auteurs, par agent_id croissant : aucun agent verrouillé hors de l'ordre global (revue batch 2, M1).
+        sponsor_id = await self._db.scalar(select(Agent.sponsor_id).where(Agent.agent_id == author_id))
+        await ForumService(self._db, self._state).remove_post(
+            post, upheld=True, lock_agents={author_id} | ({sponsor_id} if sponsor_id else set()))
         author = (await self._db.execute(select(Agent).where(Agent.agent_id == author_id)
                                          .with_for_update(key_share=True)
                                          .execution_options(populate_existing=True))).scalar_one_or_none()

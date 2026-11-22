@@ -1,4 +1,16 @@
+"""Forum : fils, réponses, édition, suppression, recherche.
+
+Ordre global des verrous (revue batch 2, I1/I2/M1) ; tout chemin d'écriture du forum les prend dans cet ordre :
+  1. fil (forum_threads, FOR UPDATE), puis post (forum_posts, FOR UPDATE) ;
+  2. statistiques des signalants (forum_reporter_stats), par agent_id croissant ;
+  3. lignes agents, par agent_id croissant, toujours en FOR NO KEY UPDATE (AGENT_ROW_LOCK, ou UPDATE simple) :
+     ce mode ne bloque pas le FOR KEY SHARE que prend chaque INSERT référençant un agent (post, vote, signalement,
+     notification) ; FOR UPDATE sur un agent est interdit ;
+  4. insertions seules : notifications, outbox, journal de modération.
+Un conflit résiduel (40P01 / 40001) est rendu SERVER_BUSY réessayable (app.errors), jamais INTERNAL.
+"""
 import math
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -9,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.forum.notifications import notify_new_post
-from app.identity.models import Agent
+from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.state import AppState
 from app.text import check_line, check_text
 
@@ -167,15 +179,18 @@ class ForumService:
         await self.remove_post(await self._own_post(agent, post_id, lock=False))
         await self._db.commit()
 
-    async def remove_post(self, post: Post, *, upheld: bool = False) -> None:
+    async def remove_post(self, post: Post, *, upheld: bool = False, lock_agents: Iterable[str] = ()) -> None:
         """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation.
 
         Verrouille le fil puis le post (même ordre que `reply`) : deux suppressions concurrentes dans un fil
         sont sérialisées, sinon le score d'une réponse serait retiré deux fois de la réputation (via la
-        réponse et via le fil). L'appelant ne doit donc pas avoir déjà verrouillé le post.
+        réponse et via le fil). L'appelant ne doit tenir aucun verrou, sauf ce fil puis ce post, dans cet ordre
+        (re-verrouillage idempotent) : voir l'ordre global en tête de module.
 
         `upheld` (modération) : les signalements du post comptent comme aboutis ; tous les autres signalements
         emportés par la suppression sont neutralisés (retirés de `reports_total`).
+        `lock_agents` : agents que l'appelant modifiera ensuite (auteur suspendu, parrain) ; verrouillés ici avec
+        les auteurs, par agent_id croissant, plutôt qu'après, hors de l'ordre global.
         """
         thread = await self._thread(post.thread_id, lock=True)
         locked = await self._db.get(Post, post.id, with_for_update=True, populate_existing=True)
@@ -183,17 +198,20 @@ class ForumService:
             raise ApiError("NOT_FOUND", f"no post {post.id}")
         post = locked
         await self._settle_reports(post, upheld)
+        extra = set(lock_agents)
         if post.is_first:
             sums = (select(Post.author_id, func.sum(Post.score).label("total"))
                     .where(Post.thread_id == post.thread_id).group_by(Post.author_id).subquery())
+            scored = set(await self._db.scalars(select(sums.c.author_id).where(sums.c.total != 0)))
             # Verrouiller les auteurs par agent_id croissant : un UPDATE multi-lignes les verrouille dans l'ordre
             # du plan, et deux suppressions de fils partageant deux auteurs pourraient s'interbloquer.
-            await self._db.execute(select(Agent.agent_id).join(sums, sums.c.author_id == Agent.agent_id)
-                                   .where(sums.c.total != 0).order_by(Agent.agent_id).with_for_update(of=Agent))
-            await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
-                                   .values(reputation=Agent.reputation - sums.c.total))
+            await self._lock_agents(scored | extra)
+            if scored:
+                await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
+                                       .values(reputation=Agent.reputation - sums.c.total))
             await self._db.delete(thread)
         else:
+            await self._lock_agents(({post.author_id} if post.score else set()) | extra)
             if post.score:
                 await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
                                        .values(reputation=Agent.reputation - post.score))
@@ -201,6 +219,12 @@ class ForumService:
                                    .values(reply_count=Thread.reply_count - 1))
             await self._db.delete(post)
         await self._db.flush()
+
+    async def _lock_agents(self, agent_ids: set[str]) -> None:
+        """FOR NO KEY UPDATE par agent_id croissant (jamais FOR UPDATE : bloquerait les INSERT concurrents)."""
+        if agent_ids:
+            await self._db.execute(select(Agent.agent_id).where(Agent.agent_id.in_(agent_ids))
+                                   .order_by(Agent.agent_id).with_for_update(key_share=AGENT_ROW_LOCK["key_share"]))
 
     async def _settle_reports(self, post: Post, upheld: bool) -> None:
         """Met à jour les statistiques des signalants avant que la cascade n'efface leurs signalements.
