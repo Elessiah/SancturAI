@@ -7,10 +7,10 @@ Base: 3aa2664
 | P1 | perf | major | .github/workflows/ci.yml:70 | build arm64 sous QEMU sans cache de couches (cache-from/to) in build-push-action | fixed | bfe5805 |
 | P2 | perf | major | deploy/deploy.sh:30 | images précédentes jamais supprimées (disque du Pi) in deploy.sh | fixed | bfe5805 |
 | P3 | perf | minor | deploy/docker-compose.yml:app | CMD uvicorn et `user: 10001:33` dupliqués Dockerfile/compose in app.command | wontfix |  |
-| P4 | perf | minor | deploy/docker-compose.yml + systemd/sancturai.slice | somme des limites (512m+1g+relay 128M = 1,64G) > MemoryMax=1.5G in sancturai.slice (plan-mandated) | fixed | FIX |
-| P5 | perf | minor | deploy/deploy.sh:8 | `.env` relu par grep alors que compose le lit déjà, échec cryptique si absent in deploy.sh | fixed | FIX |
+| P4 | perf | minor | deploy/docker-compose.yml + systemd/sancturai.slice | somme des limites (512m+1g+relay 128M = 1,64G) > MemoryMax=1.5G in sancturai.slice (plan-mandated) | fixed | 12d68c8 |
+| P5 | perf | minor | deploy/deploy.sh:8 | `.env` relu par grep alors que compose le lit déjà, échec cryptique si absent in deploy.sh | fixed | 12d68c8 |
 | P6 | perf | minor | deploy/nginx/sancturai.conf:upstream | pas de keepalive sur l'upstream sancturai_app in nginx | wontfix |  |
-| P7 | perf | minor | deploy/nginx/sancturai.conf:44 | commentaire client_max_body_size verbeux avec référence de revue, blocs @sancturai_* répétitifs in nginx | fixed | FIX |
+| P7 | perf | minor | deploy/nginx/sancturai.conf:44 | commentaire client_max_body_size verbeux avec référence de revue, blocs @sancturai_* répétitifs in nginx | fixed | 12d68c8 |
 
 Notes round 2 (0 nouveau majeur, tour final) :
 - P3 wontfix : le CMD du Dockerfile est la valeur par défaut sûre de l'image ; l'égalité avec la commande compose est garantie par test_dockerfile_matches_compose_and_ci.
