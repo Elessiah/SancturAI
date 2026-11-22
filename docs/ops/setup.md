@@ -30,6 +30,8 @@ public (GitHub → Packages → sancturai → Package settings → Change visibi
 ## 2. Volume disque de taille fixe (20 Go)
 Chaque bloc est un sous-shell `set -e` : une vérification en échec arrête le bloc avant toute action, et
 n'importe quelle commande en échec l'arrête aussi. Ne pas passer au bloc suivant après un `ARRÊT`.
+Reprise après un échec du premier bloc une fois l'image créée : ne pas le rejouer (la vérification de place
+échouerait), exécuter seulement ses lignes restantes.
 ```bash
 ( set -e
   # Marge d'abord : après les 20 Go, la partition doit garder au moins 10 Go libres pour les autres services.
@@ -54,6 +56,7 @@ shell (plage 0-99 de base-passwd, libre sur Debian 13). groupadd/useradd refusen
 (« not unique ») et le bloc s'arrête : rien n'est accordé à un compte existant.
 ```bash
 ( set -e
+  mountpoint -q /srv/sancturai-data || { echo 'ARRÊT : /srv/sancturai-data non monté (bloc précédent)'; exit 1; }
   getent group sancturai-pg >/dev/null || sudo groupadd --gid 70 sancturai-pg
   getent passwd sancturai-pg >/dev/null || sudo useradd --system --uid 70 --gid 70 --no-create-home \
     --home-dir /nonexistent --shell /usr/sbin/nologin sancturai-pg
@@ -95,8 +98,9 @@ l'ancienne configuration, puis refuse de démarrer au prochain redémarrage — 
 deux vérifications ci-dessous (deploy.sh refuse aussi de déployer si nginx n'écoute pas sur ce port).
 ```bash
 ( set -e
-  # Avant : le port doit être libre et l'en-tête de sécurité présent, sinon rien n'est touché.
-  if sudo ss -ltnH 'sport = :8300' | grep -q .; then echo 'ARRÊT : 127.0.0.1:8300 déjà pris, vhost non installé'; exit 1; fi
+  # Avant : 8300 libre ou tenu par nginx lui-même (mise à jour du vhost), en-tête de sécurité présent ; sinon rien
+  # n'est touché.
+  if sudo ss -ltnpH 'sport = :8300' | grep -v '"nginx"' | grep -q .; then echo 'ARRÊT : 127.0.0.1:8300 pris par un autre processus, vhost non installé'; exit 1; fi
   [ -f /etc/nginx/snippets/security-headers.conf ] || { echo 'ARRÊT : snippets/security-headers.conf absent, vhost non installé'; exit 1; }
   sudo cp /etc/nginx/sites-available/sancturai.bluegenji-esport.fr /root/sancturai-placeholder.conf.bak
   sudo install -m 644 ~/apps/SancturAI/deploy/nginx/sancturai.conf /etc/nginx/sites-available/sancturai.bluegenji-esport.fr
@@ -114,12 +118,13 @@ deux vérifications ci-dessous (deploy.sh refuse aussi de déployer si nginx n'�
 sudo journalctl -u nginx --since -2min | grep -i bind   # aucune ligne attendue
 sudo certbot renew --dry-run   # le renouvellement passe toujours par ce vhost
 ```
-Jusqu'au premier déploiement, le site répond 503 (JSON `SERVER_BUSY`).
+Jusqu'au premier déploiement, le site répond 503 (JSON `SERVER_BUSY`). Mettre à jour le vhost : rejouer ce
+bloc (`.bak` contient alors le vhost SancturAI précédent, dernière configuration saine).
 
 Plafonds de corps (identiques à ceux de l'app, même JSON en cas de dépassement) : 16 Mio sous `/api/vault/`,
 128 Kio sous `/api/forum/`, 256 Kio pour `/mcp`, 64 Kio ailleurs. Un corps de 64 Kio ou moins reste en mémoire ;
 au-delà, nginx l'écrit dans son dossier temporaire par défaut (racine). Le vault, seul à accepter 16 Mio, est limité
-à 2 par IP et 8 au total (envois simultanés) : au pire ≈ 192 Mio sur la racine (vault 128 Mio + /mcp et forum 64 Mio). Le vhost
+à 2 par IP et 8 au total (envois simultanés ; lectures et autres routes non comptées) : au pire ≈ 192 Mio sur la racine (vault 128 Mio + /mcp et forum 64 Mio). Le vhost
 ne référence aucun chemin de SancturAI : nginx et les autres sites démarrent même si le volume est absent.
 
 Plafonds de connexions du vhost : 20 par IP et 256 au total (requêtes en cours, flux SSE compris). Le
@@ -187,7 +192,7 @@ sudo docker compose up -d app && sudo systemctl start sancturai-relay   # image 
 - **Revenir à la version précédente après un déploiement réussi** : `sudo deploy/deploy.sh <ancien sha>` suffit si
   aucune migration n'a eu lieu entre-temps. Sinon l'ancienne image ne connaît pas la révision alembic courante et
   s'arrête : restaurer d'abord la sauvegarde `…-pre-<12 premiers caractères du sha déployé>.dump` (gardée pendant
-  les 3 déploiements suivants), puis
+  les 3 tentatives de déploiement suivantes, réussies ou non), puis
   `sudo deploy/deploy.sh <ancien sha>` (l'image précédente, `SANCTURAI_PREVIOUS_IMAGE` dans `deploy/.env`, est
   encore sur le Pi).
 

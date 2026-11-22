@@ -44,7 +44,8 @@ notify() {
 }
 
 # Toute sortie imprévue (set -e) est signalée ; les échecs après la migration passent par le retour arrière plus bas.
-trap 'notify "deploy.sh ${sha:0:12} interrompu (ligne ${LINENO}) ; image en service : ${current_image}"' ERR
+serving="${current_image}"
+trap 'notify "deploy.sh ${sha:0:12} interrompu (ligne ${LINENO}) ; image en service : ${serving}"' ERR
 
 fail_before_migration() {
   local msg="Déploiement ${sha:0:12} interrompu avant la migration : $1 ; rien n'a changé (image ${current_image})."
@@ -78,6 +79,7 @@ grants() {
 # Droits, démarrage et healthcheck (le listener 8300 ne sert que /internal/* : le healthcheck interroge le socket
 # de l'app) : le moindre échec passe par le retour arrière ci-dessous, .env restant inchangé.
 if grants && docker compose up -d app && healthy; then
+  serving="${SANCTURAI_IMAGE}"
   if [ "${current_image}" != "${SANCTURAI_IMAGE}" ]; then
     # Les commandes `docker compose` manuelles (create-founder, urgence) visent désormais l'image déployée ;
     # l'image remplacée est gardée (retour arrière) et seule l'avant-dernière est supprimée (ciblée, jamais `prune`).

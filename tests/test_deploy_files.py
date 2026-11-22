@@ -328,7 +328,14 @@ def test_nginx_body_caps_match_app() -> None:
     # corps ≤ 64 Kio en mémoire, lecture lente coupée vite, envois au vault (sur disque) bornés à 2/IP et 8 au total
     assert "client_body_temp_path" not in conf and "/srv/" not in re.sub(r"#[^\n]*", "", conf)
     assert "client_body_buffer_size 64k;" in server_level and "client_body_timeout 15s;" in server_level
-    assert "limit_conn_zone $server_name zone=sancturai_vault_total:1m;" in conf
+    # R2-I1 : zones propres au vault, clé vide (non comptée) pour les lectures : seuls les envois au vault comptent
+    assert "limit_conn_zone $sancturai_vault_upload_ip zone=sancturai_vault_conn:10m;" in conf
+    assert "limit_conn_zone $sancturai_vault_upload_all zone=sancturai_vault_total:1m;" in conf
+    for var, key in (("ip", "$binary_remote_addr"), ("all", "$server_name")):
+        m = re.search(rf"map \$request_method \$sancturai_vault_upload_{var} \{{([^}}]*)\}}", conf)
+        assert m is not None, var
+        entries = dict(line.split() for line in m.group(1).strip().rstrip(";").split(";"))
+        assert entries == {"GET": '""', "HEAD": '""', "OPTIONS": '""', "default": key}, entries
 
     def directives(block: str) -> set[str]:
         return {line.strip() for line in block.lstrip().splitlines()[1:] if line.strip() and line.strip() != "}"}
@@ -353,10 +360,8 @@ def test_nginx_body_caps_match_app() -> None:
         # même proxy (SSE, en-têtes) et mêmes limiteurs que `location /` (sauf le vault, plus strict) ; un error_page
         # local remplace TOUS ceux hérités du serveur : 429 et 502/504 sont redéclarés
         vault = opener.startswith("location ^~ /api/vault/")
-        stricter = {"limit_conn sancturai_conn 2;", "limit_conn sancturai_vault_total 8;"} if vault else set()
-        relaxed = {"limit_conn sancturai_conn 20;"} if vault else set()
-        assert directives(public) - relaxed <= directives(loc), opener
-        assert directives(public) & relaxed == relaxed and not relaxed & directives(loc), opener
+        stricter = {"limit_conn sancturai_vault_conn 2;", "limit_conn sancturai_vault_total 8;"} if vault else set()
+        assert directives(public) <= directives(loc), opener  # sancturai_conn 20 partout, vault compris
         assert directives(loc) - directives(public) == {
             size.group(0), handler.group(0), "error_page 429 = @sancturai_429;",
             "error_page 502 504 = @sancturai_busy;", *stricter}, opener
@@ -398,6 +403,8 @@ def test_deploy_script_backs_up_and_rolls_back() -> None:
     assert sh.count('docker image rm "${SANCTURAI_IMAGE}"') == 1
     # m-N6 : pas de faux négatif par SIGPIPE sous pipefail
     assert "< <(ss -ltnpH 'sport = :8300')" in sh
+    # R2-m3 : la notification d'une sortie imprévue nomme l'image réellement en service
+    assert 'serving="${SANCTURAI_IMAGE}"' in sh and "image en service : ${serving}" in sh
     # revue batch 6, I3 : .env réécrit seulement après un healthcheck réussi ; échec → retour à l'image précédente
     health = sh.index("--unix-socket /run/sancturai/app.sock")
     assert sh.index("sed -i") > health
@@ -442,9 +449,10 @@ def test_scripts_are_executable_in_git() -> None:
 def test_setup_doc_operational_checks() -> None:
     doc = setup_doc()
     # I5 : port libre avant l'activation, nginx à l'écoute après le rechargement
-    assert "ss -ltnH 'sport = :8300'" in doc and "ss -ltnpH 'sport = :8300'" in doc
-    assert doc.index("ss -ltnH 'sport = :8300'") < doc.index("sudo nginx -t && sudo systemctl reload nginx")
-    assert doc.index("sudo nginx -t && sudo systemctl reload nginx") < doc.index("ss -ltnpH 'sport = :8300'")
+    # R2-m1 : seul un autre processus que nginx bloque (le bloc se rejoue pour mettre le vhost à jour)
+    pre = "ss -ltnpH 'sport = :8300' | grep -v '\"nginx\"' | grep -q ."
+    post = "ss -ltnpH 'sport = :8300' | grep '\"nginx\"' >/dev/null"
+    assert doc.index(pre) < doc.index("sudo nginx -t && sudo systemctl reload nginx") < doc.index(post)
     assert "nginx-body" not in doc  # revue batch 6, N1
     # revue batch 6, N2 : une vérification arrête son bloc (sous-shell `set -e` + exit 1) avant l'action dangereuse
     blocks_ = re.findall(r"```bash\n(.*?)```", doc, re.S)
@@ -458,11 +466,13 @@ def test_setup_doc_operational_checks() -> None:
         assert block.index(check) < block.index(action), check
 
     guarded("-ge 30 ]", "sudo fallocate -l 20G")
-    guarded("ss -ltnH 'sport = :8300'", "sudo install -m 644")
+    guarded(pre, "sudo install -m 644")
+    # R2-m2 : le bloc uid/gid 70 n'écrit rien sur la racine si le volume n'est pas monté
+    guarded("mountpoint -q /srv/sancturai-data", "sudo install -d -o 70")
     guarded("[ -f /etc/nginx/snippets/security-headers.conf ]", "sudo install -m 644")
     guarded('[ "$(getent group 70 | cut -d: -f1)" = sancturai-pg ]', "sudo install -d -o 70")
     # après le rechargement : nginx absent de 8300 → vhost provisoire remis et arrêt du bloc
-    after = doc[doc.index("ss -ltnpH 'sport = :8300'"):]
+    after = doc[doc.index(post):]
     after = after[:after.index("\n)\n")]
     assert "sudo cp /root/sancturai-placeholder.conf.bak" in after and "exit 1" in after
     # m-N7 : le compte du relais doit pouvoir lire le venv (copie, pas de liens durs vers le cache uv d'elessiah)
