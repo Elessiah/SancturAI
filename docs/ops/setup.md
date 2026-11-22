@@ -33,7 +33,9 @@ echo '/srv/sancturai-data.img /srv/sancturai-data ext4 loop,nodev,nosuid,noexec,
 sudo systemctl daemon-reload
 sudo mount /srv/sancturai-data
 sudo install -d -o 70 -g 70 -m 700 /srv/sancturai-data/pg              # 70 = postgres (image alpine)
-sudo install -d -o 70 -g "$(id -g elessiah)" -m 2770 /srv/sancturai-data/pg-socket   # groupe d'elessiah (relais)
+# db tourne en 70:70 sans aucune capacité : il ne peut ni chown ni choisir le groupe du socket. Le socket est
+# donc 70:70 0770 ; le relais (elessiah) l'ouvre grâce à SupplementaryGroups=70 de son unité systemd.
+sudo install -d -o 70 -g 70 -m 770 /srv/sancturai-data/pg-socket
 df -h /srv/sancturai-data   # ~20G
 ```
 

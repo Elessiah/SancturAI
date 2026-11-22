@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Slice=sancturai.slice
 User=elessiah
+# Le socket Postgres appartient à 70:70 en 0770 (db non-root : il ne peut pas lui donner un autre groupe).
+SupplementaryGroups=70
 WorkingDirectory=/home/elessiah/apps/SancturAI/relay
 EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env
 Environment=UV_OFFLINE=1
@@ -16,7 +18,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# pg-socket : connect() sur le socket Postgres ; le répertoire est sticky (3775), le socket appartient à postgres
+# pg-socket : connect() sur le socket Postgres ; l'entrypoint passe le répertoire en 3775, le socket reste 0770
 ReadWritePaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv /srv/sancturai-data/pg-socket
 MemoryMax=128M
 # §4.1 : le relais ne parle qu'au bot (127.0.0.1:4400) et à Postgres (socket Unix). Les dépendances

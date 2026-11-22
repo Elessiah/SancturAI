@@ -53,6 +53,14 @@ def test_hardening_and_limits() -> None:
         assert svc["read_only"] is True and svc["tmpfs"] == ["/tmp:size=64m"], name  # noqa: S108 (§4.2)
     app = compose()["services"]["app"]
     assert app["user"] == "10001:33"
+    # §4.2 : db non-root sans aucune capacité ; le relais joint le socket 70:70 0770 par son groupe 70
+    db = compose()["services"]["db"]
+    assert db["user"] == "70:70" and "cap_add" not in db
+    relay = (DEPLOY / "systemd" / "sancturai-relay.service").read_text(encoding="utf-8").splitlines()
+    assert "SupplementaryGroups=70" in relay
+    doc = (ROOT / "docs" / "ops" / "setup.md").read_text(encoding="utf-8")
+    assert "install -d -o 70 -g 70 -m 700 /srv/sancturai-data/pg " in doc
+    assert "install -d -o 70 -g 70 -m 770 /srv/sancturai-data/pg-socket" in doc
     # budget mémoire : db + app + relais (128M) tiennent dans MemoryMax=1.5G de la tranche
     limits = {n: svc["mem_limit"] for n, svc in compose()["services"].items()}
     assert limits == {"db": "512m", "app": "896m"}
@@ -78,6 +86,9 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     public = next(b for b in blocks(conf, "location") if b.lstrip().startswith("location / "))
     assert "limit_conn sancturai_conn 20;" in public and "limit_conn_status 429;" in public
     assert "limit_conn_zone $binary_remote_addr zone=sancturai_conn:10m;" in conf
+    # un client IPv6 change d'adresse dans son /64 : plafond global du vhost en plus du plafond par IP
+    assert "limit_conn_zone $server_name zone=sancturai_total:1m;" in conf
+    assert "limit_conn sancturai_total 256;" in public
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text(encoding="utf-8")
     for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
         assert line in sl

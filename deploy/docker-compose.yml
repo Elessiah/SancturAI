@@ -17,12 +17,14 @@ services:
     image: postgres:17-alpine
     read_only: true  # §4.2 : seuls les montages (données, socket) et /tmp sont inscriptibles
     tmpfs: ["/tmp:size=64m"]
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    # §4.2 : non-root et aucune capacité (70 = postgres de l'image alpine) ; pg/ et pg-socket/ sont créés
+    # en 70:70 par setup.md, l'entrypoint n'a donc rien à chown.
+    user: "70:70"
     env_file:
       - path: /home/elessiah/apps/.secrets/sancturai-db.env
         required: false  # absent sur le poste de dev (validation `config`)
-    # unix_socket_permissions=0770 : le socket monté sur l'hôte n'est ouvert qu'au propriétaire (postgres)
-    # et au groupe du répertoire pg-socket (celui d'elessiah, pour le relais), pas aux autres comptes de l'hôte.
+    # unix_socket_permissions=0770 : le socket monté sur l'hôte n'est ouvert qu'à l'UID/GID 70 (postgres), pas
+    # aux autres comptes de l'hôte. Le relais y accède par SupplementaryGroups=70 (sancturai-relay.service).
     command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "shared_buffers=128MB",
               "-c", "max_connections=20", "-c", "listen_addresses=*",
               "-c", "unix_socket_permissions=0770"]

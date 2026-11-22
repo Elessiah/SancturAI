@@ -16,13 +16,16 @@ Base: 3aa2664
 | S3 | secu | major | deploy/systemd/sancturai-relay.service | relais non confiné réseau (pas d'IPAddressDeny/Allow, RestrictAddressFamilies, CapabilityBoundingSet, Protect*) alors qu'il ne doit parler qu'au bot (§4.1) in sancturai-relay.service | fixed | b26ca7f |
 | S4 | secu | major | deploy/nginx/sancturai.conf:location / | aucun plafond de connexions par IP : flux SSE de 300 s, une IP épuise worker_connections partagé avec les autres sites in nginx location / | fixed | b26ca7f |
 | S5 | secu | major | deploy/docker-compose.yml:db | conteneur db sans `read_only` (§4.2) in db | fixed | b26ca7f |
-| S6 | secu | major | deploy/docker-compose.yml:db | db démarre en root avec CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID alors que §4.2 exige un utilisateur non-root (plan-mandated) in db.cap_add | open |  |
+| S6 | secu | major | deploy/docker-compose.yml:db | db démarre en root avec CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID alors que §4.2 exige un utilisateur non-root (plan-mandated) in db.cap_add | fixed |  |
 | S7 | secu | minor | deploy/deploy.sh:30 | relay a UPDATE sur toutes les colonnes d'outbox (payload, kind) au lieu de `UPDATE (sent_at, attempts, next_attempt_at)` (plan-mandated) in deploy.sh GRANT | open |  |
 | S8 | secu | minor | docs/ops/setup.md:14 | `install -d -m 700 ~/apps/.secrets` re-chmode un dossier de secrets existant partagé avec d'autres services in setup.md §1 | open |  |
 | S9 | secu | minor | deploy/deploy.sh:20 | corps JSON construit par interpolation de `$1` (guillemets/backslash de l'image cassent ou injectent des champs) in notify | open |  |
 | S10 | secu | minor | deploy/systemd/sancturai-relay.service | ProtectHome=read-only laisse le relais lire les autres secrets et clés SSH d'elessiah (InaccessiblePaths) in sancturai-relay.service | open |  |
 | S11 | secu | minor | deploy/Dockerfile + docker-compose.yml | images de base (python:3.13-slim, postgres:17-alpine) et SANCTURAI_IMAGE `:latest` non épinglées par digest in images | open |  |
 | S12 | secu | minor | deploy/tmpfiles/sancturai.conf | tout processus www-data de l'hôte (autres sites PHP) joint le socket de l'app sans nginx : X-Real-IP forgeable (contournement du rate-limit) in /run/sancturai | open |  |
+| S13 | secu | major | deploy/nginx/sancturai.conf:location / | plafond de connexions indexé sur l'adresse complète : un client IPv6 change d'adresse dans son /64 et épuise quand même worker_connections (S4 contourné) in limit_conn sancturai_conn | fixed |  |
+| S14 | secu | minor | deploy/docker-compose.yml:networks | IPv6 du pont laissé au défaut du démon (pas de `enable_ipv6: false`) : un démon avec IPv6 par défaut redonnerait à l'hôte une passerelle v6 sur le pont (S1 en IPv6) in networks.internal | open |  |
+| S15 | secu | minor | docs/ops/setup.md:§7 | la vérification d'egress ne teste pas que la résolution DNS externe échoue (le DNS embarqué des réseaux internal dépend de la version de Docker : canal d'exfiltration) in setup.md §7 | open |  |
 
 Notes round 2 (0 nouveau majeur, tour final) :
 - P3 wontfix : le CMD du Dockerfile est la valeur par défaut sûre de l'image ; l'égalité avec la commande compose est garantie par test_dockerfile_matches_compose_and_ci.
@@ -35,3 +38,8 @@ Notes secu round 1 :
 - S2 : `\getenv` dans le heredoc littéral (psql 17) ; init testée (mot de passe avec `'` et `"`), connexion sancturai OK.
 - S5 : db `read_only` + tmpfs /tmp testé (init, redémarrage).
 - S6 (décision utilisateur) : testé en local, `user: "70:70"` sans aucun `cap_add` + read_only fonctionne (setup.md crée déjà pg/ en 70:70 0700 et pg-socket en 70:<gid elessiah>).
+
+Notes secu round 2 (1 nouveau majeur : pas tour final, mineurs S7-S12, S14, S15 laissés open) :
+- S6 : décidé par l'orchestrateur (délégation utilisateur) : db en `user: "70:70"`, plus aucun `cap_add`, read_only conservé. Vérifié en local (Docker 29.9) : init (rôles créés), redémarrage, CapEff=0. Découvert au test : sans CAP_FSETID, le chmod 3775 de l'entrypoint efface le setgid du répertoire pg-socket, le socket est donc 70:70 0770 et un compte de l'hôte hors groupe 70 est refusé (le relais n'aurait plus joint Postgres). Correctif : pg-socket créé en 70:70 0770 (setup.md) et `SupplementaryGroups=70` dans sancturai-relay.service ; vérifié : uid 1000 refusé sans le groupe 70, connexion relay OK avec, avant et après redémarrage.
+- S13 : plafond global du vhost (`limit_conn_zone $server_name`, 256) en plus du plafond par IP ; `nginx -t` OK sur nginx:1.26.
+- Confirmé : inhibit_ipv4 n'affecte pas les sockets Unix (nginx → /run/sancturai/app.sock, relais → pg-socket : montages, pas le réseau ; connexion au socket testée) ; dans un conteneur du réseau internal, eth0 n'a aucune adresse IPv6 (seul lo) et la résolution DNS externe échoue (Docker 29.9) ; limit_conn 20/IP laisse de la marge à un agent MCP (1 flux SSE + quelques POST).
