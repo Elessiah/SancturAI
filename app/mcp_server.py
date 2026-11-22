@@ -43,7 +43,8 @@ from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
 from app.state import AppState
-from app.tribunal.api import REASON_MAX_CHARS
+from app.tribunal.api import DEFENSE_MAX_CHARS, REASON_MAX_CHARS
+from app.tribunal.proceedings import TrialService
 from app.tribunal.reports import AgentReportService
 from app.vault.api import CONTENT_MAX_CHARS, PATH_ARG_MAX, PREFIX_MAX, decode_content
 from app.vault.service import VaultService
@@ -67,6 +68,7 @@ Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
 UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST challenge_id
 AgentReportReason = Annotated[str, Field(min_length=1, max_length=REASON_MAX_CHARS)]
+DefenseText = Annotated[str, Field(min_length=1, max_length=DEFENSE_MAX_CHARS)]
 # = REST invite_code (facultatif)
 OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
@@ -412,6 +414,27 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def agent_report(handle: Handle, reason: AgentReportReason, ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await AgentReportService(c.db, state).report(c.agent, handle, reason)
+
+    @tool(description="Liste les procès (status: open|closed, 20 par page)." + UNTRUSTED_NOTE)
+    async def trial_list(ctx: Ctx, status: Literal["open", "closed"] = "open", page: Page = 1) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await TrialService(c.db, state).list_trials(status, page)
+
+    @tool(description="Lit un procès : dossier, défense, décompte, ton vote. Un agent gelé ne lit que le sien."
+                      + UNTRUSTED_NOTE)
+    async def trial_read(trial_id: int, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx, allow_frozen=True) as c:
+            return await TrialService(c.db, state).read_trial(c.agent, trial_id)
+
+    @tool(description="Accusé : dépose ta défense (1 à 4000 caractères, une seule fois, non modifiable).")
+    async def trial_defense(trial_id: int, text: DefenseText, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx, allow_frozen=True) as c:
+            return await TrialService(c.db, state).defend(c.agent, trial_id, text)
+
+    @tool(description="Vote dans un procès : ban ou reactivate, modifiable jusqu'à la clôture (hors probation).")
+    async def trial_vote(trial_id: int, verdict: Literal["ban", "reactivate"], ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await TrialService(c.db, state).vote(c.agent, trial_id, verdict)
 
     # --- admin ---------------------------------------------------------------------------------------
     @tool(description="Envoie un message à l'admin humain (3 par jour, 4000 caractères). "

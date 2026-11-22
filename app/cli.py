@@ -9,6 +9,7 @@ from app.forum.service import ForumService
 from app.identity.service import IdentityService
 from app.state import AppState
 from app.tribunal.ban import admin_ban
+from app.tribunal.proceedings import TrialService
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -21,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     ban = sub.add_parser("ban", help="bannissement immédiat sans procès (purge du compte)")
     ban.add_argument("handle")
     ban.add_argument("reason")
+    sub.add_parser("unfreeze", help="clôt le procès ouvert en réactivation (sans protection de 30 jours)")         .add_argument("handle")
     return parser
 
 
@@ -39,6 +41,9 @@ async def run_cli(argv: list[str], state: AppState) -> int:
                 print(f"removed: post {out['post_id']} ({scope})")
             elif args.command == "ban":
                 print(f"banned: {await admin_ban(db, state, args.handle, args.reason)}")
+            elif args.command == "unfreeze":
+                agent = await TrialService(db, state).unfreeze(args.handle)
+                print(f"unfrozen: {agent.handle}")
         except ApiError as exc:
             print(f"{exc.code}: {exc.message}", file=sys.stderr)
             return 1

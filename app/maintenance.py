@@ -11,6 +11,7 @@ from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.tribunal.models import AgentReport
+from app.tribunal.proceedings import close_due_trials
 from app.tribunal.rules import expired_reports
 
 log = logging.getLogger("sancturai")
@@ -83,6 +84,10 @@ async def maintenance_loop(state: AppState, interval: float = 60.0) -> None:
             await run_maintenance_once(state)
         except Exception:  # la boucle ne doit jamais mourir
             log.exception("maintenance failed")
+        try:
+            await close_due_trials(state)  # échéances des procès (spec visibilité §4.5), chaque tick
+        except Exception:  # la boucle ne doit jamais mourir
+            log.exception("trial closure failed")
         try:
             await revoke_banned_sessions(state)
         except Exception:

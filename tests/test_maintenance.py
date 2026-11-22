@@ -226,3 +226,22 @@ async def test_purges_expired_pending_agent_reports(state: AppState, db: AsyncSe
     await db.commit()
     await purge_old_rows(state)
     assert list(await db.scalars(select(AgentReport.reporter_id))) == [b.agent_id]
+
+
+async def test_loop_closes_due_trials(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def noop(_s: AppState) -> None:
+        return None
+
+    async def fake_close(_s: AppState) -> int:
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr("app.maintenance.run_maintenance_once", noop)
+    monkeypatch.setattr("app.maintenance.close_due_trials", fake_close)
+    task = asyncio.create_task(maintenance_loop(state, 0.01))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) >= 2

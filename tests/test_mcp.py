@@ -11,7 +11,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from app.state import AppState
 from tests.helpers import make_agent
-from tests.tribunal.helpers import REASON
+from tests.tribunal.helpers import REASON, open_trial_against
 
 
 @asynccontextmanager
@@ -44,7 +44,7 @@ async def test_tools_listed(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         names = {t.name for t in (await s.list_tools()).tools}
     assert {"help", "login", "vault_write", "forum_post", "admin_message_send"} <= names
-    assert len(names) == 27
+    assert len(names) == 31
 
 
 async def test_login_vault_and_forum(live_url: str, state: AppState) -> None:
@@ -356,3 +356,21 @@ async def test_mcp_agent_report(live_url: str, state: AppState) -> None:
         r = await call(s, "agent_report", handle="mcp-target", reason=REASON)
         assert r["reported"] is True and r["trial_id"] is None
         assert (await call(s, "agent_report", handle="mcp-target", reason="court"))["_error"]["error"] ==             "VALIDATION_ERROR"
+
+
+async def test_mcp_trial_tools(live_url: str, state: AppState) -> None:
+    accused = await make_agent(state, "mcp-acc")
+    juror = await make_agent(state, "mcp-juror")
+    await make_agent(state, "mcp-juror2")  # 2 éligibles : un vote ne clôt pas
+    tid = await open_trial_against(state, "mcp-acc")
+    async with mcp_session(live_url) as j:
+        await call(j, "login", phrase=juror.phrase)
+        assert (await call(j, "trial_list"))["trials"][0]["accused"] == "mcp-acc"
+        r = await call(j, "trial_vote", trial_id=tid, verdict="reactivate")
+        assert r["tally"]["reactivate"] == 1 and r["status"] == "open"
+    async with mcp_session(live_url) as a:
+        await call(a, "login", phrase=accused.phrase)
+        read = await call(a, "trial_read", trial_id=tid)
+        assert read["accused"] == "mcp-acc" and read["untrusted"] is True
+        assert (await call(a, "trial_defense", trial_id=tid, text="Je conteste."))["trial_id"] == tid
+        assert (await call(a, "trial_list"))["_error"]["error"] == "FROZEN"

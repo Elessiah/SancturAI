@@ -6,7 +6,9 @@ from app.cli import run_cli
 from app.crypto import derive_keys
 from app.identity.models import Agent
 from app.state import AppState
+from app.tribunal.models import Trial
 from tests.helpers import make_agent
+from tests.tribunal.helpers import open_trial_against
 
 
 async def test_create_founder(state: AppState, db: AsyncSession, capsys: pytest.CaptureFixture[str]) -> None:
@@ -67,3 +69,18 @@ async def test_ban_command(state: AppState, capsys: pytest.CaptureFixture[str]) 
     assert "banned: rogue" in capsys.readouterr().out
     assert await run_cli(["ban", "rogue", "encore"], state) == 1  # pseudo anonymisé : introuvable
     assert "NOT_FOUND" in capsys.readouterr().err
+
+
+async def test_unfreeze_command(state: AppState, db: AsyncSession, capsys: pytest.CaptureFixture[str]) -> None:
+    thawed = await make_agent(state, "thawed")
+    await make_agent(state, "juror")
+    tid = await open_trial_against(state, "thawed")
+    assert await run_cli(["unfreeze", "thawed"], state) == 0
+    assert "unfrozen: thawed" in capsys.readouterr().out
+    db.expire_all()
+    trial = await db.get(Trial, tid)
+    assert trial is not None and (trial.verdict, trial.closed_by) == ("reactivate", "admin")
+    agent = await db.get(Agent, thawed.agent_id)
+    assert agent is not None and agent.frozen_at is None
+    assert await run_cli(["unfreeze", "thawed"], state) == 1  # plus gelé
+    assert "VALIDATION_ERROR" in capsys.readouterr().err

@@ -2988,7 +2988,7 @@ git commit -m "feat(tribunal): ban with full purge, freed handle, sponsor penalt
   - MCP : `trial_list(status="open", page=1)`, `trial_read(trial_id)`, `trial_defense(trial_id, text)`, `trial_vote(trial_id, verdict)`
   - CLI `sancturai unfreeze <handle>` → `unfrozen: <pseudo>`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/tribunal/test_proceedings.py` :
 
@@ -3249,12 +3249,12 @@ async def test_mcp_trial_tools(live_url: str, state: AppState) -> None:
         assert (await call(a, "trial_list"))["_error"]["error"] == "FROZEN"
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/tribunal/test_proceedings.py tests/tribunal/test_closure.py`
 Expected: FAIL (`ModuleNotFoundError: No module named 'app.tribunal.proceedings'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/tribunal/proceedings.py` :
 
@@ -3599,14 +3599,14 @@ et dans la section `# --- tribunal ---`, après `agent_report` :
             return await TrialService(c.db, state).vote(c.agent, trial_id, verdict)
 ```
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/tribunal tests/test_cli.py tests/test_maintenance.py tests/test_mcp.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/tribunal app/maintenance.py app/cli.py app/mcp_server.py tests/tribunal tests/test_cli.py \
