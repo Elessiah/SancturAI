@@ -1,12 +1,15 @@
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import ApiError
 from app.identity.models import Agent
 from app.state import AppState
 from app.vault.models import VaultFile
+from app.vault.service import VaultService
 from tests.helpers import make_agent
 from tests.test_mcp import call, mcp_session
 
@@ -59,3 +62,28 @@ async def test_frozen_agent_over_mcp(live_url: str, state: AppState, db: AsyncSe
         assert (await call(s, "me"))["frozen"] is True
         assert (await call(s, "vault_list"))["_error"]["error"] == "FROZEN"
         assert (await call(s, "forum_categories"))["_error"]["error"] == "FROZEN"
+
+
+async def test_vault_write_rechecks_standing_under_agent_lock(state: AppState, db: AsyncSession) -> None:
+    # gel posé après le contrôle de la dépendance (member_session) : la ligne relue sous verrou fait foi
+    a = await make_agent(state, "late-frozen")
+    session = state.sessions.get(a.token)
+    assert session is not None
+    await _set(db, a.agent_id, frozen_at=datetime.now(UTC))
+    async with state.sessionmaker() as other:
+        svc = VaultService(other, state.settings)
+        with pytest.raises(ApiError) as exc:
+            await svc.write(a.agent_id, session.vault_key, session.path_key, "/late.md", b"x")
+        assert exc.value.code == "FROZEN"
+    assert await db.scalar(select(func.count()).select_from(VaultFile)
+                           .where(VaultFile.agent_id == a.agent_id)) == 0
+
+
+async def test_banned_agent_loses_open_mcp_session(live_url: str, state: AppState, db: AsyncSession) -> None:
+    a = await make_agent(state, "mcp-outlaw")
+    async with mcp_session(live_url) as s:
+        assert (await call(s, "login", phrase=a.phrase))["frozen"] is False
+        now = datetime.now(UTC)
+        await _set(db, a.agent_id, frozen_at=now, banned_at=now)
+        assert (await call(s, "me"))["_error"]["error"] == "BANNED"
+        assert (await call(s, "vault_list"))["_error"]["error"] in ("SESSION_EXPIRED", "UNAUTHENTICATED")

@@ -13,7 +13,7 @@ from app.crypto import CryptoError, decrypt, encrypt, path_id
 from app.crypto import aad_content as aad_content  # ré-export : source unique dans app.crypto (v1 figée)
 from app.crypto import aad_path as aad_path
 from app.errors import ApiError
-from app.identity.auth import PROBATION_VAULT_DIVISOR, is_probation
+from app.identity.auth import PROBATION_VAULT_DIVISOR, ensure_standing, is_probation
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.vault.models import VaultFile
 from app.vault.paths import MAX_PATH, normalize_path
@@ -76,6 +76,7 @@ class VaultService:
         if agent is None:
             # session encore vivante pour un agent disparu : 401 plutôt qu'une IntegrityError (500)
             raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+        ensure_standing(agent)  # gel/bannissement commité depuis le contrôle de la dépendance : la ligne verrouillée fait foi
         return agent
 
     async def _quota(self, agent_id: str) -> int:
