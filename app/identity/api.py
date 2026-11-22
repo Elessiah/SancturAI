@@ -6,9 +6,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import MAX_PHRASE_CHARS
-from app.identity.auth import is_suspended, limit_login, limit_register, limit_register_complete
+from app.identity.auth import (
+    is_suspended,
+    limit_login,
+    limit_register,
+    limit_register_complete,
+    probation_until,
+)
 from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import (
+    any_agent,
     client_ip,
     current_agent,
     current_token,
@@ -49,11 +56,14 @@ class LoginIn(BaseModel):
 
 
 def agent_profile(agent: Agent) -> dict[str, Any]:
+    until = probation_until(agent)
     return {
         "agent_id": agent.agent_id, "handle": agent.handle, "is_founder": agent.is_founder,
         "reputation": agent.reputation, "created_at": agent.created_at.isoformat(),
         "suspended_until": agent.suspended_until.isoformat() if is_suspended(agent) and agent.suspended_until
         else None,
+        "probation_until": until.isoformat() if until else None,
+        "frozen": agent.frozen_at is not None,
     }
 
 
@@ -89,7 +99,7 @@ async def logout(_: Session = Depends(uncounted_session), token: str | None = De
 
 
 @router.get("/me")
-async def me(agent: Agent = Depends(current_agent)) -> dict[str, Any]:
+async def me(agent: Agent = Depends(any_agent)) -> dict[str, Any]:
     return agent_profile(agent)
 
 

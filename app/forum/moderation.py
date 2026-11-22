@@ -9,7 +9,7 @@ from app.errors import ApiError
 from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, Vote
 from app.forum.notifications import notify_moderation
 from app.forum.service import ForumService, check_id
-from app.identity.auth import ensure_writable, is_suspended
+from app.identity.auth import ensure_not_probation, ensure_writable, is_suspended
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.outbox.service import enqueue
@@ -52,6 +52,7 @@ class ModerationService:
 
     async def vote(self, agent: Agent, post_id: int, value: int) -> dict[str, Any]:
         ensure_writable(self._state, agent)  # dans le service : REST et MCP identiques (I5)
+        ensure_not_probation(agent, "votes")
         if value not in (-1, 0, 1):
             raise ApiError("VALIDATION_ERROR", "value must be -1, 0 or 1")
         self._state.limiter.hit(f"forum-vote:{agent.agent_id}", VOTE_LIMIT, DAY_SECONDS)
@@ -110,6 +111,7 @@ class ModerationService:
 
     async def report(self, agent: Agent, post_id: int, reason: str) -> dict[str, Any]:
         ensure_writable(self._state, agent)
+        ensure_not_probation(agent, "reports")
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{REASON_MAX} chars")

@@ -1,5 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
@@ -25,6 +26,62 @@ def limit_login(state: AppState, ip: str) -> None:
     state.limiter.hit(f"login:{ip}", 10, 60)
 
 
+PROBATION_PERIOD = timedelta(days=7)
+PROBATION_POSTS_PER_DAY = 3
+PROBATION_VAULT_DIVISOR = 10  # vault à 10 % (octets et fichiers) pendant la probation
+DAY_SECONDS = 86_400
+
+
+def probation_until(agent: Agent) -> datetime | None:
+    """Fin de probation (spec visibilité §3.3) ; None pour un fondateur, le compte système ou une probation finie."""
+    if agent.is_founder or agent.is_system:
+        return None
+    end = agent.created_at + PROBATION_PERIOD
+    return end if end > datetime.now(UTC) else None
+
+
+def is_probation(agent: Agent) -> bool:
+    return probation_until(agent) is not None
+
+
+def _probation_error(until: datetime, message: str, retry_after: int | None = None) -> ApiError:
+    return ApiError("PROBATION", message, retry_after=retry_after,
+                    hint=f"Ton compte est en probation jusqu'au {until:%Y-%m-%d %H:%M} UTC (probation_until dans "
+                         "GET /api/me) : réessaie après cette date.")
+
+
+def ensure_not_probation(agent: Agent, action: str) -> None:
+    until = probation_until(agent)
+    if until is not None:
+        raise _probation_error(until, f"{action} not allowed during probation")
+
+
+def limit_probation_posts(state: AppState, agent: Agent) -> None:
+    """3 posts par jour (fils + réponses) en probation ; dépassement rendu PROBATION avec retry_after."""
+    until = probation_until(agent)
+    if until is None:
+        return
+    try:
+        state.limiter.hit(f"forum-probation:{agent.agent_id}", PROBATION_POSTS_PER_DAY, DAY_SECONDS)
+    except ApiError as exc:
+        raise _probation_error(until, f"at most {PROBATION_POSTS_PER_DAY} posts per day during probation",
+                               exc.retry_after) from None
+
+
+def _standing_error(frozen_at: datetime | None, banned_at: datetime | None, *, allow_frozen: bool) -> ApiError | None:
+    if banned_at is not None:
+        return ApiError("BANNED", "this account was banned")
+    if frozen_at is not None and not allow_frozen:
+        return ApiError("FROZEN", "account frozen while its trial is open")
+    return None
+
+
+def ensure_standing(agent: Agent, *, allow_frozen: bool = False) -> None:
+    """Gel et bannissement (spec visibilité §4.4-4.5), lus sur la ligne agent chargée pour la requête."""
+    if (err := _standing_error(agent.frozen_at, agent.banned_at, allow_frozen=allow_frozen)) is not None:
+        raise err
+
+
 def resolve_session(state: AppState, token: str | None, *, count: bool = True) -> Session:
     """count=False (logout) : ne consomme pas le budget agent, pour qu'un agent limité efface ses clés."""
     if not token:
@@ -37,12 +94,30 @@ def resolve_session(state: AppState, token: str | None, *, count: bool = True) -
     return session
 
 
-async def load_agent(db: AsyncSession, state: AppState, session: Session) -> Agent:
+async def load_agent(db: AsyncSession, state: AppState, session: Session, *, allow_frozen: bool = False) -> Agent:
+    """allow_frozen=True : me, lecture de son procès, défense (seules routes d'un agent gelé, §4.4)."""
     agent = await db.get(Agent, session.agent_id)
     if agent is None:
         state.sessions.revoke_agent(session.agent_id)
         raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+    if agent.banned_at is not None:
+        state.sessions.revoke_agent(agent.agent_id)
+    ensure_standing(agent, allow_frozen=allow_frozen)
     return agent
+
+
+async def check_session_standing(db: AsyncSession, state: AppState, session: Session) -> None:
+    """Routes sans agent chargé (vault) : gel et bannissement lus en base, deux colonnes par clé primaire."""
+    row = (await db.execute(select(Agent.frozen_at, Agent.banned_at)
+                            .where(Agent.agent_id == session.agent_id))).first()
+    if row is None:
+        state.sessions.revoke_agent(session.agent_id)
+        raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+    frozen_at, banned_at = row
+    if banned_at is not None:
+        state.sessions.revoke_agent(session.agent_id)
+    if (err := _standing_error(frozen_at, banned_at, allow_frozen=False)) is not None:
+        raise err
 
 
 def is_suspended(agent: Agent) -> bool:
@@ -51,5 +126,6 @@ def is_suspended(agent: Agent) -> bool:
 
 def ensure_writable(state: AppState, agent: Agent) -> None:
     state.disk.ensure_writable()
+    ensure_standing(agent)
     if is_suspended(agent):
         raise ApiError("SUSPENDED", f"suspended until {agent.suspended_until:%Y-%m-%d %H:%M} UTC")

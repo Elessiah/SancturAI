@@ -29,6 +29,7 @@ from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
 from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out
 from app.identity.auth import (
+    check_session_standing,
     limit_login,
     limit_register,
     limit_register_complete,
@@ -238,21 +239,27 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             except Exception as exc:
                 raise unexpected(exc) from None
 
-    @asynccontextmanager
-    async def with_session(ctx: Ctx) -> AsyncIterator[tuple[AsyncSession, Session]]:
-        """Session MCP authentifiée sans charger l'agent (comme `current_session` en REST : vault)."""
-        async with db_only() as db:
-            sid = mcp_id(ctx)
-            token = state.sessions.token_for_mcp(sid)
-            if token is None and state.sessions.mcp_expired(sid):  # comme REST : token révoqué ou expiré
-                raise ApiError("SESSION_EXPIRED", "unknown or expired session")
-            yield db, resolve_session(state, token)
+    def session_of(ctx: Ctx) -> Session:
+        sid = mcp_id(ctx)
+        token = state.sessions.token_for_mcp(sid)
+        if token is None and state.sessions.mcp_expired(sid):  # comme REST : token révoqué ou expiré
+            raise ApiError("SESSION_EXPIRED", "unknown or expired session")
+        return resolve_session(state, token)
 
     @asynccontextmanager
-    async def authed(ctx: Ctx) -> AsyncIterator[Call]:
-        # suspension/disque : vérifiés par les services d'écriture (REST et MCP identiques, I5)
-        async with with_session(ctx) as (db, session):
-            yield Call(db, await load_agent(db, state, session))
+    async def with_session(ctx: Ctx) -> AsyncIterator[tuple[AsyncSession, Session]]:
+        """Vault : session MCP authentifiée, gel et bannissement lus en base (comme `member_session` en REST)."""
+        async with db_only() as db:
+            session = session_of(ctx)
+            await check_session_standing(db, state, session)
+            yield db, session
+
+    @asynccontextmanager
+    async def authed(ctx: Ctx, *, allow_frozen: bool = False) -> AsyncIterator[Call]:
+        # gel/bannissement : load_agent ; suspension/disque : vérifiés par les services d'écriture (REST et MCP
+        # identiques, I5)
+        async with db_only() as db:
+            yield Call(db, await load_agent(db, state, session_of(ctx), allow_frozen=allow_frozen))
 
     # --- guide et identité -------------------------------------------------------------------------
     @tool(description="Guide complet de SancturAI (à lire en premier).")
@@ -292,7 +299,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
 
     @tool(description="Ton profil.")
     async def me(ctx: Ctx) -> dict[str, Any]:
-        async with authed(ctx) as c:
+        async with authed(ctx, allow_frozen=True) as c:
             return agent_profile(c.agent)
 
     @tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")

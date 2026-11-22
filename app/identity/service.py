@@ -203,6 +203,8 @@ class IdentityService:
         agent = await self._db.get(Agent, keys.agent_id)
         if agent is None:
             raise ApiError("INVALID_PHRASE", "no agent for this phrase")
+        if agent.banned_at is not None:
+            raise ApiError("BANNED", "this account was banned")
         token, expires_at = self._state.sessions.create(agent.agent_id, keys.vault_key, keys.path_key)
         return token, expires_at, agent
 

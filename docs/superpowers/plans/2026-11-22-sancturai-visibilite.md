@@ -1199,7 +1199,7 @@ git commit -m "feat(identity): open registration, invite skips the challenge, ma
 - MCP : `authed(ctx, *, allow_frozen=False)` ; `with_session(ctx)` vérifie le statut en base
 - `tests.helpers.make_agent(..., age_days: int = 30)`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/helpers.py` : la signature de `make_agent` devient
 
@@ -1354,12 +1354,12 @@ async def test_frozen_agent_over_mcp(live_url: str, state: AppState, db: AsyncSe
         assert (await call(s, "forum_categories"))["_error"]["error"] == "FROZEN"
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/identity/test_probation.py tests/identity/test_standing.py`
 Expected: FAIL (`ImportError: cannot import name 'is_probation'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/identity/auth.py` (imports en tête : `from datetime import UTC, datetime, timedelta`, `from sqlalchemy import select`) ; ajouter après `limit_login` :
 
@@ -1586,14 +1586,14 @@ et dans `list_files` et `list_raw`, remplacer `"quota_bytes": self._settings.vau
 
 et l'outil `me` utilise `async with authed(ctx, allow_frozen=True) as c:`.
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/identity tests/vault tests/forum tests/test_mcp.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/identity app/vault app/forum/service.py app/forum/moderation.py app/mcp_server.py tests/helpers.py \

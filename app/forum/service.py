@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.forum.notifications import notify_moderation, notify_new_post
-from app.identity.auth import ensure_writable
+from app.identity.auth import ensure_writable, limit_probation_posts
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.outbox.service import enqueue
 from app.state import AppState
@@ -121,6 +121,7 @@ class ForumService:
         if not check_line(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
+        limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
         if await self._db.get(Category, slug) is None:
             raise ApiError("NOT_FOUND", f"no category {slug}")
@@ -172,6 +173,7 @@ class ForumService:
     async def reply(self, agent: Agent, thread_id: int, body: str) -> dict[str, Any]:
         self._writable(agent)
         self._check_body(body)  # avant le quota (M12)
+        limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-reply:{agent.agent_id}", 60, 3600)
         thread = await self._thread(thread_id, lock=True)
         post = Post(thread_id=thread.id, author_id=agent.agent_id, body=body, is_first=False, score=0)
