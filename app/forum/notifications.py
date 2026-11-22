@@ -75,8 +75,9 @@ async def prune_read_notifications(db: AsyncSession) -> int:
     """
     now = datetime.now(UTC)
     deleted = 0
-    for read, days in ((True, READ_RETENTION_DAYS), (False, UNREAD_RETENTION_DAYS)):
-        result = await db.execute(delete(Notification).where(Notification.read.is_(read),
+    # `read` / `NOT read` (pas `IS true/false`) : seuls ces prédicats prouvent le WHERE des index partiels.
+    for is_read, days in ((Notification.read, READ_RETENTION_DAYS), (~Notification.read, UNREAD_RETENTION_DAYS)):
+        result = await db.execute(delete(Notification).where(is_read,
                                                              Notification.created_at < now - timedelta(days=days)))
         deleted += int(result.rowcount or 0)  # type: ignore[attr-defined]
     await db.commit()

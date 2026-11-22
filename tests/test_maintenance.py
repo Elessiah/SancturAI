@@ -1,11 +1,14 @@
 import asyncio
 from collections import namedtuple
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.disk import DiskGuard
+from app.forum.models import Notification
+from app.forum.notifications import prune_read_notifications
 from app.maintenance import maintenance_loop, run_maintenance_once
 from app.outbox.models import OutboxEvent
 from app.state import AppState
@@ -75,9 +78,8 @@ async def test_disk_probe_failure_alerts_and_flushes(state: AppState, db: AsyncS
 
 
 async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) -> None:
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
-    from app.forum.models import Notification
     from tests.helpers import make_agent
 
     a = await make_agent(state, "pruned")
@@ -93,9 +95,8 @@ async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) 
 
 async def test_prunes_unread_notifications_after_90_days(state: AppState, db: AsyncSession) -> None:
     """M5 (revue batch 2) : les non lues d'un agent inactif ne s'accumulent pas sans borne."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
-    from app.forum.models import Notification
     from tests.helpers import make_agent
 
     a = await make_agent(state, "inactive")
@@ -118,3 +119,29 @@ async def test_prune_failure_is_counted(state: AppState, monkeypatch: pytest.Mon
     monkeypatch.setattr("app.maintenance.prune_read_notifications", boom)
     await run_maintenance_once(state)
     assert state.errors.take() == 1
+
+
+async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
+    """N1 (revue batch 2) : les vrais DELETE de purge sont servis par leurs index partiels."""
+    seen: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture(_conn: object, _cur: object, statement: str, parameters: tuple[object, ...], *_a: object) -> None:
+        if statement.startswith("DELETE FROM forum_notifications"):
+            seen.append((statement, parameters))
+
+    sync_engine = (await db.connection()).sync_connection.engine  # type: ignore[union-attr]
+    event.listen(sync_engine, "before_cursor_execute", capture)
+    try:
+        await prune_read_notifications(db)
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", capture)
+    assert len(seen) == 2
+    await db.execute(text("SET LOCAL enable_seqscan = off"))
+    conn = await db.connection()
+    plans = []
+    for statement, parameters in seen:
+        rows = await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
+        plans.append(" ".join(r[0] for r in rows))
+    assert "ix_notif_prune" in plans[0] and "ix_notif_prune_unread" not in plans[0], plans[0]
+    assert "ix_notif_prune_unread" in plans[1], plans[1]
+    await db.rollback()

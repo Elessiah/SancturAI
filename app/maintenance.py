@@ -22,7 +22,7 @@ async def run_maintenance_once(state: AppState) -> None:
     try:
         async with state.sessionmaker() as db:
             if errors:
-                await enqueue(db, "log", f"{errors} erreur(s) 5xx sur la dernière minute.")
+                await enqueue(db, "log", f"{errors} erreur(s) serveur ou de maintenance sur la dernière minute.")
             if alert:
                 await enqueue(db, "log", f"Alerte disque : volume de données au-delà de {state.disk.ratio * 100:.0f} % (ou sonde en échec), écritures refusées.")
             await db.commit()

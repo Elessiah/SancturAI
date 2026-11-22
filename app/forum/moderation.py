@@ -93,14 +93,18 @@ class ModerationService:
         signalement). Un signalement en attente ne compte pas ; un signalement neutralisé (post retiré par son
         auteur) a déjà quitté `reports_total`.
         """
-        stat = await self._db.get(ReporterStat, agent_id)
-        if stat is None:
+        # Une seule instruction : stats et signalements échus lus dans le même instantané (revue batch 2 N3).
+        failed = (select(func.count()).select_from(Report)
+                  .where(Report.agent_id == agent_id,
+                         Report.created_at < datetime.now(UTC) - timedelta(days=SETTLE_DAYS))
+                  .scalar_subquery())
+        row = (await self._db.execute(
+            select(ReporterStat.reports_successful, failed).where(ReporterStat.agent_id == agent_id))).first()
+        if row is None:
             return 1.0
-        failed = await self._db.scalar(
-            select(func.count()).select_from(Report)
-            .where(Report.agent_id == agent_id, Report.created_at < datetime.now(UTC) - timedelta(days=SETTLE_DAYS)))
-        settled = stat.reports_successful + (failed or 0)
-        if settled >= LOW_PRECISION_MIN_REPORTS and stat.reports_successful / settled < LOW_PRECISION_RATIO:
+        successful, failed_count = row
+        settled = successful + failed_count
+        if settled >= LOW_PRECISION_MIN_REPORTS and successful / settled < LOW_PRECISION_RATIO:
             return LOW_WEIGHT
         return 1.0
 
