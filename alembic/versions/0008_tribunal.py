@@ -45,7 +45,8 @@ def upgrade() -> None:
     sa.CheckConstraint("verdict IS NULL OR verdict IN ('ban', 'reactivate')", name='ck_trials_verdict'),
     sa.CheckConstraint("closed_by IS NULL OR closed_by IN ('majority', 'deadline', 'admin')",
                        name='ck_trials_closed_by'),
-    sa.CheckConstraint("(status = 'open') = (verdict IS NULL AND closed_at IS NULL AND closed_by IS NULL)",
+    sa.CheckConstraint("(status = 'open' AND verdict IS NULL AND closed_at IS NULL AND closed_by IS NULL) OR "
+                       "(status = 'closed' AND verdict IS NOT NULL AND closed_at IS NOT NULL AND closed_by IS NOT NULL)",
                        name='ck_trials_closed_shape'),
     sa.CheckConstraint('eligible_count >= 0', name='ck_trials_eligible_nonneg'),
     sa.ForeignKeyConstraint(['accused_id'], ['agents.agent_id'], ondelete='CASCADE'),

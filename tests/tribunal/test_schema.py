@@ -50,14 +50,18 @@ async def test_single_open_trial_and_closed_shape(state: AppState, db: AsyncSess
     a = await make_agent(state, "accused")
     db.add(_trial(a.agent_id))
     await db.commit()
+    now = datetime.now(UTC)
     for bad in (_trial(a.agent_id),  # deuxième procès ouvert
                 _trial(a.agent_id, status="closed"),  # clos sans verdict
+                # clôture partielle : chaque champ de clôture manquant est refusé
+                _trial(a.agent_id, status="closed", verdict="ban"),
+                _trial(a.agent_id, status="closed", closed_at=now, closed_by="admin"),
+                _trial(a.agent_id, status="closed", verdict="ban", closed_at=now),
                 _trial(a.agent_id, trigger="bogus")):
         db.add(bad)
         with pytest.raises(IntegrityError):
             await db.commit()
         await db.rollback()
-    now = datetime.now(UTC)
     db.add(_trial(a.agent_id, status="closed", verdict="reactivate", closed_at=now, closed_by="deadline"))
     await db.commit()
 

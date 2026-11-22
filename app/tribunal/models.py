@@ -22,6 +22,8 @@ TRIAL_STATUSES = ("open", "closed")
 TRIGGERS = ("agent_reports", "deleted_posts")
 VERDICTS = ("ban", "reactivate")
 CLOSERS = ("majority", "deadline", "admin")
+CLOSED_SHAPE = ("(status = 'open' AND verdict IS NULL AND closed_at IS NULL AND closed_by IS NULL) OR "
+                "(status = 'closed' AND verdict IS NOT NULL AND closed_at IS NOT NULL AND closed_by IS NOT NULL)")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -41,8 +43,8 @@ class Trial(Base):
         CheckConstraint(_in("trigger", TRIGGERS), name="ck_trials_trigger"),
         CheckConstraint(f"verdict IS NULL OR {_in('verdict', VERDICTS)}", name="ck_trials_verdict"),
         CheckConstraint(f"closed_by IS NULL OR {_in('closed_by', CLOSERS)}", name="ck_trials_closed_by"),
-        CheckConstraint("(status = 'open') = (verdict IS NULL AND closed_at IS NULL AND closed_by IS NULL)",
-                        name="ck_trials_closed_shape"),
+        # ouvert : aucun champ de clôture ; clos : verdict, date et auteur de clôture tous renseignés
+        CheckConstraint(CLOSED_SHAPE, name="ck_trials_closed_shape"),
         CheckConstraint("eligible_count >= 0", name="ck_trials_eligible_nonneg"),
     )
 
