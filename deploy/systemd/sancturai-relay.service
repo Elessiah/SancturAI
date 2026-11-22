@@ -1,0 +1,56 @@
+[Unit]
+Description=SancturAI outbox relay (outbox -> blueGenjiBot)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Slice=sancturai.slice
+# Compte système dédié, sans shell, sans sudo ni répertoire personnel (setup.md §3, revue batch 6 I4).
+User=sancturai-relay
+# Le socket Postgres appartient à 70:70 en 0770 (db non-root : il ne peut pas lui donner un autre groupe).
+# sancturai-pg (gid 70) : groupe dédié créé par setup.md §2, qui échoue si le gid 70 est déjà pris.
+SupplementaryGroups=sancturai-pg
+WorkingDirectory=/home/elessiah/apps/SancturAI/relay
+EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env
+# Le venv du relais (Python système, construit par setup.md §6) est exécuté directement : aucun outil ni
+# cache partagé avec les autres projets n'est visible, et rien n'est inscriptible.
+ExecStart=/home/elessiah/apps/SancturAI/relay/.venv/bin/python relay.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# /home vide (tmpfs) : ni ~/.ssh, ni les secrets ni le code des autres services. Seul le relais (code et venv)
+# est remonté, en lecture seule. EnvironmentFile est lu par systemd avant la mise en place du bac à sable.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/elessiah/apps/SancturAI/relay
+# Le socket Postgres (/srv/sancturai-data/pg-socket) reste joignable en lecture seule : connect() n'écrit rien.
+MemoryMax=128M
+# §4.1 : le relais ne parle qu'au bot (127.0.0.1:4400) et à Postgres (socket Unix). Les dépendances
+# sont installées avant le démarrage (setup.md §6) : aucun accès au réseau n'est nécessaire.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

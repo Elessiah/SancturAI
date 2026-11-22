@@ -1,0 +1,12 @@
+[Unit]
+Description=SancturAI daily database backup (pg_dump into the data volume)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# root : docker compose exec ; le dump tourne dans le conteneur db (sa tranche, ses limites).
+ExecStart=/home/elessiah/apps/SancturAI/deploy/backup.sh daily
+# Le reste du serveur passe en priorité.
+Nice=19
+IOSchedulingClass=idle

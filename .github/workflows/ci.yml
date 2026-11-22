@@ -9,7 +9,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # sur main, un push rapide n'annule pas la publication de l'image du précédent (son SHA resterait sans image)
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Les étapes sont conditionnées à l'existence des fichiers : la CI reste verte tant que le code
 # des tâches correspondantes n'est pas encore écrit (Task 1 : pyproject, Task 17 : relay, Task 19 : Dockerfile).
@@ -18,10 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         if: hashFiles('pyproject.toml') != ''
         with:
+          version: "0.11.32"  # = image uv de deploy/Dockerfile et `uv --version` local
           python-version: "3.13"
           enable-cache: true
       - name: Install
@@ -45,6 +49,25 @@ jobs:
         working-directory: relay
         run: uv run pytest -q
 
+  # PR : l'image est construite (amd64, sans publication) pour qu'un Dockerfile cassé ne soit pas découvert après fusion
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: hashFiles('deploy/Dockerfile') != ''
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        if: hashFiles('deploy/Dockerfile') != ''
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: false
+
   image:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -54,25 +77,30 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
       - run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         if: hashFiles('deploy/Dockerfile') != ''
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         if: hashFiles('deploy/Dockerfile') != ''
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         if: hashFiles('deploy/Dockerfile') != ''
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         if: hashFiles('deploy/Dockerfile') != ''
         with:
           context: .
           file: deploy/Dockerfile
           platforms: linux/arm64
           push: true
+          # sans cache, chaque push réinstalle toutes les dépendances sous émulation QEMU (lent)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/${{ env.OWNER }}/sancturai:latest
             ghcr.io/${{ env.OWNER }}/sancturai:${{ github.sha }}

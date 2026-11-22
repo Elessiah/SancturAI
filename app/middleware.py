@@ -74,7 +74,7 @@ MIB = 1024 * KIB
 # de contrôle C0 (3 par caractère C1), 6 pour < > & chez un client Go (échappement HTML), 12 par emoji.
 # - écriture vault REST (PUT /api/vault/..., by-id) : fichier de 5 Mo en base64 ≈ 6,7 Mo ; en utf8 un texte courant
 #   (≤ 3 octets échappés par octet) tient, un contenu riche en contrôles non : le guide conseille base64 ;
-#   même valeur que nginx (client_max_body_size 16m) ;
+#   même plafond par route que nginx (deploy/nginx/sancturai.conf) ;
 # - /mcp : 256 Kio (décidé par l'utilisateur) ; vault_write en MCP pour les petits fichiers, l'API REST au-delà ;
 # - forum : corps ≤ 32 Ko en octets, soit ≤ 8 192 emoji × 12 ≈ 96 Kio échappés, + titre (un corps > 60 % de < > &
 #   envoyé par un client Go peut dépasser : cas accepté) ;
@@ -255,10 +255,14 @@ async def _reject(err: ApiError, scope: Scope, receive: Receive, send: Send) -> 
     await response(scope, receive, send)
 
 
-async def _too_large(cap: int, path: str, scope: Scope, receive: Receive, send: Send) -> None:
+def too_large_error(cap: int, path: str) -> ApiError:
+    """Corps trop gros pour la route ; nginx renvoie le même corps JSON (deploy/nginx, tests/test_deploy_files.py)."""
     hint = MCP_TOO_LARGE_HINT if _is_mcp(path) else None
-    await _reject(ApiError("VALIDATION_ERROR", f"request body exceeds {cap} bytes for this route", hint=hint),
-                  scope, receive, send)
+    return ApiError("VALIDATION_ERROR", f"request body exceeds {cap} bytes for this route", hint=hint)
+
+
+async def _too_large(cap: int, path: str, scope: Scope, receive: Receive, send: Send) -> None:
+    await _reject(too_large_error(cap, path), scope, receive, send)
 
 
 class _BodyTooLarge(Exception):

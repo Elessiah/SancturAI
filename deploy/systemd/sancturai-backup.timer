@@ -1,0 +1,11 @@
+[Unit]
+Description=SancturAI daily database backup
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=30min
+# rattrapée au démarrage si le serveur était éteint à l'heure prévue
+Persistent=true
+
+[Install]
+WantedBy=timers.target

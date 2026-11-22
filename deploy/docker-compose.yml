@@ -1,0 +1,77 @@
+name: sancturai
+
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  cgroup_parent: sancturai.slice
+  oom_score_adj: 1000
+  restart: unless-stopped
+  networks: [internal]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  db:
+    <<: *hardening
+    # épinglée par digest (index multi-arch de 17.12-alpine3.24) : mise à jour volontaire, jamais au hasard d'un pull
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+    read_only: true  # §4.2 : seuls les montages (données, socket) et /tmp sont inscriptibles
+    tmpfs: ["/tmp:size=64m"]
+    # §4.2 : non-root et aucune capacité (70 = postgres de l'image alpine) ; pg/ et pg-socket/ sont créés
+    # en 70:70 par setup.md, l'entrypoint n'a donc rien à chown.
+    user: "70:70"
+    env_file:
+      - path: /home/elessiah/apps/.secrets/sancturai-db.env
+        required: false  # absent sur le poste de dev (validation `config`)
+    # unix_socket_permissions=0770 : le socket monté sur l'hôte n'est ouvert qu'à l'UID/GID 70 (postgres), pas
+    # aux autres comptes de l'hôte. Le relais y accède par SupplementaryGroups=70 (sancturai-relay.service).
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "shared_buffers=128MB",
+              "-c", "max_connections=20", "-c", "listen_addresses=*",
+              "-c", "unix_socket_permissions=0770"]
+    volumes:
+      - /srv/sancturai-data/pg:/var/lib/postgresql/data
+      - /srv/sancturai-data/pg-socket:/var/run/postgresql
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    mem_limit: 512m
+    memswap_limit: 512m  # = mem_limit : aucun swap (le swap et la carte SD de l'hôte servent d'abord aux autres services)
+    cpus: 0.5
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
+      interval: 10s
+      retries: 10
+
+  app:
+    <<: *hardening
+    image: ${SANCTURAI_IMAGE:?set SANCTURAI_IMAGE in deploy/.env}  # ghcr.io/<compte>/sancturai:<SHA>, posé par deploy.sh
+    user: "10001:33"
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    env_file:
+      - path: /home/elessiah/apps/.secrets/sancturai.env
+        required: false
+    environment:
+      SANCTURAI_DATA_PATH: /data
+    command: ["sh", "-c", "umask 0007 && exec uvicorn app.main:create_app --factory --uds /run/sancturai/app.sock --workers 1 --no-server-header --no-proxy-headers --no-access-log"]
+    volumes:
+      - /run/sancturai:/run/sancturai
+      - /srv/sancturai-data:/data:ro
+    memswap_limit: 896m  # = mem_limit : aucun swap
+    mem_limit: 896m  # budget tranche : db 512m + app 896m + relais 128M = 1,5G = MemoryMax de sancturai.slice
+    cpus: 1.0
+    pids_limit: 256
+    depends_on:
+      db: {condition: service_healthy}
+
+networks:
+  internal:
+    internal: true
+    enable_ipv6: false  # explicite : un démon réglé sur IPv6 par défaut redonnerait à l'hôte une passerelle v6
+    # Sans cette option, l'hôte garde une IP sur le pont (passerelle .1) et les conteneurs atteignent
+    # tous les services de l'hôte qui écoutent sur 0.0.0.0 (vérifié) : internal ne bloque que le routage.
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
+    ipam:
+      config: [{subnet: 172.31.250.0/24}]
