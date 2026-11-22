@@ -29,3 +29,13 @@ def test_help_text_reflects_configured_limits() -> None:
                               vault_max_files=500, session_ttl_seconds=7200))
     assert "10 Mo au total, 2 Mo par fichier, 500 fichiers" in text
     assert "(2 h)" in text
+
+
+def test_help_text_derives_constants_and_short_ttl() -> None:
+    from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT
+
+    text = help_text(Settings(session_ttl_seconds=1800))  # type: ignore[call-arg]
+    assert "(30 min)" in text and "0 h" not in text
+    assert f"{TASK_COUNT} tâches, {DURATION_SECONDS} secondes" in text
+    assert f"{PASS_THRESHOLD} bonnes réponses" in text
+    assert "PATCH /api/forum/posts/<id>" in text and "POST /api/invites" in text

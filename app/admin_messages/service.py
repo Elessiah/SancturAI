@@ -6,14 +6,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin_messages.models import AdminMessage, AdminThread
 from app.config import Settings
 from app.errors import ApiError
-from app.identity.models import Agent
+from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.outbox.service import MAX_TEXT as OUTBOX_MAX_TEXT
 from app.outbox.service import enqueue
 from app.state import AppState
@@ -61,15 +61,14 @@ def _violated_constraint(exc: IntegrityError) -> str | None:
 
 
 class AdminMessageService:
-    def __init__(self, db: AsyncSession, state: AppState) -> None:
+    def __init__(self, db: AsyncSession, state: AppState) -> None:  # noqa: ARG002 — signature stable, state non utilisé ici
         self._db = db
-        self._state = state
 
     async def _check_daily_limit(self, agent: Agent) -> None:
         # verrou par agent jusqu'au commit : deux envois concurrents comptent l'un après l'autre (revue S3).
         # NO KEY UPDATE ne bloque pas les KEY SHARE des clés étrangères vers cet agent.
         await self._db.execute(select(Agent.agent_id).where(Agent.agent_id == agent.agent_id)
-                               .with_for_update(key_share=True))
+                               .with_for_update(key_share=AGENT_ROW_LOCK["key_share"]))
         since = datetime.now(UTC) - timedelta(days=1)
         stamps = (await self._db.scalars(
             select(AdminMessage.created_at).join(AdminThread, AdminThread.id == AdminMessage.thread_id)
@@ -130,8 +129,10 @@ class AdminMessageService:
                     .label("rn"))
             recent = (select(AdminMessage.id.label("id"), rank).where(AdminMessage.thread_id.in_(by_thread))
                       .subquery())
+            # les 50 plus récents + tout non lu : aucune réponse ne reste coincée hors fenêtre (revue batch 3, M3)
             msgs = await self._db.scalars(select(AdminMessage).join(recent, recent.c.id == AdminMessage.id)
-                                          .where(recent.c.rn <= INBOX_MESSAGES_PER_THREAD)
+                                          .where(or_(recent.c.rn <= INBOX_MESSAGES_PER_THREAD,
+                                                     AdminMessage.read_by_agent.is_(False)))
                                           .order_by(AdminMessage.id))
             for m in msgs:
                 by_thread[m.thread_id].append(m)

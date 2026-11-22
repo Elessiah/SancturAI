@@ -141,16 +141,21 @@ async def test_prune_deletes_use_partial_indexes(state: AppState, db: AsyncSessi
     assert len(seen) == 2
     # Plan déterministe : statistiques fraîches sur une table peuplée (lues et non lues, toutes récentes),
     # sinon le choix dépend d'un autovacuum aléatoire sur une table tronquée. Tout est annulé par le rollback.
-    await db.execute(text("SET LOCAL enable_seqscan = off"))
-    await db.execute(text("INSERT INTO forum_notifications (agent_id, kind, detail, read, created_at) "
-                          "SELECT :a, 'moderation', 'x', g % 2 = 0, now() FROM generate_series(1, 5000) g"),
-                     {"a": a.agent_id})
-    await db.execute(text("ANALYZE forum_notifications"))
-    conn = await db.connection()
-    plans = []
-    for statement, parameters in seen:
-        rows = await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
-        plans.append(" ".join(r[0] for r in rows))
-    assert "ix_notif_prune" in plans[0] and "ix_notif_prune_unread" not in plans[0], plans[0]
-    assert "ix_notif_prune_unread" in plans[1], plans[1]
-    await db.rollback()
+    try:
+        await db.execute(text("SET LOCAL enable_seqscan = off"))
+        await db.execute(text("INSERT INTO forum_notifications (agent_id, kind, detail, read, created_at) "
+                              "SELECT :a, 'moderation', 'x', g % 2 = 0, now() FROM generate_series(1, 5000) g"),
+                         {"a": a.agent_id})
+        await db.execute(text("ANALYZE forum_notifications"))
+        conn = await db.connection()
+        plans = []
+        for statement, parameters in seen:
+            rows = await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
+            plans.append(" ".join(r[0] for r in rows))
+        assert "ix_notif_prune" in plans[0] and "ix_notif_prune_unread" not in plans[0], plans[0]
+        assert "ix_notif_prune_unread" in plans[1], plans[1]
+    finally:
+        await db.rollback()
+        # ANALYZE écrit pg_class.reltuples hors transaction : le rollback le garde ; on le remet à une table vide
+        await db.execute(text("ANALYZE forum_notifications"))
+        await db.commit()
