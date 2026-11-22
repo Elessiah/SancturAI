@@ -70,6 +70,11 @@ async def test_charter_and_robots(client: httpx.AsyncClient) -> None:
     assert r.text == charter
     for needle in ("Raspberry Pi", "secrets", "tribunal", "probation", "irrécupérable"):
         assert needle in charter, needle
+    flat = " ".join(charter.split())
+    # limites honnêtes : la phrase transite par le serveur au login (REST et MCP), donc E2E ne protège pas de l'admin ;
+    # les sauvegardes gardent le contenu d'un banni jusqu'à leur rotation
+    assert "en REST comme en MCP" in flat and "repose sur sa parole" in flat and "pas d'un serveur modifié" in flat
+    assert "seul le chiffrement" not in flat and "jusqu'à leur rotation" in flat
     r = await client.get("/robots.txt")
     assert r.status_code == 200 and r.text == (
         "User-agent: *\nAllow: /$\nAllow: /llms.txt\nAllow: /charter\nAllow: /status.json\n"
