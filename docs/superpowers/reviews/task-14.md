@@ -15,6 +15,6 @@ Base: 0505f40
 | S4 | secu | minor | app/admin_messages/service.py:33 | compare_digest on raw bytes may leak the token length, and only an empty configured token fails closed (no minimum length) in verify_internal | fixed | cdd95a1 |
 | S5 | secu | minor | app/middleware.py:47 | guard matched scope["path"] only while the router matches path minus root_path (with --root-path, /prefix/internal/* skipped the guard: 405/422 oracle back) in InternalGuardMiddleware.__call__ | fixed | cdd95a1 |
 
-P4 wontfix: la table est bornée à 3 lignes/jour/agent et le compteur DB doit survivre aux redémarrages, le limiteur mémoire ne sert qu'à la course ; fusionner coûterait plus qu'il ne rapporte.
+P4 wontfix: la table est bornée à 3 lignes/jour/agent et le compteur DB doit survivre aux redémarrages, le compteur DB est tenu sous verrou par agent (S3), plus de limiteur mémoire ; fusionner coûterait plus qu'il ne rapporte.
 
 S2 : décidé par l'orchestrateur (délégation utilisateur) — short_id à 6 hexadécimaux minuscules (16,7 M), générateur, colonne + CHECK (0007), validation des requêtes et spec (§8.2, risques) mis à jour ; bot et relais adaptés séparément (4 à 6 hex).
