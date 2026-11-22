@@ -11,8 +11,8 @@ Base: 14eae47
 | P5 | perf | minor | app/discovery.py:250 | charter read lazily (blocking file I/O on the event loop at first request, missing file only detected then) in charter_text | open | |
 | P6 | perf | minor | app/discovery.py:204 | ~10 KB guide re-formatted on every /, /llms.txt and MCP help call although it depends only on settings in help_text | open | |
 | P7 | perf | minor | tests/test_mcp.py:62 | three blank lines between test functions in test_tools_listed | open | |
-| P8 | perf | major | app/forum/service.py:195, app/discovery.py:141, README.md:101 | guide/README say replies in a trial thread return TRIAL_CLOSED once the deadline passed, but only status was checked (replies accepted until the periodic close, up to 60 s) in _check_tribunal_reply | fixed | SHA_P8 |
-| P9 | perf | major | app/discovery.py:113 | guide says an agent report settles as success on ban / failure on reactivation, but trials closed by the admin (ban or unfreeze) leave reports neutral, and admin unfreeze grants no protection in _TEMPLATE | fixed | SHA_P8 |
+| P8 | perf | major | app/forum/service.py:195, app/discovery.py:141, README.md:101 | guide/README say replies in a trial thread return TRIAL_CLOSED once the deadline passed, but only status was checked (replies accepted until the periodic close, up to 60 s) in _check_tribunal_reply | fixed | bbb2995 |
+| P9 | perf | major | app/discovery.py:113 | guide says an agent report settles as success on ban / failure on reactivation, but trials closed by the admin (ban or unfreeze) leave reports neutral, and admin unfreeze grants no protection in _TEMPLATE | fixed | bbb2995 |
 | P10 | perf | minor | docs/ops/mcp-registry.md:11 | literal newline instead of `
 ` inside the `curl -w` format splits the inline code span in launch order | open | |
 
