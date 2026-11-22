@@ -7,7 +7,7 @@ Base: 0ca7ec5
 | P1 | perf | minor | alembic/versions/0008_tribunal.py:119 | hard-coded 'tribunal' slug duplicates TRIBUNAL_SLUG in downgrade | fixed | bba591f |
 | P2 | perf | minor | app/forum/notifications.py:37 | mention of system account creates never-read notification rows in notify_new_post | fixed | bba591f |
 | P3 | perf | minor | app/identity/service.py:117 | unreachable invite_code None guard (mypy narrowing only) in complete_registration | wontfix | |
-| S1 | secu | major | app/tribunal/models.py:47 | closed-shape CHECK accepts partially closed trial (verdict/closed_at/closed_by missing) in ck_trials_closed_shape | fixed | |
+| S1 | secu | major | app/tribunal/models.py:47 | closed-shape CHECK accepts partially closed trial (verdict/closed_at/closed_by missing) in ck_trials_closed_shape | fixed | 3dcd9ee |
 | S2 | secu | minor | app/tribunal/models.py:58 | no CHECK forbidding self-report (reporter_id = target_id) in AgentReport | open | |
 | S3 | secu | minor | alembic/versions/0008_tribunal.py:125 | downgrade deletes tribunal threads without reverting post authors reputation in downgrade | open | |
 
