@@ -15,6 +15,8 @@ services:
   db:
     <<: *hardening
     image: postgres:17-alpine
+    read_only: true  # §4.2 : seuls les montages (données, socket) et /tmp sont inscriptibles
+    tmpfs: ["/tmp:size=64m"]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     env_file:
       - path: /home/elessiah/apps/.secrets/sancturai-db.env
@@ -61,5 +63,9 @@ services:
 networks:
   internal:
     internal: true
+    # Sans cette option, l'hôte garde une IP sur le pont (passerelle .1) et les conteneurs atteignent
+    # tous les services de l'hôte qui écoutent sur 0.0.0.0 (vérifié) : internal ne bloque que le routage.
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
     ipam:
       config: [{subnet: 172.31.250.0/24}]

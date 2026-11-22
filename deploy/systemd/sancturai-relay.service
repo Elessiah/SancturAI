@@ -8,6 +8,7 @@ Slice=sancturai.slice
 User=elessiah
 WorkingDirectory=/home/elessiah/apps/SancturAI/relay
 EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env
+Environment=UV_OFFLINE=1
 ExecStart=/home/elessiah/.local/bin/uv run --frozen --no-dev python relay.py
 Restart=always
 RestartSec=10
@@ -18,6 +19,24 @@ ProtectHome=read-only
 # pg-socket : connect() sur le socket Postgres ; le répertoire est sticky (3775), le socket appartient à postgres
 ReadWritePaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv /srv/sancturai-data/pg-socket
 MemoryMax=128M
+# §4.1 : le relais ne parle qu'au bot (127.0.0.1:4400) et à Postgres (socket Unix). Les dépendances
+# sont installées avant le démarrage (`uv sync`, setup.md) : aucun accès au réseau n'est nécessaire.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

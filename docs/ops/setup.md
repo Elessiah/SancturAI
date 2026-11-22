@@ -86,6 +86,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8300/healthz   # 404 :
 cd ~/apps/SancturAI/deploy
 sudo docker compose exec app python -c "import urllib.request as u; u.urlopen('https://example.com', timeout=3)" \
   && echo 'ERREUR : egress possible' || echo 'OK : aucun egress'
+# Pont interne sans IP côté hôte : les conteneurs n'atteignent aucun service de l'hôte (sshd, MySQL, pm2…)
+ip -4 addr | grep -F 'inet 172.31.250.' && echo "ERREUR : l'hôte a une IP sur le réseau interne" || echo 'OK : aucune IP hôte'
+HOST_IP=$(hostname -I | cut -d' ' -f1)
+sudo docker compose exec app python -c "import socket; socket.create_connection(('$HOST_IP', 22), 3)"   && echo "ERREUR : l'hôte est joignable" || echo 'OK : hôte injoignable'
 systemctl status sancturai.slice   # limites appliquées
 systemctl status sancturai-relay
 sudo grep -c '/api/' /var/log/nginx/sancturai.access.log   # 0 : aucune URI journalisée

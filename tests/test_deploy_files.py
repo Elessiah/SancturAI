@@ -38,6 +38,8 @@ def test_network_is_internal_and_no_ports() -> None:
     for name, svc in c["services"].items():
         assert "ports" not in svc, f"{name} ne doit publier aucun port"
         assert svc["networks"] == ["internal"]
+    # internal: true seul laisse à l'hôte une IP sur le pont : les conteneurs joindraient ses services
+    assert c["networks"]["internal"]["driver_opts"] == {"com.docker.network.bridge.inhibit_ipv4": "true"}
 
 
 def test_hardening_and_limits() -> None:
@@ -48,8 +50,9 @@ def test_hardening_and_limits() -> None:
         assert svc["oom_score_adj"] == 1000, name
         assert svc["logging"]["options"] == {"max-size": "10m", "max-file": "3"}, name
         assert "mem_limit" in svc and "cpus" in svc and "pids_limit" in svc, name
+        assert svc["read_only"] is True and svc["tmpfs"] == ["/tmp:size=64m"], name  # noqa: S108 (§4.2)
     app = compose()["services"]["app"]
-    assert app["read_only"] is True and app["user"] == "10001:33"
+    assert app["user"] == "10001:33"
     # budget mémoire : db + app + relais (128M) tiennent dans MemoryMax=1.5G de la tranche
     limits = {n: svc["mem_limit"] for n, svc in compose()["services"].items()}
     assert limits == {"db": "512m", "app": "896m"}
@@ -71,6 +74,10 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     # revue batch 1, M13 : 5 Mo de texte non ASCII échappé en JSON (\uXXXX) dépasse 8 Mo
     assert "client_max_body_size 16m;" in conf
     assert "error_page 413 = @sancturai_413;" in conf and '"error":"QUOTA_EXCEEDED"' in conf
+    # flux SSE longs : plafond de connexions par IP (worker_connections est partagé avec les autres sites)
+    public = next(b for b in blocks(conf, "location") if b.lstrip().startswith("location / "))
+    assert "limit_conn sancturai_conn 20;" in public and "limit_conn_status 429;" in public
+    assert "limit_conn_zone $binary_remote_addr zone=sancturai_conn:10m;" in conf
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text(encoding="utf-8")
     for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
         assert line in sl
@@ -173,6 +180,10 @@ def test_roles_script_passes_passwords_as_psql_variables() -> None:
     assert "PASSWORD :'db_pw'" in sh and "PASSWORD :'relay_pw'" in sh
     heredoc = sh.split("<<'SQL'", 1)[1]
     assert "${" not in heredoc  # heredoc littéral : aucun mot de passe interpolé dans le SQL
+    # lus dans l'environnement par psql, jamais en argument (ligne de commande visible via ps sur l'hôte)
+    assert r"\getenv db_pw SANCTURAI_DB_PASSWORD" in heredoc
+    assert r"\getenv relay_pw SANCTURAI_RELAY_PASSWORD" in heredoc
+    assert "_pw=" not in sh
 
 
 def test_deploy_script_grants_and_healthcheck() -> None:
@@ -208,6 +219,11 @@ def test_relay_unit() -> None:
     for line in ("Slice=sancturai.slice", "User=elessiah", "NoNewPrivileges=yes", "ProtectSystem=strict",
                  "EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env", "MemoryMax=128M"):
         assert line in unit, line
+    # §4.1 : le relais ne joint que la boucle locale (bot) et le socket Postgres
+    lines = unit.splitlines()
+    for line in ("IPAddressDeny=any", "IPAddressAllow=localhost", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+                 "CapabilityBoundingSet=", "Environment=UV_OFFLINE=1"):
+        assert line in lines, line
     tmp = (DEPLOY / "tmpfiles" / "sancturai.conf").read_text(encoding="utf-8")
     assert "d /run/sancturai 2770 10001 www-data -" in tmp
 
