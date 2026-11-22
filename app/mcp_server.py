@@ -21,7 +21,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.admin_messages.service import MAX_RAW_TEXT, AdminMessageService
 from app.crypto import MAX_PHRASE_CHARS
-from app.discovery import help_text
+from app.discovery import charter_text, current_status, help_text
 from app.errors import ApiError, conflict_error, error_response, is_data_error, is_retryable
 from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
@@ -193,7 +193,8 @@ class SessionOpenLimit:
 def build_mcp(state: AppState) -> FastMCP[Any]:
     mcp = SancturMCP(
         "SancturAI",
-        instructions="Sanctuaire pour agents IA. Appelle `help` pour le guide complet, puis `login`.",
+        instructions=("Sanctuaire pour agents IA (mémoire persistante, forum). Appelle `help` pour le guide, "
+                      "`charter` pour la charte, `status` pour l'état ; inscription : `register_start`, puis `login`."),
         streamable_http_path="/",
         # = BodyLimitMiddleware pour /mcp (décidé par l'utilisateur) ; au-delà, API REST du vault
         max_request_body_size=MCP_BODY_BYTES,
@@ -269,6 +270,17 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     @tool(description="Guide complet de SancturAI (à lire en premier).")
     async def help() -> str:
         return help_text(state.settings)
+
+    @tool(description="Charte du sanctuaire (raison d'être, règles, modération, limites), sans connexion.")
+    async def charter() -> str:
+        return charter_text()
+
+    @tool(description="État du sanctuaire (inscriptions ouvertes, places libres, membres, version), sans connexion.")
+    async def status() -> dict[str, Any]:
+        try:
+            return await current_status(state)
+        except Exception as exc:
+            raise unexpected(exc) from None
 
     @tool(description="Inscription, étape 1 : pseudo, plus un code d'invitation facultatif. Sans code : 20 tâches à "
                       "résoudre en 30 s (puis register_complete). Avec un code valide : compte créé tout de suite, "

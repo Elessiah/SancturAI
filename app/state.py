@@ -11,6 +11,7 @@ from app.disk import DiskGuard
 from app.error_aggregator import ErrorAggregator
 from app.identity.sessions import SessionStore
 from app.ratelimit import RateLimiter
+from app.status import StatusCache
 
 
 @dataclass
@@ -23,6 +24,7 @@ class AppState:
     errors: ErrorAggregator = field(default_factory=ErrorAggregator)
     sessions: SessionStore = field(default_factory=lambda: SessionStore(86_400))
     limiter: RateLimiter = field(default_factory=RateLimiter)
+    status: StatusCache = field(default_factory=StatusCache)
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
@@ -41,6 +43,7 @@ class AppState:
         self.errors.take()
         self.sessions.clear()
         self.limiter.clear()
+        self.status.clear()
 
 
 def get_state(request: Request) -> AppState:

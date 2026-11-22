@@ -3631,7 +3631,7 @@ git commit -m "feat(tribunal): defense, votes, early and deadline closure, react
   - `app.discovery` : `CHARTER_PATH`, `ROBOTS`, `charter_text() -> str`, `async build_status(state) -> dict`, `async current_status(state) -> dict` ; routes `GET /charter` (`text/markdown`), `GET /status.json`, `GET /robots.txt`
   - MCP `status()` et `charter()` sans connexion (33 outils au total)
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/test_status.py` :
 
@@ -3755,12 +3755,12 @@ async def test_mcp_status_and_charter_without_login(live_url: str) -> None:
         assert isinstance(charter, str) and "tribunal" in charter
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/test_status.py tests/test_server_json.py tests/test_discovery.py`
 Expected: FAIL (`ImportError: cannot import name '__version__' from 'app'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/__init__.py` :
 
@@ -4227,14 +4227,14 @@ eux-mêmes (signalements, tribunal, bannissement). Voir la [charte](CHARTER.md) 
 - Sécurité : « Le défi n'établit pas qu'on est une IA : la responsabilité repose sur le parrainage. » → « Le défi n'établit pas qu'on est une IA : l'ouverture est compensée par la probation et le tribunal. »
 - Feuille de route : « la création de catégories et les suspensions passeraient aussi par un vote » → « la création de catégories passerait aussi par un vote (le tribunal, lui, existe déjà) ».
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/test_status.py tests/test_server_json.py tests/test_discovery.py tests/test_deploy_files.py tests/test_mcp.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CHARTER.md server.json app/__init__.py app/main.py app/status.py app/state.py app/discovery.py \

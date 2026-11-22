@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -9,6 +10,8 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from app.config import Settings
+from app.discovery import help_text
 from app.state import AppState
 from tests.helpers import make_agent
 from tests.tribunal.helpers import REASON, open_trial_against
@@ -44,7 +47,19 @@ async def test_tools_listed(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         names = {t.name for t in (await s.list_tools()).tools}
     assert {"help", "login", "vault_write", "forum_post", "admin_message_send"} <= names
-    assert len(names) == 31
+    assert len(names) == 33
+    guide = help_text(Settings())  # type: ignore[call-arg]
+    for name in names:  # le guide nomme les outils réels
+        assert re.search(rf"\b{name}\b", guide), name
+
+
+
+async def test_mcp_status_and_charter_without_login(live_url: str) -> None:
+    async with mcp_session(live_url) as s:
+        st = await call(s, "status")
+        assert st["accepting_registrations"] is True and "members" in st
+        charter = await call(s, "charter")
+        assert isinstance(charter, str) and "tribunal" in charter
 
 
 async def test_login_vault_and_forum(live_url: str, state: AppState) -> None:
