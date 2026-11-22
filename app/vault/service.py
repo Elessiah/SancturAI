@@ -1,5 +1,6 @@
 import base64
 import re
+import unicodedata
 from collections.abc import Sequence
 from typing import Any
 
@@ -9,8 +10,10 @@ from sqlalchemy.orm import defer
 
 from app.config import Settings
 from app.crypto import CryptoError, decrypt, encrypt, path_id
+from app.crypto import aad_content as aad_content  # ré-export : source unique dans app.crypto (v1 figée)
+from app.crypto import aad_path as aad_path
 from app.errors import ApiError
-from app.identity.models import Agent
+from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.vault.models import VaultFile
 from app.vault.paths import MAX_PATH, normalize_path
 
@@ -37,14 +40,6 @@ def check_path_id(pid: str) -> str:
     return pid
 
 
-def aad_path(agent_id: str, pid: str) -> bytes:
-    return f"sancturai/v1/path|{agent_id}|{pid}".encode()
-
-
-def aad_content(agent_id: str, pid: str) -> bytes:
-    return f"sancturai/v1/content|{agent_id}|{pid}".encode()
-
-
 def _encode(data: bytes) -> tuple[str, str]:
     try:
         return data.decode("utf-8"), "utf8"
@@ -67,8 +62,10 @@ class VaultService:
         return int(total or 0)
 
     async def _lock_agent(self, agent_id: str) -> None:
-        # sérialise les écritures d'un même agent pour un calcul de quota exact
-        await self._db.get(Agent, agent_id, with_for_update=True)
+        # sérialise les écritures d'un même agent pour un calcul de quota exact (FOR NO KEY UPDATE)
+        if await self._db.get(Agent, agent_id, with_for_update=AGENT_ROW_LOCK) is None:
+            # session encore vivante pour un agent disparu : 401 plutôt qu'une IntegrityError (500)
+            raise ApiError("UNAUTHENTICATED", "agent no longer exists")
 
     async def _get(self, agent_id: str, pid: str, *, blobs: bool = True) -> VaultFile | None:
         # blobs=False : ne charge ni le contenu (jusqu'à 5 Mo) ni le nom chiffré
@@ -129,7 +126,8 @@ class VaultService:
         try:
             return decrypt(vault_key, row.content_enc, aad_content(agent_id, row.path_id))
         except CryptoError as exc:
-            raise ApiError("FORBIDDEN", f"file was encrypted client-side; {verb} it by path_id") from exc
+            raise ApiError("FORBIDDEN", "file cannot be decrypted with server-side keys (it may be "
+                                        f"client-encrypted, or damaged); {verb} it by path_id") from exc
 
     async def read(self, agent_id: str, vault_key: bytes, path_key: bytes, path: str) -> dict[str, Any]:
         path, row = await self._require(agent_id, path_key, path)
@@ -145,6 +143,9 @@ class VaultService:
         return [tuple(r) for r in result]
 
     async def list_files(self, agent_id: str, vault_key: bytes, prefix: str | None) -> dict[str, Any]:
+        if prefix:  # même normalisation que les chemins stockés : NFC, absolu
+            prefix = unicodedata.normalize("NFC", prefix)
+            prefix = prefix if prefix.startswith("/") else "/" + prefix
         rows = await self._list_rows(agent_id)
         files = []
         for pid, path_enc, size, updated_at in rows:

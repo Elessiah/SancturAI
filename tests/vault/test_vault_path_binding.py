@@ -2,10 +2,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crypto import decrypt, derive_keys, path_id
+from app.crypto import aad_path, decrypt, derive_keys, path_id
 from app.state import AppState
 from app.vault.models import VaultFile
-from app.vault.service import aad_path
 from tests.helpers import make_agent
 
 

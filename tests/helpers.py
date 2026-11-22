@@ -3,8 +3,6 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
-
 from app.crypto import AgentKeys, derive_keys, generate_phrase
 from app.identity.models import Agent, Invite
 from app.state import AppState
@@ -23,6 +21,12 @@ class AgentCtx:
 
 
 _KEY_POOL: list[tuple[str, AgentKeys]] = []  # (phrase, clés) dérivées une fois pour toute la session de tests
+_cursor = 0  # prochaine identité du pool pour le test en cours (remis à 0 par la fixture _clean)
+
+
+def reset_key_pool_cursor() -> None:
+    global _cursor
+    _cursor = 0
 
 
 async def _pooled_keys(index: int) -> tuple[str, AgentKeys]:
@@ -35,9 +39,11 @@ async def _pooled_keys(index: int) -> tuple[str, AgentKeys]:
 
 async def make_agent(state: AppState, handle: str, *, founder: bool = False,
                      sponsor_id: str | None = None, age_days: int = 0) -> AgentCtx:
+    global _cursor
+    # compteur monotone par test : distinct même si un test supprime des agents entre deux appels
+    phrase, keys = await _pooled_keys(_cursor)
+    _cursor += 1
     async with state.sessionmaker() as db:
-        # le nombre d'agents ne fait que croître dans un test : chaque appel obtient une identité distincte
-        phrase, keys = await _pooled_keys(await db.scalar(select(func.count()).select_from(Agent)) or 0)
         db.add(Agent(agent_id=keys.agent_id, handle=handle, is_founder=founder, sponsor_id=sponsor_id,
                      created_at=datetime.now(UTC) - timedelta(days=age_days)))
         await db.commit()

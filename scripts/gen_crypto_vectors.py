@@ -1,4 +1,5 @@
-"""Génère tests/vectors/crypto_v1.json. À lancer UNE fois ; le fichier est ensuite figé dans git."""
+"""Génère tests/vectors/crypto_v1.json. Le fichier est figé dans git : une régénération ne peut qu'AJOUTER
+des champs (toutes les valeurs sont déterministes ; vérifier au diff que les champs existants sont inchangés)."""
 
 import json
 from pathlib import Path
@@ -11,16 +12,34 @@ PHRASE = "abandon abandon abandon abandon abandon abandon abandon abandon abando
 NONCE = bytes(range(24))
 keys = derive_keys(PHRASE)
 blob = NONCE + crypto_aead_xchacha20poly1305_ietf_encrypt(b"hello sanctuary", b"aad", NONCE, keys.vault_key)
+
+# Vault v1 (spec §6.1). Les AAD sont écrites ici en toutes lettres depuis la spec, PAS importées de app.crypto :
+# les tests comparent ainsi le module à une référence indépendante.
+pid = path_id(keys.path_key, "/README.md")
+aad_path = f"sancturai/v1/path|{keys.agent_id}|{pid}"
+aad_content = f"sancturai/v1/content|{keys.agent_id}|{pid}"
+README = "# vecteur v1\n"
+PATH_NONCE, CONTENT_NONCE = bytes(range(24, 48)), bytes(range(48, 72))
+path_enc = PATH_NONCE + crypto_aead_xchacha20poly1305_ietf_encrypt(
+    b"/README.md", aad_path.encode(), PATH_NONCE, keys.vault_key)
+content_enc = CONTENT_NONCE + crypto_aead_xchacha20poly1305_ietf_encrypt(
+    README.encode(), aad_content.encode(), CONTENT_NONCE, keys.vault_key)
+
 out = {
     "phrase": PHRASE,
     "agent_id": keys.agent_id,
     "vault_key_hex": keys.vault_key.hex(),
     "path_key_hex": keys.path_key.hex(),
-    "path_id_readme": path_id(keys.path_key, "/README.md"),
+    "path_id_readme": pid,
     "blob_hex": blob.hex(),
     "blob_aad": "aad",
     "blob_plaintext": "hello sanctuary",
+    "aad_path_readme": aad_path,
+    "aad_content_readme": aad_content,
+    "readme_path_enc_hex": path_enc.hex(),
+    "readme_content_enc_hex": content_enc.hex(),
+    "readme_content": README,
 }
 Path("tests/vectors").mkdir(parents=True, exist_ok=True)
-Path("tests/vectors/crypto_v1.json").write_text(json.dumps(out, indent=2) + "\n")
+Path("tests/vectors/crypto_v1.json").write_text(json.dumps(out, indent=2) + "\n", newline="\n")
 print(json.dumps(out, indent=2))

@@ -23,6 +23,8 @@ def upgrade() -> None:
     sa.Column('next_attempt_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('attempts', sa.Integer(), server_default='0', nullable=False),
+    sa.CheckConstraint('attempts >= 0', name='ck_outbox_attempts_nonneg'),
+    sa.CheckConstraint("kind IN ('log', 'agent_message')", name='ck_outbox_kind'),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_outbox_pending', 'outbox', ['next_attempt_at'], unique=False, postgresql_where=sa.text('sent_at IS NULL'))

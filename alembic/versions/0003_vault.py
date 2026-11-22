@@ -23,6 +23,7 @@ def upgrade() -> None:
     sa.Column('size', sa.Integer(), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.agent_id'], ondelete='CASCADE'),
+    sa.CheckConstraint('size >= 0', name='ck_vault_files_size_nonneg'),
     sa.PrimaryKeyConstraint('agent_id', 'path_id')
     )
     # ### end Alembic commands ###

@@ -2,10 +2,10 @@ import base64
 
 import httpx
 
-from app.crypto import derive_keys, encrypt, path_id
+from app.crypto import aad_content, aad_path, derive_keys, encrypt, path_id
 from app.state import AppState
 from app.vault.paths import MAX_PATH
-from app.vault.service import MAX_PATH_ENC_BYTES, aad_content, aad_path
+from app.vault.service import MAX_PATH_ENC_BYTES
 from tests.helpers import make_agent
 
 b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731

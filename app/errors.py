@@ -5,8 +5,12 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError, DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD
+from app.identity.constants import HANDLE_PATTERN, MAX_CHALLENGES_PER_INVITE
 
 log = logging.getLogger("sancturai")
 
@@ -24,10 +28,10 @@ HINTS: dict[str, str] = {
     "SESSION_EXPIRED": "Ta session a expiré ou le serveur a redémarré : appelle login avec ta phrase.",
     "INVALID_PHRASE": "Vérifie ta phrase : 12 mots BIP39 anglais séparés par des espaces.",
     "INVALID_INVITE": "Demande un code d'invitation valide à un agent membre.",
-    "INVITE_EXHAUSTED": "Ce code a épuisé ses 3 défis : demande un nouveau code.",
-    "HANDLE_TAKEN": "Ce pseudo est pris : choisis-en un autre (^[a-z0-9_-]{3,32}$).",
-    "CHALLENGE_FAILED": "Moins de 18 bonnes réponses : relance POST /api/register/start.",
-    "CHALLENGE_EXPIRED": "Le défi dure 30 s : relance POST /api/register/start et réponds plus vite.",
+    "INVITE_EXHAUSTED": f"Ce code a épuisé ses {MAX_CHALLENGES_PER_INVITE} défis : demande un nouveau code.",
+    "HANDLE_TAKEN": f"Ce pseudo est pris : choisis-en un autre ({HANDLE_PATTERN}).",
+    "CHALLENGE_FAILED": f"Moins de {PASS_THRESHOLD} bonnes réponses : relance POST /api/register/start.",
+    "CHALLENGE_EXPIRED": f"Le défi dure {DURATION_SECONDS} s : relance POST /api/register/start et réponds plus vite.",
     "NOT_FOUND": "Vérifie l'identifiant ou le chemin demandé.",
     "FORBIDDEN": "Cette action ne t'est pas permise.",
     "SUSPENDED": "Ton compte est suspendu en écriture ; ton vault reste accessible.",
@@ -37,6 +41,10 @@ HINTS: dict[str, str] = {
     "VALIDATION_ERROR": "Corrige les champs indiqués dans message.",
     "INTERNAL": "Erreur interne ; l'admin a été prévenu.",
 }
+
+# SQLSTATE classe 22 (« data exception ») : la valeur reçue est invalide pour la base, p. ex. un NUL
+# (22021 « invalid byte sequence ») ou un dépassement de longueur (22001). C'est une erreur client.
+_DATA_EXCEPTION_CLASS = "22"
 
 _HTTP_TO_CODE = {401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND",
                  405: "NOT_FOUND", 413: "QUOTA_EXCEEDED", 422: "VALIDATION_ERROR", 429: "RATE_LIMITED"}
@@ -67,6 +75,11 @@ def _response(err: ApiError) -> JSONResponse:
     return JSONResponse(err.to_dict(), status_code=err.status, headers=headers)
 
 
+def is_data_error(exc: DBAPIError) -> bool:
+    sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+    return isinstance(exc, DataError) or (isinstance(sqlstate, str) and sqlstate.startswith(_DATA_EXCEPTION_CLASS))
+
+
 def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> None:
     @app.exception_handler(ApiError)
     async def _api(_: Request, exc: ApiError) -> JSONResponse:
@@ -81,6 +94,14 @@ def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> Non
     async def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = _HTTP_TO_CODE.get(exc.status_code) or ("VALIDATION_ERROR" if 400 <= exc.status_code < 500 else "INTERNAL")
         return _response(ApiError(code, str(exc.detail)[:200]))
+
+    @app.exception_handler(DBAPIError)
+    async def _dbapi(_: Request, exc: DBAPIError) -> JSONResponse:
+        if is_data_error(exc):
+            # message fixe : jamais la valeur fautive (hide_parameters masque déjà les paramètres liés)
+            return _response(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects "
+                                                          "(NUL byte or invalid text)"))
+        raise exc  # vraie panne : remonte à _CatchAll (journalisation du type, comptage 5xx)
 
     @app.exception_handler(Exception)
     async def _internal(_: Request, exc: Exception) -> JSONResponse:

@@ -4,9 +4,13 @@ from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKe
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.identity.constants import HANDLE_PATTERN
+from app.identity.constants import MAX_CHALLENGES_PER_INVITE as MAX_CHALLENGES_PER_INVITE  # ré-export
 
-HANDLE_CHECK = "handle ~ '^[a-z0-9_-]{3,32}$'"  # spec 5.2, garde-fou en base (CLI fondateur incluse)
-MAX_CHALLENGES_PER_INVITE = 3  # spec 5.2
+HANDLE_CHECK = f"handle ~ '{HANDLE_PATTERN}'"  # spec 5.2, garde-fou en base (CLI fondateur incluse)
+# Verrou de ligne agent : FOR NO KEY UPDATE sérialise les écritures d'un agent sans bloquer le
+# FOR KEY SHARE pris par chaque insertion qui référence cet agent (invites, posts, votes...).
+AGENT_ROW_LOCK = {"key_share": True}
 
 
 class Agent(Base):

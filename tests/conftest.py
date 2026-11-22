@@ -6,13 +6,14 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 import app.db_models  # noqa: F401
 from app.config import Settings
 from app.db import Base
 from app.main import create_app
 from app.state import AppState
+from tests.helpers import reset_key_pool_cursor
 
 
 @pytest.fixture(scope="session")
@@ -50,6 +51,7 @@ def state(app: FastAPI) -> AppState:
 
 @pytest.fixture(autouse=True)
 async def _clean(request: pytest.FixtureRequest) -> AsyncIterator[None]:
+    reset_key_pool_cursor()
     yield
     if "app" not in request.fixturenames:
         return

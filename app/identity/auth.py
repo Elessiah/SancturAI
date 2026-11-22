@@ -8,23 +8,32 @@ from app.identity.sessions import Session
 from app.state import AppState
 
 AGENT_RATE = (60, 60.0)
+REGISTER_RATE = (5, 3600.0)
+# Un register/start donne un défi, donc un complete : 10/h couvre 5 défis et une relance réseau chacun.
+REGISTER_COMPLETE_RATE = (10, 3600.0)
 
 
 def limit_register(state: AppState, ip: str) -> None:
-    state.limiter.hit(f"register:{ip}", 5, 3600)
+    state.limiter.hit(f"register:{ip}", *REGISTER_RATE)
+
+
+def limit_register_complete(state: AppState, ip: str) -> None:
+    state.limiter.hit(f"register-complete:{ip}", *REGISTER_COMPLETE_RATE)
 
 
 def limit_login(state: AppState, ip: str) -> None:
     state.limiter.hit(f"login:{ip}", 10, 60)
 
 
-def resolve_session(state: AppState, token: str | None) -> Session:
+def resolve_session(state: AppState, token: str | None, *, count: bool = True) -> Session:
+    """count=False (logout) : ne consomme pas le budget agent, pour qu'un agent limité efface ses clés."""
     if not token:
         raise ApiError("UNAUTHENTICATED", "missing session token")
     session = state.sessions.get(token)
     if session is None:
         raise ApiError("SESSION_EXPIRED", "unknown or expired session")
-    state.limiter.hit(f"agent:{session.agent_id}", *AGENT_RATE)
+    if count:
+        state.limiter.hit(f"agent:{session.agent_id}", *AGENT_RATE)
     return session
 
 

@@ -2,8 +2,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.outbox.models import OutboxEvent
-from app.outbox.service import enqueue
+from app.outbox.models import OUTBOX_KINDS, OutboxEvent
+from app.outbox.service import KINDS, enqueue
 
 
 async def test_enqueue_is_part_of_transaction(db: AsyncSession) -> None:
@@ -41,3 +41,7 @@ async def test_enqueue_cleans_extra_values(db: AsyncSession) -> None:
 async def test_enqueue_rejects_unknown_extra_keys(db: AsyncSession) -> None:
     with pytest.raises(ValueError):
         await enqueue(db, "log", "hi", vault_key="secret")
+
+
+def test_outbox_kinds_match_db_check() -> None:
+    assert set(OUTBOX_KINDS) == KINDS

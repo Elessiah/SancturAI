@@ -26,6 +26,9 @@ async def test_migrations_match_models(pg_url: str) -> None:
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     cfg.set_main_option("sqlalchemy.url", url)
     await asyncio.to_thread(command.upgrade, cfg, "head")
+    # symétrie des downgrades : tout redescendre puis remonter doit redonner le même schéma
+    await asyncio.to_thread(command.downgrade, cfg, "base")
+    await asyncio.to_thread(command.upgrade, cfg, "head")
 
     engine = create_async_engine(url)
     async with engine.connect() as conn:
@@ -37,3 +40,4 @@ async def test_migrations_match_models(pg_url: str) -> None:
     expected = {c.name for t in Base.metadata.tables.values() for c in t.constraints
                 if isinstance(c, CheckConstraint)}
     assert expected <= checks, f"CHECK manquants : {expected - checks}"
+    assert {"ck_vault_files_size_nonneg", "ck_outbox_attempts_nonneg", "ck_outbox_kind"} <= checks

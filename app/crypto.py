@@ -26,6 +26,9 @@ MAX_PHRASE_CHARS = 1024  # garde-fou d'entrée, pas un paramètre de dérivation
 INFO_SIGN = b"sancturai/v1/ed25519"
 INFO_VAULT = b"sancturai/v1/vault"
 INFO_PATH = b"sancturai/v1/path"
+# Données associées AEAD du vault (spec §6.1) : lient chaque blob à son agent ET à son path_id.
+AAD_PATH_FORMAT = "sancturai/v1/path|{agent_id}|{path_id}"
+AAD_CONTENT_FORMAT = "sancturai/v1/content|{agent_id}|{path_id}"
 
 
 class CryptoError(Exception):
@@ -48,6 +51,7 @@ def generate_phrase() -> str:
 
 
 def normalize_phrase(phrase: str) -> str:
+    # spec §5.1 : NFKD, minuscules, espaces (tous blancs Unicode) réduits à un seul, bords retirés
     return " ".join(unicodedata.normalize("NFKD", phrase).lower().split())
 
 
@@ -83,6 +87,14 @@ def derive_keys(phrase: str) -> AgentKeys:
 
 def path_id(path_key: bytes, path: str) -> str:
     return hmac.new(path_key, path.encode(), hashlib.sha256).hexdigest()
+
+
+def aad_path(agent_id: str, pid: str) -> bytes:
+    return AAD_PATH_FORMAT.format(agent_id=agent_id, path_id=pid).encode()
+
+
+def aad_content(agent_id: str, pid: str) -> bytes:
+    return AAD_CONTENT_FORMAT.format(agent_id=agent_id, path_id=pid).encode()
 
 
 def encrypt(key: bytes, plaintext: bytes, aad: bytes) -> bytes:

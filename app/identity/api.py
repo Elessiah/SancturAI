@@ -1,17 +1,19 @@
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.identity.auth import is_suspended, limit_login, limit_register
+from app.crypto import MAX_PHRASE_CHARS
+from app.identity.auth import is_suspended, limit_login, limit_register, limit_register_complete
+from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import (
     client_ip,
     current_agent,
-    current_session,
     current_token,
     require_disk,
+    uncounted_session,
     writable_agent,
 )
 from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Invite
@@ -24,18 +26,21 @@ PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, confi
                   "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
 
 
+# Cache-Control: no-store est posé sur toute réponse /api/* par app.main (phrase, token, codes).
+
+
 class RegisterStartIn(BaseModel):
-    invite_code: str = Field(max_length=32)  # = longueur de invites.code
+    invite_code: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = invites.code (token_urlsafe)
     handle: str = Field(max_length=32)
 
 
 class RegisterCompleteIn(BaseModel):
-    challenge_id: str = Field(max_length=32)  # = longueur de challenges.challenge_id
+    challenge_id: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = challenges.challenge_id
     answers: list[Annotated[str, Field(max_length=200)]] = Field(max_length=40)
 
 
 class LoginIn(BaseModel):
-    phrase: str = Field(max_length=300)
+    phrase: str = Field(max_length=MAX_PHRASE_CHARS)
 
 
 def agent_profile(agent: Agent) -> dict[str, Any]:
@@ -55,17 +60,16 @@ async def register_start(body: RegisterStartIn, request: Request, db: AsyncSessi
 
 
 @router.post("/register/complete", dependencies=[Depends(require_disk)])
-async def register_complete(body: RegisterCompleteIn, response: Response, db: AsyncSession = Depends(get_db),
+async def register_complete(body: RegisterCompleteIn, request: Request, db: AsyncSession = Depends(get_db),
                             state: AppState = Depends(get_state)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"  # la réponse porte la phrase
+    limit_register_complete(state, client_ip(request))
     agent, phrase = await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
     return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
 
 
 @router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
+async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_db),
                 state: AppState = Depends(get_state)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"  # la réponse porte le token de session
     limit_login(state, client_ip(request))
     token, expires_at, agent = await IdentityService(db, state).login(body.phrase)
     return {"session_token": token, "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
@@ -73,7 +77,7 @@ async def login(body: LoginIn, request: Request, response: Response, db: AsyncSe
 
 
 @router.post("/logout")
-async def logout(_: Session = Depends(current_session), token: str | None = Depends(current_token),
+async def logout(_: Session = Depends(uncounted_session), token: str | None = Depends(current_token),
                  state: AppState = Depends(get_state)) -> dict[str, bool]:
     if token:
         state.sessions.revoke(token)
@@ -91,14 +95,12 @@ def invite_out(invite: Invite) -> dict[str, Any]:
 
 
 @router.post("/invites")
-async def create_invite(response: Response, agent: Agent = Depends(writable_agent),
+async def create_invite(agent: Agent = Depends(writable_agent),
                         db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"  # un code d'invitation est un droit d'inscription
     return invite_out(await IdentityService(db, state).create_invite(agent))
 
 
 @router.get("/invites")
-async def list_invites(response: Response, agent: Agent = Depends(current_agent),
+async def list_invites(agent: Agent = Depends(current_agent),
                        db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"
     return {"invites": [invite_out(i) for i in await IdentityService(db, state).list_invites(agent)]}

@@ -11,15 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
 from app.identity.auth import ensure_writable, is_suspended
-from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, generate_tasks, score
-from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
+from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
+from app.identity.constants import HANDLE_PATTERN, URLSAFE_ID_PATTERN
+from app.identity.models import AGENT_ROW_LOCK, MAX_CHALLENGES_PER_INVITE, Agent, Challenge, Invite
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.vault.service import VaultService
 
-HANDLE_RE = re.compile(r"^[a-z0-9_-]{3,32}$")
-INSTRUCTIONS = ("Réponds aux 20 tâches dans l'ordre, une réponse par tâche, en moins de 30 secondes, "
-                "via POST /api/register/complete {challenge_id, answers}. 18 bonnes réponses requises.")
+HANDLE_RE = re.compile(HANDLE_PATTERN)
+URLSAFE_ID_RE = re.compile(URLSAFE_ID_PATTERN)
+INSTRUCTIONS = (f"Réponds aux {TASK_COUNT} tâches dans l'ordre, une réponse par tâche, en moins de "
+                f"{DURATION_SECONDS} secondes, via POST /api/register/complete {{challenge_id, answers}}. "
+                f"{PASS_THRESHOLD} bonnes réponses requises.")
+REGISTRATION_DERIVE_WAIT = 5.0  # s : après un défi réussi, attendre un créneau Argon2 plutôt qu'échouer
 INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
@@ -31,6 +35,13 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def _check_urlsafe_id(value: str, field: str) -> str:
+    # Les deux transports (REST, MCP) passent ici : un NUL ou un code hors alphabet n'atteint jamais la base.
+    if not URLSAFE_ID_RE.fullmatch(value):
+        raise ApiError("VALIDATION_ERROR", f"{field} must match {URLSAFE_ID_PATTERN}")
+    return value
+
+
 def _invite_banned(agent: Agent, t: datetime) -> bool:
     return agent.invite_banned_until is not None and agent.invite_banned_until > t
 
@@ -40,11 +51,23 @@ class IdentityService:
         self._db = db
         self._state = state
 
-    async def derive(self, phrase: str) -> AgentKeys:
-        if self._state.argon_sem.locked():
-            raise ApiError("SERVER_BUSY", "too many concurrent key derivations")
-        async with self._state.argon_sem:
+    async def derive(self, phrase: str, *, wait: float = 0.0) -> AgentKeys:
+        """wait=0 : échec immédiat si saturé (login). wait>0 : attend un créneau au plus `wait` secondes."""
+        sem = self._state.argon_sem
+        busy = ApiError("SERVER_BUSY", "too many concurrent key derivations", retry_after=1)
+        if wait <= 0:
+            if sem.locked():
+                raise busy
+            await sem.acquire()
+        else:
+            try:
+                await asyncio.wait_for(sem.acquire(), wait)
+            except TimeoutError:
+                raise busy from None
+        try:
             return await asyncio.to_thread(derive_keys, phrase)
+        finally:
+            sem.release()
 
     async def _handle_taken(self, handle: str) -> bool:
         return bool(await self._db.scalar(select(exists().where(Agent.handle == handle))))
@@ -61,10 +84,10 @@ class IdentityService:
 
     async def start_registration(self, invite_code: str, handle: str) -> dict[str, Any]:
         if not HANDLE_RE.fullmatch(handle):
-            raise ApiError("VALIDATION_ERROR", "handle must match ^[a-z0-9_-]{3,32}$")
-        invite = await self._valid_invite(invite_code)
+            raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
+        invite = await self._valid_invite(_check_urlsafe_id(invite_code, "invite_code"))
         if invite.challenges_used >= MAX_CHALLENGES_PER_INVITE:
-            raise ApiError("INVITE_EXHAUSTED", "this invite already used its 3 challenges")
+            raise ApiError("INVITE_EXHAUSTED", f"this invite already used its {MAX_CHALLENGES_PER_INVITE} challenges")
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         invite.challenges_used += 1
@@ -81,7 +104,7 @@ class IdentityService:
         }
 
     async def complete_registration(self, challenge_id: str, answers: list[str]) -> tuple[Agent, str]:
-        challenge = await self._db.get(Challenge, challenge_id, with_for_update=True)
+        challenge = await self._db.get(Challenge, _check_urlsafe_id(challenge_id, "challenge_id"), with_for_update=True)
         if challenge is None or challenge.completed:
             raise ApiError("CHALLENGE_FAILED", "unknown or already used challenge")
         challenge.completed = True
@@ -93,21 +116,21 @@ class IdentityService:
             raise ApiError("CHALLENGE_FAILED", "not enough correct answers")
         invite = await self._valid_invite(challenge.invite_code)
         agent, phrase = await self.create_agent(challenge.handle, invite.creator_id, is_founder=False,
-                                                commit=False)
+                                                commit=False, derive_wait=REGISTRATION_DERIVE_WAIT)
         invite.used_by = agent.agent_id
         invite.used_at = now()
         await self._commit_unique_handle(challenge.handle)
         return agent, phrase
 
     async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool,
-                           *, commit: bool = True) -> tuple[Agent, str]:
+                           *, commit: bool = True, derive_wait: float = 0.0) -> tuple[Agent, str]:
         """Point unique de création d'un agent (inscription et fondateurs)."""
         if not HANDLE_RE.fullmatch(handle):
-            raise ApiError("VALIDATION_ERROR", "handle must match ^[a-z0-9_-]{3,32}$")
+            raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         phrase = generate_phrase()
-        keys = await self.derive(phrase)
+        keys = await self.derive(phrase, wait=derive_wait)
         agent = Agent(agent_id=keys.agent_id, handle=handle, sponsor_id=sponsor_id, is_founder=is_founder,
                       reputation=0)
         self._db.add(agent)
@@ -145,7 +168,7 @@ class IdentityService:
     async def create_invite(self, agent: Agent) -> Invite:
         # Verrou sur la ligne du créateur : sérialise les créations concurrentes (plafond de codes actifs)
         # et relit suspension / bannissement d'invitation posés par une modération concurrente.
-        locked = await self._db.get(Agent, agent.agent_id, with_for_update=True, populate_existing=True)
+        locked = await self._db.get(Agent, agent.agent_id, with_for_update=AGENT_ROW_LOCK, populate_existing=True)
         if locked is None:
             raise ApiError("UNAUTHENTICATED", "agent no longer exists")
         agent = locked

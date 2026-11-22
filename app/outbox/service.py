@@ -1,20 +1,16 @@
-import re
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.outbox.models import OutboxEvent
+from app.text import strip_control
 
 MAX_TEXT = {"log": 1800, "agent_message": 4000}  # le bot découpe en DM de 2000 caractères
-KINDS = set(MAX_TEXT)
+KINDS = set(MAX_TEXT)  # = OUTBOX_KINDS (CHECK ck_outbox_kind), vérifié par tests/test_outbox.py
 EXTRA_KEYS = {"agent", "short_id"}  # contrat du bot : rien d'autre ne doit sortir vers Discord
-# Contrôles C0/DEL sauf \t et \n : \x00 est refusé par JSONB (la transaction métier échouerait).
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-# Un str Python ne contient que des surrogates isolés (JSON "\ud800") : non encodables en UTF-8.
-_SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 
 def _clean(text: str) -> str:
-    return _SURROGATE.sub("\N{REPLACEMENT CHARACTER}", _CONTROL.sub("", text))
+    # \x00 est refusé par JSONB (la transaction métier échouerait) ; surrogates isolés non encodables
+    return strip_control(text)
 
 
 def _clean_value(value: object) -> object:

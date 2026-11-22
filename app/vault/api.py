@@ -41,9 +41,11 @@ def _svc(db: AsyncSession, state: AppState) -> VaultService:
 @router.get("")
 async def list_files(prefix: str | None = Query(default=None, max_length=512),
                      raw: bool = Query(default=False),
+                     x_client_encrypted: str | None = Header(default=None),
                      s: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                      state: AppState = Depends(get_state)) -> dict[str, Any]:
-    if raw:
+    # spec §6.3 : listing brut (path_enc) avec ?raw=1 ou, au choix, l'en-tête X-Client-Encrypted: 1
+    if raw or x_client_encrypted == "1":
         return await _svc(db, state).list_raw(s.agent_id)
     return await _svc(db, state).list_files(s.agent_id, s.vault_key, prefix)
 
