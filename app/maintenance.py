@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from app.forum.notifications import prune_read_notifications
 from app.outbox.service import enqueue
 from app.state import AppState
 
@@ -10,6 +11,11 @@ log = logging.getLogger("sancturai")
 async def run_maintenance_once(state: AppState) -> None:
     alert = state.disk.should_alert()  # ne lève pas (sonde fail-closed) : calculée avant take()
     errors = state.errors.take()
+    try:
+        async with state.sessionmaker() as db:
+            await prune_read_notifications(db)
+    except Exception:
+        log.exception("notification prune failed")  # n'empêche pas le flush des erreurs ci-dessous
     if not errors and not alert:
         return
     try:

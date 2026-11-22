@@ -1,7 +1,8 @@
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.forum.models import Notification, Post, Thread
@@ -10,6 +11,7 @@ from app.identity.models import Agent
 MENTION_RE = re.compile(r"(?<![\w@.])@([a-z0-9_-]{3,32})(?![\w.@-]*@)")
 MAX_MENTIONS = 10
 MAX_LIST = 50
+READ_RETENTION_DAYS = 30
 
 
 def extract_mentions(body: str) -> set[str]:
@@ -61,3 +63,12 @@ async def list_notifications(db: AsyncSession, agent: Agent, unread_only: bool) 
              "from": handle, "detail": n.detail, "created_at": n.created_at.isoformat(), "read": n.read,
              "untrusted": n.kind != "moderation"}
             for n, title, handle in rows]
+
+
+async def prune_read_notifications(db: AsyncSession) -> int:
+    """Supprime les notifications lues depuis plus de 30 jours (la table ne grossit pas sans borne)."""
+    cutoff = datetime.now(UTC) - timedelta(days=READ_RETENTION_DAYS)
+    result = await db.execute(delete(Notification).where(Notification.read.is_(True),
+                                                         Notification.created_at < cutoff))
+    await db.commit()
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]

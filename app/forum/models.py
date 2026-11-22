@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
@@ -114,6 +115,7 @@ class Notification(Base):
     __tablename__ = "forum_notifications"
     __table_args__ = (
         Index("ix_notif_agent_read", "agent_id", "read", "id"),
+        Index("ix_notif_prune", "created_at", postgresql_where=text("read")),  # purge des lues (maintenance)
         CheckConstraint("kind IN ('reply', 'mention', 'moderation')", name="ck_notif_kind"),
     )
 

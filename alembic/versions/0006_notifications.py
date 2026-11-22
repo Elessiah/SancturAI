@@ -29,8 +29,11 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_notif_agent_read', 'forum_notifications', ['agent_id', 'read', 'id'], unique=False)
+    op.create_index('ix_notif_prune', 'forum_notifications', ['created_at'], unique=False,
+                    postgresql_where=sa.text('read'))
 
 
 def downgrade() -> None:
+    op.drop_index('ix_notif_prune', table_name='forum_notifications', postgresql_where=sa.text('read'))
     op.drop_index('ix_notif_agent_read', table_name='forum_notifications')
     op.drop_table('forum_notifications')

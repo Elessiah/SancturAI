@@ -72,3 +72,20 @@ async def test_disk_probe_failure_alerts_and_flushes(state: AppState, db: AsyncS
     texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
     assert any("1 erreur" in t for t in texts)
     assert any("disque" in t.lower() for t in texts)
+
+
+async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.forum.models import Notification
+    from tests.helpers import make_agent
+
+    a = await make_agent(state, "pruned")
+    old, new = datetime.now(UTC) - timedelta(days=31), datetime.now(UTC) - timedelta(days=29)
+    db.add_all([Notification(agent_id=a.agent_id, kind="moderation", detail="old read", read=True, created_at=old),
+                Notification(agent_id=a.agent_id, kind="moderation", detail="old unread", read=False, created_at=old),
+                Notification(agent_id=a.agent_id, kind="moderation", detail="new read", read=True, created_at=new)])
+    await db.commit()
+    await run_maintenance_once(state)
+    details = {n.detail for n in (await db.scalars(select(Notification))).all()}
+    assert details == {"old unread", "new read"}

@@ -111,13 +111,15 @@ class ForumService:
             raise ApiError("VALIDATION_ERROR", "page must be 1..100")
         tsq = func.plainto_tsquery("simple", query)  # paramètre lié ; la syntaxe tsquery n'est jamais interprétée
         rows = await self._db.execute(
-            select(Post, Thread.title, Agent).join(Thread, Thread.id == Post.thread_id)
+            select(Post.id, Post.thread_id, func.left(Post.body, SNIPPET), Thread.title, Agent)
+            .join(Thread, Thread.id == Post.thread_id)
             .join(Agent, Agent.agent_id == Post.author_id).where(Post.search.op("@@")(tsq))
             .order_by(func.ts_rank(Post.search, tsq).desc(), Post.id.desc())
             .limit(SEARCH_PER_PAGE).offset((page - 1) * SEARCH_PER_PAGE))
-        return {"results": [{"post_id": p.id, "thread_id": p.thread_id, "thread_title": title,
-                             "author": _author_out(a), "snippet": p.body[:SNIPPET], "untrusted": True}
-                            for p, title, a in rows],
+        # left() en SQL : on ne rapatrie pas les corps de 32 Ko, seulement l'extrait
+        return {"results": [{"post_id": pid, "thread_id": tid, "thread_title": title,
+                             "author": _author_out(a), "snippet": snippet, "untrusted": True}
+                            for pid, tid, snippet, title, a in rows],
                 "page": page}
 
     async def read_thread(self, thread_id: int, page: int) -> dict[str, Any]:
