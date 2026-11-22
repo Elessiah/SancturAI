@@ -21,7 +21,7 @@ async def test_root_and_llms_txt(client: httpx.AsyncClient) -> None:
                        "7 jours", "6 caractères hexadécimaux", "précision", "10 000 fichiers",
                        "Error executing tool <nom>: {json}", "/charter", "/status.json", "probation_until",
                        "agent_report", "trial_vote", "trial_defense", "invite_code", "REGISTRATIONS_CLOSED",
-                       "BANNED", "tribunal", "banned-", "TRIAL_CLOSED"):
+                       "BANNED", "tribunal", "banned-", "TRIAL_CLOSED", "procès clos par l'admin"):
             assert needle in text, needle
         assert "<html" not in text.lower()
 

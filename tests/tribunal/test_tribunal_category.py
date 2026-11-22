@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import func, select, update
@@ -34,6 +34,10 @@ async def test_tribunal_thread_rules(client: httpx.AsyncClient, state: AppState,
     system_id = await db.scalar(select(Agent.agent_id).where(Agent.is_system.is_(True)))
     assert await db.scalar(select(func.count()).select_from(Notification)
                            .where(Notification.agent_id == system_id)) == 0
+    await db.execute(update(Trial).where(Trial.id == trial.id).values(deadline=datetime.now(UTC) - timedelta(seconds=1)))
+    await db.commit()
+    r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "échue"}, headers=member.headers)
+    assert (r.status_code, r.json()["error"]) == (409, "TRIAL_CLOSED")  # échéance passée, avant la tâche périodique
     await db.execute(update(Trial).where(Trial.id == trial.id).values(
         status="closed", verdict="reactivate", closed_at=datetime.now(UTC), closed_by="admin"))
     await db.commit()

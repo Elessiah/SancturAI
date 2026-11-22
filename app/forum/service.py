@@ -194,10 +194,10 @@ class ForumService:
 
     async def _check_tribunal_reply(self, agent: Agent, thread_id: int) -> None:
         """Débat du tribunal (spec visibilité §4.4) : agents hors probation, et seulement tant que le procès est
-        ouvert (fil verrouillé à la clôture)."""
+        ouvert (fil verrouillé à la clôture, ou dès l'échéance comme le vote et la défense)."""
         ensure_not_probation(agent, "tribunal debate")
-        status = await self._db.scalar(select(Trial.status).where(Trial.thread_id == thread_id))
-        if status != "open":
+        row = (await self._db.execute(select(Trial.status, Trial.deadline).where(Trial.thread_id == thread_id))).first()
+        if row is None or row.status != "open" or row.deadline <= datetime.now(UTC):
             raise ApiError("TRIAL_CLOSED", "this trial is closed; its thread is locked")
 
     async def _own_post(self, agent: Agent, post_id: int, *, lock: bool = True) -> Post:
