@@ -102,3 +102,28 @@ async def test_reply_text_limit_and_unread_only_marks_shown(client: httpx.AsyncC
     await client.post("/internal/admin-replies", json={"short_id": sid, "text": "ok"}, headers=INTERNAL)
     rows = (await db.scalars(select(AdminMessage).where(AdminMessage.sender == "admin"))).all()
     assert [m.read_by_agent for m in rows] == [False]
+
+
+async def test_short_id_collision_retries(client: httpx.AsyncClient, state: AppState, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.admin_messages.service as svc
+
+    a = await make_agent(state, "collider")
+    first = (await client.post("/api/admin-messages", json={"text": "un"}, headers=a.headers)).json()["short_id"]
+    real = svc.secrets.token_hex
+    calls = iter([first, first])
+    monkeypatch.setattr(svc.secrets, "token_hex", lambda n: next(calls, None) or real(n))
+    r = await client.post("/api/admin-messages", json={"text": "deux"}, headers=a.headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["short_id"] != first
+
+
+async def test_inbox_bounded_per_thread(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    from app.admin_messages import service as svc
+
+    a = await make_agent(state, "history")
+    sid = (await client.post("/api/admin-messages", json={"text": "m0"}, headers=a.headers)).json()["short_id"]
+    for i in range(svc.INBOX_MESSAGES_PER_THREAD + 5):
+        await client.post("/internal/admin-replies", json={"short_id": sid, "text": f"r{i}"}, headers=INTERNAL)
+    msgs = (await client.get("/api/admin-messages", headers=a.headers)).json()["threads"][0]["messages"]
+    assert len(msgs) == svc.INBOX_MESSAGES_PER_THREAD
+    assert msgs[-1]["text"] == f"r{svc.INBOX_MESSAGES_PER_THREAD + 4}"

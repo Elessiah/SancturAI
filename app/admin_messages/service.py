@@ -5,7 +5,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import exists, select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin_messages.models import AdminMessage, AdminThread
@@ -19,6 +20,8 @@ from app.text import check_text
 MAX_TEXT = 4000
 DAILY_LIMIT = 3
 _SHORT_ID_TRIES = 20
+INBOX_THREADS = 50
+INBOX_MESSAGES_PER_THREAD = 50  # les plus récents ; l'historique complet ne doit pas être relu à chaque appel
 
 
 def verify_internal(request: Request, settings: Settings) -> None:
@@ -51,11 +54,17 @@ class AdminMessageService:
             retry = math.ceil((stamps[0] + timedelta(days=1) - datetime.now(UTC)).total_seconds())
             raise ApiError("RATE_LIMITED", f"{DAILY_LIMIT} messages per day", retry_after=max(1, retry))
 
-    async def _new_short_id(self) -> str:
+    async def _create_thread(self, agent: Agent) -> AdminThread:
+        # INSERT optimiste (1 requête/essai) : la contrainte UNIQUE tranche, y compris entre requêtes concurrentes
         for _ in range(_SHORT_ID_TRIES):
-            candidate = secrets.token_hex(2)
-            if not await self._db.scalar(select(exists().where(AdminThread.short_id == candidate))):
-                return candidate
+            thread = AdminThread(short_id=secrets.token_hex(2), agent_id=agent.agent_id)
+            try:
+                async with self._db.begin_nested():
+                    self._db.add(thread)
+                    await self._db.flush()
+            except IntegrityError:
+                continue
+            return thread
         raise ApiError("SERVER_BUSY", "no free short id")
 
     async def send(self, agent: Agent, text: str, short_id: str | None = None) -> dict[str, Any]:
@@ -68,16 +77,13 @@ class AdminMessageService:
                 raise ApiError("NOT_FOUND", f"no thread #{short_id}")
             thread.updated_at = datetime.now(UTC)
         else:
-            thread = AdminThread(short_id=await self._new_short_id(), agent_id=agent.agent_id)
-            self._db.add(thread)
-            await self._db.flush()
+            thread = await self._create_thread(agent)
         # le compteur DB ci-dessus survit aux redémarrages ; le limiteur ferme la course entre requêtes concurrentes
         self._state.limiter.hit(f"admin-msg:{agent.agent_id}", DAILY_LIMIT, 86_400)
         message = AdminMessage(thread_id=thread.id, sender="agent", text=text, read_by_agent=True)
         self._db.add(message)
         await enqueue(self._db, "agent_message", text, short_id=thread.short_id,
                       agent={"handle": agent.handle, "agent_id": agent.agent_id})
-        await self._db.flush()
         await self._db.commit()
         return {"short_id": thread.short_id, "message_id": message.id}
 
@@ -92,10 +98,15 @@ class AdminMessageService:
 
     async def inbox(self, agent: Agent) -> dict[str, Any]:
         threads = (await self._db.scalars(select(AdminThread).where(AdminThread.agent_id == agent.agent_id)
-                                          .order_by(AdminThread.updated_at.desc()).limit(50))).all()
+                                          .order_by(AdminThread.updated_at.desc()).limit(INBOX_THREADS))).all()
         by_thread: dict[int, list[AdminMessage]] = {t.id: [] for t in threads}
         if threads:
-            msgs = await self._db.scalars(select(AdminMessage).where(AdminMessage.thread_id.in_(by_thread))
+            rank = (func.row_number().over(partition_by=AdminMessage.thread_id, order_by=AdminMessage.id.desc())
+                    .label("rn"))
+            recent = (select(AdminMessage.id.label("id"), rank).where(AdminMessage.thread_id.in_(by_thread))
+                      .subquery())
+            msgs = await self._db.scalars(select(AdminMessage).join(recent, recent.c.id == AdminMessage.id)
+                                          .where(recent.c.rn <= INBOX_MESSAGES_PER_THREAD)
                                           .order_by(AdminMessage.id))
             for m in msgs:
                 by_thread[m.thread_id].append(m)
