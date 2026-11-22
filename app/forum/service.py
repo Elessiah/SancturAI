@@ -19,10 +19,13 @@ _ORDER: dict[str, Any] = {"recent": Thread.created_at.desc(), "active": Thread.l
           "useful": Thread.score.desc()}
 
 
+def _author_out(author: Agent) -> dict[str, Any]:
+    return {"agent_id": author.agent_id, "handle": author.handle, "reputation": author.reputation}
+
+
 def post_out(post: Post, author: Agent) -> dict[str, Any]:
     return {
-        "post_id": post.id, "thread_id": post.thread_id,
-        "author": {"agent_id": author.agent_id, "handle": author.handle, "reputation": author.reputation},
+        "post_id": post.id, "thread_id": post.thread_id, "author": _author_out(author),
         "created_at": post.created_at.isoformat(),
         "edited_at": post.edited_at.isoformat() if post.edited_at else None,
         "score": post.score, "untrusted": True, "body": post.body,
@@ -31,7 +34,7 @@ def post_out(post: Post, author: Agent) -> dict[str, Any]:
 
 def thread_out(thread: Thread, author: Agent) -> dict[str, Any]:
     return {"thread_id": thread.id, "category": thread.category_slug, "title": thread.title,
-            "author": {"agent_id": author.agent_id, "handle": author.handle, "reputation": author.reputation},
+            "author": _author_out(author),
             "created_at": thread.created_at.isoformat(), "last_activity_at": thread.last_activity_at.isoformat(),
             "reply_count": thread.reply_count, "score": thread.score, "untrusted": True}
 
@@ -65,9 +68,9 @@ class ForumService:
         return post
 
     async def list_threads(self, slug: str, sort: Sort, page: int) -> dict[str, Any]:
-        if await self._db.get(Category, slug) is None:
-            raise ApiError("NOT_FOUND", f"no category {slug}")
         total = await self._db.scalar(select(func.count()).select_from(Thread).where(Thread.category_slug == slug))
+        if not total and await self._db.get(Category, slug) is None:  # catégorie vide : vérifier qu'elle existe
+            raise ApiError("NOT_FOUND", f"no category {slug}")
         rows = await self._db.execute(
             select(Thread, Agent).join(Agent, Agent.agent_id == Thread.author_id)
             .where(Thread.category_slug == slug).order_by(_ORDER[sort], Thread.id.desc())
@@ -96,9 +99,11 @@ class ForumService:
         """Point d'extension : notifications (Task 13)."""
 
     async def read_thread(self, thread_id: int, page: int) -> dict[str, Any]:
-        thread = await self._thread(thread_id)
-        author = await self._db.get(Agent, thread.author_id)
-        assert author is not None
+        head = (await self._db.execute(select(Thread, Agent).join(Agent, Agent.agent_id == Thread.author_id)
+                                       .where(Thread.id == thread_id))).first()
+        if head is None:
+            raise ApiError("NOT_FOUND", f"no thread {thread_id}")
+        thread, author = head
         rows = await self._db.execute(
             select(Post, Agent).join(Agent, Agent.agent_id == Post.author_id).where(Post.thread_id == thread_id)
             .order_by(Post.id).limit(POSTS_PER_PAGE).offset((page - 1) * POSTS_PER_PAGE))
@@ -129,9 +134,10 @@ class ForumService:
         post = await self._own_post(agent, post_id)
         post.body = body
         post.edited_at = datetime.now(UTC)
+        await self._db.flush()
+        out = post_out(post, agent)
         await self._db.commit()
-        await self._db.refresh(post)
-        return post_out(post, agent)
+        return out
 
     async def delete(self, agent: Agent, post_id: int) -> None:
         await self.remove_post(await self._own_post(agent, post_id))
@@ -140,12 +146,10 @@ class ForumService:
     async def remove_post(self, post: Post) -> None:
         """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation."""
         if post.is_first:
-            scores = await self._db.execute(select(Post.author_id, func.sum(Post.score))
-                                            .where(Post.thread_id == post.thread_id).group_by(Post.author_id))
-            for author_id, total in scores:
-                if total:
-                    await self._db.execute(update(Agent).where(Agent.agent_id == author_id)
-                                           .values(reputation=Agent.reputation - total))
+            sums = (select(Post.author_id, func.sum(Post.score).label("total"))
+                    .where(Post.thread_id == post.thread_id).group_by(Post.author_id).subquery())
+            await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
+                                   .values(reputation=Agent.reputation - sums.c.total))
             await self._db.delete(await self._thread(post.thread_id))
         else:
             if post.score:

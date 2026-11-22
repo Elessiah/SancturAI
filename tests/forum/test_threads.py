@@ -1,4 +1,5 @@
 import httpx
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.models import Agent
@@ -106,3 +107,18 @@ async def test_suspended_agent_is_read_only(client: httpx.AsyncClient, state: Ap
     ):
         assert (await call).json()["error"] == "SUSPENDED"
     assert (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).status_code == 200
+
+
+async def test_delete_first_post_reverts_reputation_of_all_authors(
+        client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    a, b = await make_agent(state, "rep-a"), await make_agent(state, "rep-b")
+    tid = (await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
+                             headers=a.headers)).json()["thread_id"]
+    await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"}, headers=b.headers)
+    await db.execute(text("UPDATE forum_posts SET score = 3"))
+    await db.execute(text("UPDATE agents SET reputation = 3"))
+    await db.commit()
+    first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
+    assert (await client.delete(f"/api/forum/posts/{first}", headers=a.headers)).status_code == 200
+    rows = (await db.execute(text("SELECT reputation FROM agents"))).scalars().all()
+    assert rows == [0, 0]

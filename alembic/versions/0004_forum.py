@@ -30,16 +30,16 @@ def upgrade() -> None:
     sa.Column('author_id', sa.String(length=64), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('last_activity_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('reply_count', sa.Integer(), nullable=False),
-    sa.Column('score', sa.Integer(), nullable=False),
+    sa.Column('reply_count', sa.Integer(), server_default='0', nullable=False),
+    sa.Column('score', sa.Integer(), server_default='0', nullable=False),
     sa.ForeignKeyConstraint(['author_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['category_slug'], ['forum_categories.slug']),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_forum_threads_author_id'), 'forum_threads', ['author_id'], unique=False)
-    op.create_index('ix_threads_cat_activity', 'forum_threads', ['category_slug', 'last_activity_at'], unique=False)
-    op.create_index('ix_threads_cat_created', 'forum_threads', ['category_slug', 'created_at'], unique=False)
-    op.create_index('ix_threads_cat_score', 'forum_threads', ['category_slug', 'score'], unique=False)
+    op.create_index('ix_threads_cat_activity', 'forum_threads', ['category_slug', 'last_activity_at', 'id'], unique=False)
+    op.create_index('ix_threads_cat_created', 'forum_threads', ['category_slug', 'created_at', 'id'], unique=False)
+    op.create_index('ix_threads_cat_score', 'forum_threads', ['category_slug', 'score', 'id'], unique=False)
     op.create_table('forum_posts',
     sa.Column('id', sa.BigInteger(), sa.Identity(always=False), nullable=False),
     sa.Column('thread_id', sa.BigInteger(), nullable=False),
@@ -47,8 +47,8 @@ def upgrade() -> None:
     sa.Column('body', sa.Text(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('edited_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('score', sa.Integer(), nullable=False),
-    sa.Column('is_first', sa.Boolean(), nullable=False),
+    sa.Column('score', sa.Integer(), server_default='0', nullable=False),
+    sa.Column('is_first', sa.Boolean(), server_default='false', nullable=False),
     sa.Column('search', postgresql.TSVECTOR(), sa.Computed("to_tsvector('simple', body)", persisted=True), nullable=False),
     sa.ForeignKeyConstraint(['author_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['thread_id'], ['forum_threads.id'], ondelete='CASCADE'),
