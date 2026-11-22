@@ -438,7 +438,9 @@ class BodyLimitMiddleware:
                 try:
                     body = await _read_capped(receive, cap, ends)
                 except _BodyTooLarge:
-                    if rpc:
+                    if rpc:  # la vidange ne garde rien : la réservation est rendue avant
+                        self.budget.release(reserved)
+                        reserved = 0
                         await _drain(receive, ends, MCP_DRAIN_BYTES)
                     await _reject(too_large_error(cap, path), scope, receive, watched_send, rpc_ends)
                     return

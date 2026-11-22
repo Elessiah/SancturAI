@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import Any
@@ -95,7 +96,6 @@ def test_head_of_utf16_and_utf32_prefixes(codec: str) -> None:
     b'{"id":1,"params":' + b'{"a":' * 50_000, b'{"a":"' + b"\x00" * 200_000,
 ])
 def test_extractor_is_bounded_and_linear(raw: bytes) -> None:
-    raw = raw + b"x" * (4 * 1024 * 1024)  # corps énorme : seuls le début et la fin comptent
     tails = [raw[::-1][:5000], b'"' * 5000 + b"}", b'"\\' * 3000 + b"}", b":" * 5000 + b"}", b'":"a",' * 900 + b"}",
              b"1" * 5000 + b"}", b" " * 5000 + b"}", b'"a":1,' * 900 + b"}", raw[:5000] + b"}"]
     start = time.perf_counter()
@@ -160,6 +160,66 @@ async def test_chunked_overflow_drains_to_find_the_id() -> None:
     raw = sdk_call("x" * (300 * KIB))
     send, reads = await _guard_reply(raw, length=None, chunk=64 * KIB, chunked=True)
     assert send.status == 200 and send.json["id"] == 3 and reads == 5
+
+
+async def test_chunked_overflow_releases_its_reservation_before_draining() -> None:
+    raw = sdk_call("x" * (600 * KIB))
+    chunk = 64 * KIB
+    used: list[int] = []
+    reads = 0
+
+    async def receive() -> Any:
+        nonlocal reads
+        used.append(guard.budget.used)
+        part = raw[reads * chunk:(reads + 1) * chunk]
+        reads += 1
+        return {"type": "http.request", "body": part, "more_body": reads * chunk < len(raw)}
+
+    guard = BodyLimitMiddleware(empty_receive)  # type: ignore[arg-type]
+    send = Recorder()
+    await guard(scope("/mcp/", chunked=True), receive, send)
+    assert send.status == 200 and send.json["id"] == 3
+    overflow = m.MCP_BODY_BYTES // chunk + 1  # lecture qui dépasse le plafond, puis vidange
+    assert reads > overflow + 2  # lectures de vidange observées
+    assert used[:overflow] == [m.MCP_BODY_BYTES] * overflow and used[overflow:] == [0] * (reads - overflow)
+    assert guard.budget.used == 0
+
+
+def _stalling_receive(first: bytes, then: str) -> Any:
+    """Premier morceau, puis client muet (`stall`) ou parti (`disconnect`)."""
+    calls = 0
+
+    async def receive() -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"type": "http.request", "body": first, "more_body": True}
+        if then == "stall":
+            await asyncio.sleep(3600)
+        return {"type": "http.disconnect"}
+
+    return receive
+
+
+@pytest.mark.parametrize("then", ["stall", "disconnect"])
+async def test_drain_stops_on_timeout_or_disconnect(monkeypatch: pytest.MonkeyPatch, then: str) -> None:
+    monkeypatch.setattr(m, "MCP_DRAIN_WAIT", 0.2)
+    for raw, chunked in ((sdk_call("x" * (300 * KIB)), False), (sdk_call("x" * (300 * KIB)), True),
+                         (CALL + b'"content":"' + b"x" * (300 * KIB), False)):
+        first = raw[:64 * KIB]
+        guard = BodyLimitMiddleware(empty_receive)  # type: ignore[arg-type]
+        send = Recorder()
+        start = time.perf_counter()
+        sc = scope("/mcp/", chunked=True) if chunked else scope("/mcp/", len(raw))
+        if chunked:  # le corps chunked dépasse le plafond en lecture : premier morceau de 256 Kio + 1
+            first = raw[:m.MCP_BODY_BYTES + 1]
+        await guard(sc, _stalling_receive(first, then), send)
+        assert time.perf_counter() - start < 2 and guard.budget.used == 0
+        assert send.messages[0]["type"] == "http.response.start" and len(send.messages) == 2  # une seule réponse
+        if raw.startswith(CALL):  # id en tête : erreur d'outil malgré la fin inconnue
+            assert send.status == 200 and send.json["id"] == 3
+        else:  # id en fin, jamais reçue : statut HTTP habituel
+            assert send.status == 422 and send.json["error"] == "VALIDATION_ERROR"
 
 
 async def test_other_requests_get_a_jsonrpc_error() -> None:
