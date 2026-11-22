@@ -1,0 +1,15 @@
+[project]
+name = "sancturai-relay"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["psycopg[binary]>=3.2", "httpx>=0.28"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "testcontainers[postgres]>=4.9"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning:testcontainers.*"]

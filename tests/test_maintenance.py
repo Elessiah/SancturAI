@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.disk import DiskGuard
 from app.maintenance import maintenance_loop, run_maintenance_once
-from app.outbox.models import OutboxEvent
+from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.state import AppState
 
 Usage = namedtuple("Usage", "total used free")
@@ -72,3 +72,36 @@ async def test_disk_probe_failure_alerts_and_flushes(state: AppState, db: AsyncS
     texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
     assert any("1 erreur" in t for t in texts)
     assert any("disque" in t.lower() for t in texts)
+
+
+async def test_purges_old_sent_events(state: AppState, db: AsyncSession) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime.now(UTC) - timedelta(days=31)
+    db.add(OutboxEvent(kind="log", payload={"text": "old"}, sent_at=old))
+    db.add(OutboxEvent(kind="log", payload={"text": "pending"}))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-old"}, attempts=RELAY_MAX_ATTEMPTS, created_at=old))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-recent"}, attempts=RELAY_MAX_ATTEMPTS))
+    db.add(OutboxEvent(kind="log", payload={"text": "retrying-old"}, attempts=3, created_at=old))
+    await db.commit()
+    await run_maintenance_once(state)
+    texts = sorted(e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all())
+    assert texts == ["abandoned-recent", "pending", "retrying-old"]
+
+
+async def test_purges_expired_challenges(state: AppState, db: AsyncSession) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.identity.models import Challenge, Invite
+    from tests.helpers import make_agent
+
+    founder = await make_agent(state, "founder", founder=True)
+    now = datetime.now(UTC)
+    db.add(Invite(code="c" * 32, creator_id=founder.agent_id, expires_at=now + timedelta(days=7)))
+    await db.flush()
+    for cid, delta in (("old", timedelta(days=2)), ("recent", timedelta(hours=2)), ("live", -timedelta(hours=1))):
+        db.add(Challenge(challenge_id=cid, invite_code="c" * 32, handle="newbie", seed=1, expires_at=now - delta))
+    await db.commit()
+    await run_maintenance_once(state)
+    ids = sorted((await db.scalars(select(Challenge.challenge_id))).all())
+    assert ids == ["live", "recent"]
