@@ -23,8 +23,8 @@ Base: bb54565
 | M13 | batch | minor | plan T19 nginx | client_max_body_size 8m < worst-case JSON of 5 MB non-ASCII text; HTML 413 not §9.2 | fixed (plan) | 288cfbc |
 | M14 | batch | minor | tests/vault/test_vault_at_rest.py | §9.3 dump test bypasses create_agent/README/outbox and ignores the session token | fixed | f053c6a |
 | M15 | batch | minor | tests/helpers.py:make_agent | pool index = count(agents): deletion then make_agent reuses a live identity | fixed | f053c6a |
-| N1 | batch | minor | app/errors.py:is_data_error | SQLSTATE class 22 mapped wholesale to VALIDATION_ERROR, silent (server bugs hidden) | fixed | SHA |
-| N2 | batch | minor | plan T19 nginx | client_max_body_size 12m too small for 5 MB of 2/4-byte chars as ASCII JSON | fixed (plan) | SHA |
+| N1 | batch | minor | app/errors.py:is_data_error | SQLSTATE class 22 mapped wholesale to VALIDATION_ERROR, silent (server bugs hidden) | fixed | 404a38f |
+| N2 | batch | minor | plan T19 nginx | client_max_body_size 12m too small for 5 MB of 2/4-byte chars as ASCII JSON | fixed (plan) | 404a38f |
 | N3 | batch | minor | plan T18 quoteBlock | splits only on 
  while check_text keeps  | fixed | appliqué dans la Task 18 (bot) |
 
