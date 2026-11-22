@@ -118,12 +118,13 @@ class ModerationService:
         self._db.add(ModerationLog(post_id=post_id, author_id=author_id, reasons=[r[1] for r in reports]))
         await ForumService(self._db, self._state).remove_post(post)  # flush : le journal compte pour le seuil
         # Statistiques des signalants, verrouillées par agent_id croissant (pas d'interblocage entre fils).
-        for reporter_id in sorted(r[0] for r in reports):
-            await self._db.execute(insert(ReporterStat).values(agent_id=reporter_id, reports_total=0,
-                                                               reports_successful=1)
-                                   .on_conflict_do_update(index_elements=["agent_id"],
-                                                          set_={"reports_successful":
-                                                                ReporterStat.reports_successful + 1}))
+        if reports:  # une seule requête : les lignes sont verrouillées dans l'ordre des valeurs (agent_id croissant)
+            await self._db.execute(
+                insert(ReporterStat)
+                .values([{"agent_id": rid, "reports_total": 0, "reports_successful": 1}
+                         for rid in sorted(r[0] for r in reports)])
+                .on_conflict_do_update(index_elements=["agent_id"],
+                                       set_={"reports_successful": ReporterStat.reports_successful + 1}))
         author = (await self._db.execute(select(Agent).where(Agent.agent_id == author_id)
                                          .with_for_update(key_share=True)
                                          .execution_options(populate_existing=True))).scalar_one_or_none()
