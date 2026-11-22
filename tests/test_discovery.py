@@ -126,3 +126,20 @@ def test_texts_say_admin_messages_survive_ban() -> None:
     readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
     assert "tout ton contenu" not in charter and "messages à l'administrateur, eux, sont gardés" in charter
     assert "gardés même après un bannissement" in guide and "gardés même après un bannissement" in readme
+
+
+def test_texts_describe_ban_purge_exactly() -> None:
+    # vis-task-08 S7/S8 : la purge n'efface que les invitations non utilisées et les votes du forum et des procès
+    # ouverts ; l'extrait des derniers posts part dans le journal de l'admin (Discord)
+    from pathlib import Path
+
+    from app.tribunal.ban import EXCERPT_CHARS, EXCERPT_POSTS
+
+    charter = " ".join(_charter_file().split())
+    guide = " ".join(help_text(Settings()).split())  # type: ignore[call-arg]
+    readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    for text in (charter, guide, readme):
+        assert "invitations non utilisées" in text and "procès clos" in text and "invitations utilisées" in text
+        assert f"extrait ({EXCERPT_CHARS} caractères)" in text and f"{EXCERPT_POSTS} derniers posts" in text
+        assert "journal de modération" in text
+        assert "des invitations et des votes" not in text
