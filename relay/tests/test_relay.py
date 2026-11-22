@@ -163,3 +163,37 @@ def test_out_of_contract_and_oversized_rows_are_abandoned_unsent(conn: psycopg.C
     assert calls == 0
     assert conn.execute("SELECT attempts, sent_at FROM outbox").fetchall() == [(MAX_ATTEMPTS, None)] * 2
     assert "secret-agent-text" not in caplog.text
+
+
+@pytest.mark.parametrize("token", [None, "", "  "])
+def test_main_refuses_to_start_without_bot_token(monkeypatch: pytest.MonkeyPatch, token: str | None) -> None:
+    import relay
+
+    monkeypatch.setenv("SANCTURAI_RELAY_DSN", "postgresql://unused")
+    if token is None:
+        monkeypatch.delenv("SANCTURAI_BOT_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("SANCTURAI_BOT_TOKEN", token)
+    monkeypatch.setattr(relay.httpx, "Client", lambda **kw: pytest.fail("client created without token"))
+    with pytest.raises(SystemExit):
+        relay.main()
+
+
+def test_main_http_client_ignores_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    import relay
+
+    monkeypatch.setenv("SANCTURAI_RELAY_DSN", "postgresql://unused")
+    monkeypatch.setenv("SANCTURAI_BOT_TOKEN", "tok")
+    seen: dict[str, object] = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_client(**kw: object) -> None:
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(relay.httpx, "Client", fake_client)
+    with pytest.raises(Stop):
+        relay.main()
+    assert seen["trust_env"] is False

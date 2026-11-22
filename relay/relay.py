@@ -103,9 +103,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     dsn = os.environ["SANCTURAI_RELAY_DSN"]
     bot_url = os.environ.get("SANCTURAI_BOT_URL", "http://127.0.0.1:4400/internal/sancturai/notify")
-    token = os.environ["SANCTURAI_BOT_TOKEN"]
+    token = os.environ.get("SANCTURAI_BOT_TOKEN", "")
+    if not token.strip():  # sinon chaque envoi prend un 401 et brûle des tentatives
+        raise SystemExit("SANCTURAI_BOT_TOKEN is required")
     interval = float(os.environ.get("SANCTURAI_RELAY_INTERVAL", "5"))
-    with httpx.Client(timeout=HTTP_TIMEOUT) as http:
+    # trust_env=False : ni HTTP(S)_PROXY/ALL_PROXY ni .netrc, le jeton et le texte ne vont qu'au bot local
+    with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as http:
         while True:
             try:
                 with psycopg.connect(dsn, autocommit=True) as conn:
