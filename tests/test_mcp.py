@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -165,3 +166,65 @@ async def test_mcp_session_opening_is_rate_limited_per_ip(live_url: str) -> None
         assert r.status_code == 429 and r.json()["error"] == "RATE_LIMITED"
         r = await c.post("/mcp/", json={}, headers={**headers, "Mcp-Session-Id": "unknown"})
         assert r.status_code == 404  # session existante (ou non) : pas une ouverture, pas comptée
+
+
+async def test_mcp_register_rejects_oversized_args_like_rest(live_url: str) -> None:
+    async with mcp_session_from(live_url, "192.0.2.8") as s:
+        cases = [
+            ("register_start", {"invite_code": "abc", "handle": "Q" * 33}),
+            ("register_complete", {"challenge_id": "abc", "answers": ["1"] * 41}),
+            ("register_complete", {"challenge_id": "abc", "answers": ["Q" * 201]}),
+        ]
+        for tool, args in cases:
+            r = await call(s, tool, **args)
+            assert r["_error"]["error"] == "VALIDATION_ERROR", args
+            assert "QQQ" not in r["_error"]["message"]
+
+
+INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
+MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
+
+
+async def test_mcp_open_sessions_capped_per_ip(live_url: str) -> None:
+    headers = {**MCP_HEADERS, "X-Real-IP": "2001:db8:7:7::1"}
+    async with httpx.AsyncClient(base_url=live_url) as c:
+        sids = []
+        for _ in range(20):
+            r = await c.post("/mcp/", json=INIT, headers=headers)
+            sids.append(r.headers["mcp-session-id"])
+        r = await c.post("/mcp/", json=INIT, headers={**headers, "X-Real-IP": "2001:db8:7:7::2"})  # même /64
+        assert r.status_code == 429 and r.json()["error"] == "RATE_LIMITED"
+        r = await c.delete("/mcp/", headers={**headers, "Mcp-Session-Id": sids[0],
+                                              "Mcp-Protocol-Version": "2025-06-18"})
+        assert r.status_code == 200
+        assert (await c.post("/mcp/", json=INIT, headers=headers)).status_code == 200  # place libérée
+
+
+async def test_session_open_limit_serializes_large_bodies(state: AppState) -> None:
+    from app.mcp_server import MCP_SMALL_BODY_BYTES, SessionOpenLimit
+
+    running = 0
+    peak = 0
+
+    async def inner(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+
+    guard = SessionOpenLimit(inner, state, lambda sid: True)
+
+    def scope(length: str | None) -> dict[str, Any]:
+        raw = [(b"mcp-session-id", b"s")] + ([(b"content-length", length.encode())] if length else [])
+        return {"type": "http", "method": "POST", "headers": raw, "client": ("127.0.0.1", 1)}
+
+    async def noop(*_: Any) -> Any:
+        return None
+
+    big = str(MCP_SMALL_BODY_BYTES + 1)
+    await asyncio.gather(*(guard(scope(v), noop, noop) for v in (big, big, None)))
+    assert peak == 1  # gros corps (ou longueur inconnue) : un à la fois
+    await asyncio.gather(*(guard(scope("100"), noop, noop) for _ in range(3)))
+    assert peak == 3  # petits corps : en parallèle

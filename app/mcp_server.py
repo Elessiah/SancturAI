@@ -1,13 +1,15 @@
 """Outils MCP : fines couches sur les services REST (aucune logique métier ici)."""
+import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.streamable_http_manager import DEFAULT_MAX_SESSIONS
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ContentBlock
 from pydantic import Field, ValidationError
@@ -15,7 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.admin_messages.service import MAX_RAW_TEXT, AdminMessageService
 from app.crypto import MAX_PHRASE_CHARS
@@ -25,7 +27,7 @@ from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
-from app.identity.api import PHRASE_WARNING, agent_profile, invite_out
+from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, PHRASE_WARNING, agent_profile, invite_out
 from app.identity.auth import (
     limit_login,
     limit_register,
@@ -56,12 +58,16 @@ Body = Annotated[str, Field(max_length=BODY_MAX_CHARS)]
 Reason = Annotated[str, Field(min_length=1, max_length=REASON_MAX)]
 SearchQuery = Annotated[str, Field(max_length=QUERY_MAX)]
 AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
+Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
+Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
 # Ouverture de session MCP (requête sans Mcp-Session-Id), par IP : sans borne, un client remplirait les
 # DEFAULT_MAX_SESSIONS (10 000, 30 min d'inactivité) du SDK et fermerait /mcp à tous les agents.
 MCP_OPEN_RATE = (60, 3600.0)
 # Corps HTTP max du transport MCP : celui de nginx (client_max_body_size 16m), pas les 4 Mio du SDK, sinon
 # vault_write refuse les fichiers de 5 Mo admis en REST (spec §6, 5 Mo par fichier, base64 ≈ 7 M caractères).
 MCP_MAX_BODY_BYTES = 16 * 1024 * 1024
+MCP_SMALL_BODY_BYTES = 1024 * 1024  # au-delà (ou longueur inconnue) : un seul corps traité à la fois
+MCP_SESSIONS_PER_IP = 20  # sessions MCP ouvertes simultanément par IP
 
 
 @dataclass
@@ -104,20 +110,59 @@ class SancturMCP(FastMCP[Any]):
 
 
 class SessionOpenLimit:
-    """Limite par IP (clé REST `client_ip`) des requêtes /mcp qui ouvriraient une session MCP."""
+    """Garde du transport /mcp, par IP (clé REST `client_ip`) : débit d'ouverture de sessions MCP, nombre de
+    sessions ouvertes simultanément (sinon 60/h maintenues en vie suffisent à remplir les 10 000 du SDK), et
+    un seul gros corps à la fois (json.loads d'un corps de 16 Mio dense en objets ≈ 400 Mio de RAM)."""
 
-    def __init__(self, app: ASGIApp, state: AppState) -> None:
+    def __init__(self, app: ASGIApp, state: AppState, is_live: Callable[[str], bool]) -> None:
         self.app = app
         self.state = state
+        self.is_live = is_live  # l'id de session est-il encore ouvert côté SDK ?
+        self.open_by_ip: dict[str, set[str]] = {}
+        self.large_body = asyncio.Semaphore(1)
+
+    def _prune(self, ip: str) -> set[str]:
+        ids = {sid for sid in self.open_by_ip.get(ip, ()) if self.is_live(sid)}
+        if ids:
+            self.open_by_ip[ip] = ids
+        else:
+            self.open_by_ip.pop(ip, None)
+        return ids
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and not Headers(scope=scope).get("mcp-session-id"):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if headers.get("mcp-session-id"):
+            outer_send = send
+        else:
+            ip = client_ip(Request(scope))
+            if len(self.open_by_ip) > DEFAULT_MAX_SESSIONS:  # IP dont toutes les sessions sont closes
+                for known in list(self.open_by_ip):
+                    self._prune(known)
             try:
-                self.state.limiter.hit(f"mcp-open:{client_ip(Request(scope))}", *MCP_OPEN_RATE)
+                if len(self._prune(ip)) >= MCP_SESSIONS_PER_IP:
+                    raise ApiError("RATE_LIMITED", f"at most {MCP_SESSIONS_PER_IP} open MCP sessions per address",
+                                   retry_after=60)
+                self.state.limiter.hit(f"mcp-open:{ip}", *MCP_OPEN_RATE)
             except ApiError as err:
                 await error_response(err)(scope, receive, send)
                 return
-        await self.app(scope, receive, send)
+
+            async def outer_send(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    sid = Headers(raw=message.get("headers", [])).get("mcp-session-id")
+                    if sid:
+                        self.open_by_ip.setdefault(ip, set()).add(sid)
+                await send(message)
+
+        length = headers.get("content-length", "")
+        if scope["method"] == "POST" and not (length.isdigit() and int(length) <= MCP_SMALL_BODY_BYTES):
+            async with self.large_body:
+                await self.app(scope, receive, outer_send)
+        else:
+            await self.app(scope, receive, outer_send)
 
 
 def build_mcp(state: AppState) -> FastMCP[Any]:
@@ -184,21 +229,20 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         return help_text(state.settings)
 
     @mcp.tool(description="Inscription, étape 1 : code d'invitation + pseudo → 20 tâches à résoudre en 30 s.")
-    async def register_start(invite_code: str, handle: str, ctx: Ctx) -> dict[str, Any]:
+    async def register_start(invite_code: str, handle: Handle, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
             limit_register(state, ip(ctx))
             state.disk.ensure_writable()
             # le service valide invite_code (^[A-Za-z0-9_-]{1,32}$, comme REST) : pas de troncature ici
-            return await IdentityService(db, state).start_registration(invite_code, handle[:32])
+            return await IdentityService(db, state).start_registration(invite_code, handle)
 
     @mcp.tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
-    async def register_complete(challenge_id: str, answers: list[str],
-                                ctx: Ctx) -> dict[str, Any]:
+    async def register_complete(challenge_id: str, answers: Answers, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
             limit_register_complete(state, ip(ctx))
             state.disk.ensure_writable()
             agent, phrase = await IdentityService(db, state).complete_registration(
-                challenge_id, [a[:200] for a in answers[:40]])  # challenge_id validé par le service
+                challenge_id, answers)  # challenge_id validé par le service
             return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase,
                     "warning": PHRASE_WARNING}
 

@@ -58,5 +58,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(forum_router)
     app.include_router(vault_router)
     app.include_router(admin_router)
-    app.mount("/mcp", SessionOpenLimit(mcp_app, state))  # /mcp/ ; NoStoreMiddleware et InternalGuardMiddleware l'enveloppent aussi
+    is_live = mcp.session_manager._server_instances.__contains__  # sessions MCP encore ouvertes (SDK)
+    app.mount("/mcp", SessionOpenLimit(mcp_app, state, is_live))  # /mcp/ ; NoStoreMiddleware et InternalGuardMiddleware l'enveloppent aussi
     return app
