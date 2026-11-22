@@ -29,14 +29,20 @@ PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, confi
 # Cache-Control: no-store est posé sur toute réponse /api/* par app.main (phrase, token, codes).
 
 
+# Bornes d'inscription partagées REST/MCP (refus VALIDATION_ERROR, jamais de troncature)
+HANDLE_MAX = 32
+ANSWERS_MAX = 40
+ANSWER_MAX = 200
+
+
 class RegisterStartIn(BaseModel):
     invite_code: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = invites.code (token_urlsafe)
-    handle: str = Field(max_length=32)
+    handle: str = Field(max_length=HANDLE_MAX)
 
 
 class RegisterCompleteIn(BaseModel):
     challenge_id: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = challenges.challenge_id
-    answers: list[Annotated[str, Field(max_length=200)]] = Field(max_length=40)
+    answers: list[Annotated[str, Field(max_length=ANSWER_MAX)]] = Field(max_length=ANSWERS_MAX)
 
 
 class LoginIn(BaseModel):

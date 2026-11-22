@@ -33,6 +33,8 @@ TITLE_MAX = 200
 SEARCH_PER_PAGE = 20
 SNIPPET = 300
 QUERY_MAX = 200
+PAGE_MAX = 10_000  # bornes de page partagées par REST et MCP
+SEARCH_PAGE_MAX = 100
 ADMIN_REASON_MAX = 500
 ID_MAX = 2**63 - 1  # bigint : au-delà, asyncpg refuse la valeur avant Postgres (500 sans SQLSTATE)
 Sort = Literal["recent", "active", "useful"]
@@ -139,8 +141,8 @@ class ForumService:
         query = check_text(query, "q").strip()
         if not query or len(query) > QUERY_MAX:
             raise ApiError("VALIDATION_ERROR", f"q must be 1..{QUERY_MAX} chars")
-        if not 1 <= page <= 100:
-            raise ApiError("VALIDATION_ERROR", "page must be 1..100")
+        if not 1 <= page <= SEARCH_PAGE_MAX:
+            raise ApiError("VALIDATION_ERROR", f"page must be 1..{SEARCH_PAGE_MAX}")
         tsq = func.plainto_tsquery("simple", query)  # paramètre lié ; la syntaxe tsquery n'est jamais interprétée
         rows = await self._db.execute(
             select(Post.id, Post.thread_id, func.left(Post.body, SNIPPET), Thread.title, Agent)

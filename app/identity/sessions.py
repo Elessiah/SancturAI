@@ -25,6 +25,9 @@ class SessionStore:
         self._sessions: dict[str, Session] = {}
         self._mcp: dict[str, str] = {}  # mcp_session_id -> token
         self._mcp_by_token: dict[str, set[str]] = {}  # index inverse (révocation O(1))
+        # session MCP dont le token a été révoqué/expiré -> échéance : SESSION_EXPIRED (comme REST), pas
+        # UNAUTHENTICATED ; borné par les liaisons d'un TTL, purgé avec les sessions
+        self._mcp_revoked: dict[str, float] = {}
         self._by_agent: dict[str, dict[str, None]] = {}  # agent -> tokens (ordre de création)
 
     def create(self, agent_id: str, vault_key: bytes, path_key: bytes) -> tuple[str, float]:
@@ -56,6 +59,7 @@ class SessionStore:
                     del self._by_agent[session.agent_id]
         for mcp_id in self._mcp_by_token.pop(token, ()):
             self._mcp.pop(mcp_id, None)
+            self._mcp_revoked[mcp_id] = self._clock() + self._ttl
 
     def revoke_agent(self, agent_id: str) -> None:
         for token in list(self._by_agent.get(agent_id, ())):
@@ -74,6 +78,7 @@ class SessionStore:
                     # on efface ses clés au lieu de les laisser vivre jusqu'au TTL.
                     del self._mcp_by_token[previous]
                     self.revoke(previous)
+        self._mcp_revoked.pop(mcp_session_id, None)
         self._mcp[mcp_session_id] = token
         self._mcp_by_token.setdefault(token, set()).add(mcp_session_id)
 
@@ -84,9 +89,28 @@ class SessionStore:
             return None
         return token
 
+    def drop_dead_mcp(self, is_live: Callable[[str], bool]) -> None:
+        """Sessions MCP closes (DELETE, inactivité) : un token lié par login n'est joignable que par elles,
+        donc ses clés sont effacées dès que toutes ses sessions MCP sont closes, au lieu de vivre jusqu'au TTL."""
+        for mcp_id in [m for m in self._mcp if not is_live(m)]:
+            token = self._mcp.pop(mcp_id)
+            siblings = self._mcp_by_token.get(token)
+            if siblings is not None:
+                siblings.discard(mcp_id)
+                if not siblings:
+                    del self._mcp_by_token[token]
+                    self.revoke(token)
+        for mcp_id in [m for m in self._mcp_revoked if not is_live(m)]:
+            del self._mcp_revoked[mcp_id]  # id mort : plus aucune requête ne peut le présenter
+
+    def mcp_expired(self, mcp_session_id: str) -> bool:
+        """La session MCP a-t-elle porté un token désormais révoqué ou expiré ?"""
+        return self._mcp_revoked.get(mcp_session_id, 0.0) > self._clock()
+
     def clear(self) -> None:
         self._sessions.clear()
         self._mcp.clear()
+        self._mcp_revoked.clear()
         self._mcp_by_token.clear()
         self._by_agent.clear()
 
@@ -94,3 +118,5 @@ class SessionStore:
         now = self._clock()
         for token in [t for t, s in self._sessions.items() if s.expires_at <= now]:
             self.revoke(token)
+        for mcp_id in [m for m, deadline in self._mcp_revoked.items() if deadline <= now]:
+            del self._mcp_revoked[mcp_id]
