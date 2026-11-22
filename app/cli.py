@@ -8,6 +8,7 @@ from app.errors import ApiError
 from app.forum.service import ForumService
 from app.identity.service import IdentityService
 from app.state import AppState
+from app.tribunal.ban import admin_ban
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -17,6 +18,9 @@ def _parser() -> argparse.ArgumentParser:
     remove = sub.add_parser("forum-remove", help="retrait légal d'un post (ou du fil, si premier post)")
     remove.add_argument("post_id", type=int)
     remove.add_argument("--reason", required=True)
+    ban = sub.add_parser("ban", help="bannissement immédiat sans procès (purge du compte)")
+    ban.add_argument("handle")
+    ban.add_argument("reason")
     return parser
 
 
@@ -33,6 +37,8 @@ async def run_cli(argv: list[str], state: AppState) -> int:
                 out = await ForumService(db, state).admin_remove(args.post_id, args.reason)
                 scope = f"thread {out['thread_id']}" if out["thread_deleted"] else f"in thread {out['thread_id']}"
                 print(f"removed: post {out['post_id']} ({scope})")
+            elif args.command == "ban":
+                print(f"banned: {await admin_ban(db, state, args.handle, args.reason)}")
         except ApiError as exc:
             print(f"{exc.code}: {exc.message}", file=sys.stderr)
             return 1

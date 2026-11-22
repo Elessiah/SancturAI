@@ -222,6 +222,11 @@ class VaultService:
     async def delete_raw(self, agent_id: str, pid: str) -> None:
         await self._delete_by_id(agent_id, check_path_id(pid), pid)
 
+    async def purge(self, agent_id: str) -> None:
+        """Efface tout le vault d'un agent (bannissement, spec visibilité §4.5). Les blobs chiffrés vivent dans
+        les lignes (`content_enc`, `path_enc`) : supprimer les lignes ne laisse aucun orphelin. Ne commit pas."""
+        await self._db.execute(delete(VaultFile).where(VaultFile.agent_id == agent_id))
+
     async def list_raw(self, agent_id: str) -> dict[str, Any]:
         rows = await self._list_rows(agent_id)
         files = [{"path_id": pid, "path_enc": base64.b64encode(pe).decode(), "size": size,

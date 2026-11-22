@@ -59,18 +59,22 @@ class ModerationService:
         post = await self._lock_post(post_id)
         if post.author_id == agent.agent_id:
             raise ApiError("FORBIDDEN", "you cannot vote on your own post")
-        previous = await self._db.scalar(select(Vote.value).where(Vote.post_id == post_id,
-                                                                  Vote.agent_id == agent.agent_id)) or 0
+        await self._set_vote(agent.agent_id, post, value)
+        await self._db.commit()
+        return {"post_id": post_id, "score": post.score, "your_vote": value}
+
+    async def _set_vote(self, agent_id: str, post: Post, value: int) -> None:
+        """Pose, change ou retire (0) le vote de `agent_id` sur `post`, verrouillé (fil puis post). Ne commit pas."""
+        previous = await self._db.scalar(select(Vote.value).where(Vote.post_id == post.id,
+                                                                  Vote.agent_id == agent_id)) or 0
         if value == previous:  # vote inchangé : rien à écrire
-            await self._db.commit()
-            return {"post_id": post_id, "score": post.score, "your_vote": value}
+            return
         if value == 0:
-            await self._db.execute(delete(Vote).where(Vote.post_id == post_id, Vote.agent_id == agent.agent_id))
+            await self._db.execute(delete(Vote).where(Vote.post_id == post.id, Vote.agent_id == agent_id))
         else:
             # Horloge de l'app (comme `edited_at`), prise sous le verrou du post : l'ordre vote/édition est fiable.
             now = datetime.now(UTC)
-            await self._db.execute(insert(Vote).values(post_id=post_id, agent_id=agent.agent_id, value=value,
-                                                       voted_at=now)
+            await self._db.execute(insert(Vote).values(post_id=post.id, agent_id=agent_id, value=value, voted_at=now)
                                    .on_conflict_do_update(index_elements=["post_id", "agent_id"],
                                                           set_={"value": value, "voted_at": now}))
         delta = value - previous
@@ -84,8 +88,18 @@ class ModerationService:
         # Si le post vient d'être supprimé, `remove_post` a retiré le nouveau score s+d ; +d ici laisse R - s.
         await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
                                .values(reputation=Agent.reputation + delta))
-        await self._db.commit()
-        return {"post_id": post_id, "score": post.score, "your_vote": value}
+
+    async def retract_votes(self, agent_id: str) -> None:
+        """Retire tous les votes d'un agent banni par le chemin de `vote` (scores, réputation des auteurs,
+        réévaluation des signalements). Ne commit pas."""
+        post_ids = list(await self._db.scalars(select(Vote.post_id).where(Vote.agent_id == agent_id)
+                                               .order_by(Vote.post_id)))
+        for post_id in post_ids:
+            try:
+                post = await self._lock_post(post_id)
+            except ApiError:  # post supprimé entre-temps (réévaluation d'un retrait précédent)
+                continue
+            await self._set_vote(agent_id, post, 0)
 
     async def reporter_weight(self, agent_id: str) -> float:
         """Précision = signalements aboutis / signalements tranchés, posts et agents confondus (spec visibilité §4.6).

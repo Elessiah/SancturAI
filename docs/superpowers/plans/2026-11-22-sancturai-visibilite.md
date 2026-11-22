@@ -2638,7 +2638,7 @@ git commit -m "feat(tribunal): third deleted post opens a trial; drop the 7-day 
   - `app.tribunal.ban.admin_ban(db, state, handle: str, reason: str) -> str` (commit ; renvoie l'ancien pseudo)
   - CLI `sancturai ban <handle> <reason>` → `banned: <pseudo>`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/tribunal/test_ban.py` :
 
@@ -2771,12 +2771,12 @@ async def test_ban_command(state: AppState, capsys: pytest.CaptureFixture[str]) 
     assert "NOT_FOUND" in capsys.readouterr().err
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/tribunal/test_ban.py tests/test_cli.py`
 Expected: FAIL (`ModuleNotFoundError: No module named 'app.tribunal.ban'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/forum/moderation.py` : remplacer `vote` par `vote` + `_set_vote` + `retract_votes` :
 
@@ -2954,14 +2954,14 @@ et dans `run_cli` :
                 print(f"banned: {await admin_ban(db, state, args.handle, args.reason)}")
 ```
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/tribunal tests/forum tests/test_cli.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/tribunal/ban.py app/forum/moderation.py app/cli.py tests/tribunal/test_ban.py tests/test_cli.py
