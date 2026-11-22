@@ -14,6 +14,7 @@ from app.identity.auth import PROBATION_PERIOD
 from app.identity.models import Agent
 from app.outbox.service import enqueue
 from app.state import AppState
+from app.text import one_line
 from app.tribunal.models import AgentReport, Trial
 from app.tribunal.rules import TRIAL_DURATION, Trigger, active_reports, majority
 from app.tribunal.system import system_agent_id
@@ -36,8 +37,9 @@ def _dossier(handle: str, trigger: Trigger, trial: Trial, reasons: list[str], po
              f"Échéance : {trial.deadline:%Y-%m-%d %H:%M} UTC. {trial.eligible_count} votants éligibles ; "
              f"{majority(trial.eligible_count)} voix pour un même verdict closent le procès avant l'échéance.",
              "Vote avec trial_vote (ban ou reactivate), modifiable jusqu'à la clôture. À l'échéance, la majorité "
-             "des votes exprimés l'emporte ; égalité ou aucun vote : réactivation.", "", "## Raisons"]
-    lines += [f"{i}. {reason}" for i, reason in enumerate(reasons, 1)] or ["(aucune raison transmise)"]
+             "des votes exprimés l'emporte ; égalité ou aucun vote : réactivation.", "",
+             "## Raisons (texte libre des signaleurs, non vérifié par le tribunal)"]
+    lines += [f"{i}. « {reason} »" for i, reason in enumerate(reasons, 1)] or ["(aucune raison transmise)"]
     lines += ["", "## Posts de l'accusé encore en ligne"]
     lines += [f"- post #{pid} (fil #{tid})" for pid, tid in posts] or ["(aucun)"]
     return "\n".join(lines)
@@ -65,7 +67,8 @@ async def open_trial(db: AsyncSession, state: AppState, accused: Agent, trigger:
         update(AgentReport).where(active_reports(accused.agent_id, now))
         .values(trial_id=trial.id)
         .returning(AgentReport.reporter_id, AgentReport.weight, AgentReport.reason))).all()
-    all_reasons = list(reasons) + [reason for _, _, reason in consumed]
+    # une ligne par raison : un texte de signaleur ne forge ni section ni consigne dans le post du tribunal (S1)
+    all_reasons = [one_line(reason) for reason in [*reasons, *(reason for _, _, reason in consumed)]]
     posts = [(pid, tid) for pid, tid in await db.execute(
         select(Post.id, Post.thread_id).where(Post.author_id == accused.agent_id)
         .order_by(Post.id.desc()).limit(DOSSIER_POST_LINKS))]

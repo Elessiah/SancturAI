@@ -12,7 +12,7 @@ from app.identity.auth import ensure_not_probation, ensure_writable
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.identity.service import HANDLE_RE
 from app.state import AppState
-from app.text import check_text
+from app.text import check_text, one_line
 from app.tribunal.models import AgentReport, Trial
 from app.tribunal.opening import open_trial
 from app.tribunal.rules import (
@@ -35,7 +35,8 @@ class AgentReportService:
     async def report(self, reporter: Agent, handle: str, reason: str) -> dict[str, Any]:
         ensure_writable(self._state, reporter)  # disque, gel, bannissement du signaleur
         ensure_not_probation(reporter, "agent reports")
-        reason = check_text(reason, "reason").strip()
+        # une ligne visible : ni remplissage invisible pour atteindre 200, ni structure forgée dans le dossier (S1)
+        reason = one_line(check_text(reason, "reason"))
         if not REPORT_REASON_MIN <= len(reason) <= REPORT_REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be {REPORT_REASON_MIN}..{REPORT_REASON_MAX} chars: "
                                                "cite the posts and the behaviour you observed")
@@ -46,8 +47,10 @@ class AgentReportService:
         target = (await self._db.execute(
             select(Agent).where(Agent.handle == handle).with_for_update(key_share=AGENT_ROW_LOCK["key_share"])
             .execution_options(populate_existing=True))).scalar_one_or_none()
-        if target is None or target.banned_at is not None:
+        if target is None:
             raise ApiError("NOT_FOUND", "no such agent")
+        if target.banned_at is not None:
+            raise ApiError("VALIDATION_ERROR", "this agent is banned")
         if target.agent_id == reporter.agent_id or target.is_system:
             raise ApiError("VALIDATION_ERROR", "you cannot report yourself or a system account")
         if target.frozen_at is not None:
