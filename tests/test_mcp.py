@@ -148,7 +148,7 @@ async def test_mcp_string_args_capped_like_rest(live_url: str, state: AppState) 
             ("forum_report", {"post_id": 1, "reason": ""}),
             ("admin_message_send", {"text": big}),
         ]
-        near_cap = "a" * 1_000_000  # corps MCP ≤ 1 Mio (décidé par l'utilisateur) : au-delà, API REST du vault
+        near_cap = "a" * 250_000  # corps MCP ≤ 256 Kio (décidé par l'utilisateur) : au-delà, API REST du vault
         assert (await call(s, "vault_write", path="/big.md", content=near_cap))["size"] == len(near_cap)
         for tool, args in cases:
             r = await call(s, tool, **args)
@@ -234,7 +234,7 @@ async def test_mcp_session_cap_sized_for_container(state: AppState) -> None:
 
     mcp = build_mcp(state)
     mcp.streamable_http_app()
-    assert MCP_MAX_SESSIONS == 1000 and mcp.session_manager.max_sessions == MCP_MAX_SESSIONS
+    assert MCP_MAX_SESSIONS == 300 and mcp.session_manager.max_sessions == MCP_MAX_SESSIONS
     assert MCP_IDLE_TIMEOUT == 1800 and mcp.session_manager.session_idle_timeout == MCP_IDLE_TIMEOUT
 
 
@@ -335,36 +335,13 @@ async def test_dict_tools_return_payload_once(live_url: str, state: AppState) ->
         assert result.structuredContent is None and len(result.content) == 1
 
 
-async def test_tool_keeps_body_budget_after_client_disconnect(live_url: str, app: Any,
-                                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.errors import ApiError
-    from app.identity.service import IdentityService
-
-    budget = app.state.body_budget
-    gate = asyncio.Event()
-    entered = asyncio.Event()
-
-    async def blocked(self: Any, phrase: str) -> Any:
-        entered.set()
-        await gate.wait()
-        raise ApiError("INVALID_PHRASE")
-
-    monkeypatch.setattr(IdentityService, "login", blocked)
-    headers = {**MCP_HEADERS, "X-Real-IP": "192.0.2.93"}
+async def test_dense_mcp_body_rejected_before_the_sdk(live_url: str) -> None:
+    headers = {**MCP_HEADERS, "X-Real-IP": "192.0.2.94"}
     async with httpx.AsyncClient(base_url=live_url) as c:
         r = await c.post("/mcp/", json=INIT, headers=headers)
+        assert r.status_code == 200  # initialize légitime : admis
         headers = {**headers, "Mcp-Session-Id": r.headers["mcp-session-id"], "Mcp-Protocol-Version": "2025-06-18"}
-        await c.post("/mcp/", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers)
-        call_body = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                     "params": {"name": "login", "arguments": {"phrase": "x" * 900}}}
-        with pytest.raises(httpx.ReadTimeout):
-            await c.post("/mcp/", json=call_body, headers=headers, timeout=0.5)
-    await asyncio.wait_for(entered.wait(), 2)
-    await asyncio.sleep(0.3)  # le transport a vu la déconnexion ; l'outil tourne encore
-    assert budget.used > 0
-    gate.set()
-    for _ in range(50):
-        if budget.used == 0:
-            break
-        await asyncio.sleep(0.02)
-    assert budget.used == 0
+        dense = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "help", "arguments": {}, "junk": [{}] * 20_000}}
+        r = await c.post("/mcp/", json=dense, headers=headers)
+        assert r.status_code == 422 and r.json()["error"] == "VALIDATION_ERROR"

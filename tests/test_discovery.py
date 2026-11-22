@@ -50,4 +50,6 @@ def test_help_text_documents_mcp_transport_limits() -> None:
     assert f"{MCP_SESSIONS_PER_IP} sessions ouvertes" in text and f"{MCP_OPEN_RATE[0]} ouvertures" in text
     assert "JSON-RPC" in text and "texte brut" in text  # erreurs de transport hors format
     assert "16 Mio" in text and "128 Kio" in text and "64 Kio" in text
-    assert "1 Mio" in text and "base64" in text  # MCP : corps ≤ 1 Mio, gros fichiers par l'API REST
+    from app.middleware import MCP_BODY_BYTES
+
+    assert f"{MCP_BODY_BYTES // 1024} Kio par requête MCP" in text and "base64" in text  # gros fichiers : REST

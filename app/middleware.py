@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import anyio
 from starlette.datastructures import Headers
@@ -73,34 +74,51 @@ MIB = 1024 * KIB
 # - écriture vault REST (PUT /api/vault/..., by-id) : fichier de 5 Mo en base64 ≈ 6,7 Mo ; en utf8 un texte courant
 #   (≤ 3 octets échappés par octet) tient, un contenu riche en contrôles non : le guide conseille base64 ;
 #   même valeur que nginx (client_max_body_size 16m) ;
-# - /mcp : 1 Mio (décidé par l'utilisateur) ; vault_write en MCP pour les petits fichiers, l'API REST au-delà ;
+# - /mcp : 256 Kio (décidé par l'utilisateur) ; vault_write en MCP pour les petits fichiers, l'API REST au-delà ;
 # - forum : corps ≤ 32 Ko en octets, soit ≤ 8 192 emoji × 12 ≈ 96 Kio échappés, + titre (un corps > 60 % de < > &
 #   envoyé par un client Go peut dépasser : cas accepté) ;
 # - ailleurs (login, inscription, messages admin ≤ 4 100 car. × 12 ≈ 48 Kio, déplacements...) : 64 Kio.
 MAX_UPLOAD_BYTES = 16 * MIB
-MCP_BODY_BYTES = MIB
+MCP_BODY_BYTES = 256 * KIB
 FORUM_BODY_BYTES = 128 * KIB
 DEFAULT_BODY_BYTES = 64 * KIB
-# Budget global des corps en vol (REST + MCP), compté sur la longueur déclarée AVANT tout parsing.
-# Conteneur 896 Mio, 1 worker : socle Python/FastAPI/SQLAlchemy/SDK MCP ≈ 150 Mio ; Argon2 2 × 64 Mio = 128 Mio ;
-# 1 000 sessions MCP × ~60 Kio de tas (≈ 120 Mio de RSS) → ≈ 400 Mio, reste ≈ 490 Mio.
-# Coût mesuré d'un corps dense en objets ([{},{},…]) : REST, json.loads ≈ 24 × + le corps brut = 25 × ; MCP, le SDK
-# garde l'arbre json.loads ET en fait une copie model_dump avant validation = 48 × + le corps = 49 × (≈ 2 × REST),
-# d'où MCP_BODY_WEIGHT : un corps /mcp est compté double. Pire cas : 25 × 17 Mio ≈ 425 Mio (REST) ou
-# 49 × 8,5 Mio ≈ 417 Mio (MCP), < 490 Mio ; la marge (≈ 65 Mio) couvre une notification MCP en cours de copie
-# (≤ 49 Mio, voir BodyLease). 17 Mio = un corps REST maximal (16 Mio) + 1 Mio de petits corps simultanés.
-BODY_BUDGET_BYTES = 17 * MIB
-MCP_BODY_WEIGHT = 2
+# Filtre de densité (décidé par l'utilisateur, étendu à toutes les routes) : `json.loads` d'un corps dense en objets
+# ([{},{},…]) coûte ≈ 24 × sa taille, et le SDK MCP en garde l'arbre ET une copie model_dump (≈ 48 ×) jusqu'au
+# message suivant de la session, donc jusqu'à 30 min après la requête. Les messages légitimes portent leur volume
+# dans des chaînes : on compte { [ , : hors chaînes, et au-delà de ce seuil le corps est refusé avant tout parsing.
+# Messages légitimes les plus structurés : initialize avec toutes les capacités = 60, register_complete à 40
+# réponses = 60 (tests/test_body_limit.py) → seuil à plus de 15 × de marge. Un corps admis coûte alors ≈ sa taille
+# (chaînes) plus au plus 1 000 petits objets, sur REST comme sur MCP.
+MAX_JSON_STRUCTURE = 1000
+# Budget global des corps en vol (REST + MCP), compté sur la longueur déclarée AVANT tout parsing : il borne la
+# concurrence (nginx admet 256 connexions × 16 Mio).
+BODY_BUDGET_BYTES = 17 * MIB  # un corps REST maximal (16 Mio) + 1 Mio de petits corps simultanés
+# Pire cas mémoire, conteneur 896 Mio, 1 worker :
+#   socle Python/FastAPI/SQLAlchemy/SDK MCP ≈ 150 Mio ; Argon2 2 × 64 Mio = 128 Mio ;
+#   corps en vol : ≈ 5 × le budget (tampon ici, copie du framework, chaîne JSON, base64 décodé, chiffré)
+#   = 5 × 17 Mio ≈ 85 Mio ;
+#   sessions MCP inactives : état ~60 Kio de tas (≈ 120 Kio de RSS) + dernier message gardé par le SDK
+#   (corps brut, chaîne json.loads et copie model_dump ≈ 4 × 256 Kio = 1 Mio) → 300 × 1,12 Mio ≈ 336 Mio ;
+#   total ≈ 700 Mio < 896 Mio. Un outil MCP qui survit à son échange HTTP (client parti) garde ≤ 1 Mio
+#   d'arguments ; leur nombre est borné par AGENT_RATE (60/min, comptes sur invitation) et la durée d'un outil
+#   (pool_timeout 30 s) : quelques dizaines de Mio au pire par agent, couverts par la marge ≈ 196 Mio.
 BODY_BUDGET_WAIT = 10.0  # attente bornée d'une place dans le budget, puis SERVER_BUSY
-# Détention bornée de l'échange HTTP (lecture du corps comprise) : sans borne, un client qui envoie son corps ou lit
-# sa réponse au compte-gouttes (sans nginx) garderait sa réservation. Un outil MCP encore en cours garde, lui, la
-# sienne (BodyLease) jusqu'à sa fin : la mémoire qu'il tient reste comptée.
+# Détention bornée de l'échange (lecture du corps comprise) : sans borne, un client qui envoie son corps ou lit sa
+# réponse au compte-gouttes (sans nginx) garderait sa réservation.
 BODY_HOLD = 60.0
 BUSY_RETRY_AFTER = 5
-BODY_LEASE_KEY = "sancturai.body_lease"  # clé du scope ASGI (vue par l'outil MCP via la requête Starlette)
-MCP_TOO_LARGE_HINT = (f"Une requête MCP est limitée à {MCP_BODY_BYTES // MIB} Mio : pour un fichier plus gros "
+MCP_TOO_LARGE_HINT = (f"Une requête MCP est limitée à {MCP_BODY_BYTES // KIB} Kio : pour un fichier plus gros "
                       "(jusqu'à la limite du vault), utilise l'API REST : PUT /api/vault/<chemin>.")
-assert MAX_UPLOAD_BYTES <= BODY_BUDGET_BYTES and MCP_BODY_BYTES * MCP_BODY_WEIGHT <= BODY_BUDGET_BYTES
+DENSE_HINT = (f"Corps JSON trop structuré (plus de {MAX_JSON_STRUCTURE} objets, listes ou champs) : mets le contenu "
+              "dans une chaîne (encoding base64 pour un fichier).")
+assert MAX_UPLOAD_BYTES <= BODY_BUDGET_BYTES
+_JSON_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+
+
+def json_structure(body: bytes) -> int:
+    """Nombre de { [ , : hors chaînes JSON (échappements compris ; une chaîne non fermée compte comme structure)."""
+    bare = _JSON_STRING.sub(b"", body)
+    return bare.count(b"{") + bare.count(b"[") + bare.count(b",") + bare.count(b":")
 
 
 def _is_mcp(path: str) -> bool:
@@ -140,36 +158,9 @@ class ByteBudget:
         self._freed.set()
 
 
-class BodyLease:
-    """Réservation d'un corps de requête, rendue au budget quand son dernier détenteur la lâche : l'échange HTTP,
-    et un outil MCP (SancturMCP.call_tool) qui garde les arguments parsés après la fin de l'échange (client
-    déconnecté, borne BODY_HOLD) ; sinon des appels en file (verrou d'agent, Argon2) tiendraient leur mémoire hors
-    budget. Une notification MCP (202 puis traitement) n'est pas retenue : sa copie ne dure qu'un instant."""
-
-    def __init__(self, budget: ByteBudget, n: int) -> None:
-        self.budget = budget
-        self.n = n
-        self.holders = 1
-
-    def shrink(self, n: int) -> None:
-        self.budget.release(self.n - n)
-        self.n = n
-
-    def retain(self) -> bool:
-        if self.holders == 0:
-            return False  # déjà rendue
-        self.holders += 1
-        return True
-
-    def release(self) -> None:
-        self.holders -= 1
-        if self.holders == 0:
-            self.budget.release(self.n)
-
-
 class BodyLimitMiddleware:
-    """Couche ASGI la plus externe (avant routage et parsing JSON) : plafond de corps par route (Content-Length
-    refusé d'emblée, corps chunked compté pendant la lecture) et budget global d'octets en vol, REST et MCP."""
+    """Couche ASGI la plus externe, avant routage et parsing JSON : plafond de corps par route (Content-Length refusé
+    d'emblée, corps lu ici en comptant), filtre de densité JSON, budget global d'octets en vol (REST et MCP)."""
 
     def __init__(self, app: ASGIApp, budget_bytes: int = BODY_BUDGET_BYTES, budget: ByteBudget | None = None) -> None:
         self.app = app
@@ -181,51 +172,23 @@ class BodyLimitMiddleware:
             return
         path = _paths(scope)[1]
         cap = body_cap(scope["method"], path)
-        weight = MCP_BODY_WEIGHT if _is_mcp(path) else 1
         headers = Headers(scope=scope)
         length = headers.get("content-length")
         chunked = "transfer-encoding" in headers  # prime sur Content-Length (h11 lit alors en chunked)
         if not chunked and length is not None and not length.isdigit():
             await _reject(ApiError("VALIDATION_ERROR", "invalid Content-Length"), scope, receive, send)
             return
-        declared = cap if chunked else int(length or 0)
-        if declared > cap:
+        reserved = cap if chunked else int(length or 0)
+        if reserved > cap:
             await _too_large(cap, path, scope, receive, send)
             return
-        if declared == 0:  # sans corps (GET, flux SSE) : ni compté ni borné dans le temps
+        if reserved == 0:  # sans corps (GET, flux SSE) : ni compté ni borné dans le temps
             await self.app(scope, receive, send)
             return
-        if not await self.budget.acquire(declared * weight, BODY_BUDGET_WAIT):
+        if not await self.budget.acquire(reserved, BODY_BUDGET_WAIT):
             busy = ApiError("SERVER_BUSY", "too many request bodies in flight", retry_after=BUSY_RETRY_AFTER)
             await _reject(busy, scope, receive, send)
             return
-        lease = BodyLease(self.budget, declared * weight)
-        try:
-            if chunked:
-                await self._held_chunked(lease, cap, path, weight, scope, receive, send)
-            else:
-                await self._held({**scope, BODY_LEASE_KEY: lease}, receive, send)
-        finally:
-            lease.release()
-
-    async def _held_chunked(self, lease: BodyLease, cap: int, path: str, weight: int,
-                            scope: Scope, receive: Receive, send: Send) -> None:
-        """Longueur inconnue : corps lu ici (sous la borne de temps), en comptant, avant d'être confié à l'app."""
-        with anyio.move_on_after(BODY_HOLD):
-            try:
-                body = await _read_capped(receive, cap)
-            except _BodyTooLarge:
-                await _too_large(cap, path, scope, receive, send)
-                return
-            except _ClientGone:
-                return
-            lease.shrink(len(body) * weight)
-            await self._held({**scope, BODY_LEASE_KEY: lease}, _replay(body, receive), send)
-            return
-        slow = ApiError("SERVER_BUSY", "request body took too long", retry_after=BUSY_RETRY_AFTER)
-        await _reject(slow, scope, receive, send)
-
-    async def _held(self, scope: Scope, receive: Receive, send: Send) -> None:
         started = False
 
         async def watched_send(message: Message) -> None:
@@ -233,12 +196,30 @@ class BodyLimitMiddleware:
             started = started or message["type"] == "http.response.start"
             await send(message)
 
-        # Annuler le transport MCP ne coupe que la réponse : l'outil s'exécute dans la tâche de session du SDK.
-        with anyio.move_on_after(BODY_HOLD) as hold:
-            await self.app(scope, receive, watched_send)
-        if hold.cancelled_caught and not started:  # sinon : 500 texte brut d'uvicorn (aucune réponse émise)
-            slow = ApiError("SERVER_BUSY", "request took too long", retry_after=BUSY_RETRY_AFTER)
-            await _reject(slow, scope, receive, send)
+        try:
+            # Une seule borne pour la lecture et l'application ; une seule réponse au plus.
+            # Annuler le transport MCP ne coupe que la réponse : l'outil s'exécute dans la tâche de session du SDK.
+            with anyio.move_on_after(BODY_HOLD) as hold:
+                try:
+                    body = await _read_capped(receive, cap)
+                except _BodyTooLarge:
+                    await _too_large(cap, path, scope, receive, watched_send)
+                    return
+                except _ClientGone:
+                    return
+                if chunked:  # réservation ramenée à la taille réelle
+                    self.budget.release(reserved - len(body))
+                    reserved = len(body)
+                if json_structure(body) > MAX_JSON_STRUCTURE:
+                    dense = ApiError("VALIDATION_ERROR", "request body is too structured", hint=DENSE_HINT)
+                    await _reject(dense, scope, receive, watched_send)
+                    return
+                await self.app(scope, _replay(body, receive), watched_send)
+            if hold.cancelled_caught and not started:  # sinon : 500 texte brut d'uvicorn (aucune réponse émise)
+                slow = ApiError("SERVER_BUSY", "request took too long", retry_after=BUSY_RETRY_AFTER)
+                await _reject(slow, scope, receive, send)
+        finally:
+            self.budget.release(reserved)
 
 
 async def _reject(err: ApiError, scope: Scope, receive: Receive, send: Send) -> None:
@@ -276,7 +257,7 @@ async def _read_capped(receive: Receive, cap: int) -> bytes:
             raise _BodyTooLarge
         chunks.append(chunk)
         if not message.get("more_body", False):
-            return b"".join(chunks)
+            return chunks[0] if len(chunks) == 1 else b"".join(chunks)
 
 
 def _replay(body: bytes, receive: Receive) -> Receive:

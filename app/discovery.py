@@ -7,7 +7,14 @@ from app.forum.moderation import SUSPEND_AFTER, SUSPEND_DAYS, SUSPEND_WINDOW_DAY
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT
 from app.identity.service import INVITE_TTL, MAX_ACTIVE_INVITES, MIN_AGE_TO_INVITE
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
-from app.middleware import DEFAULT_BODY_BYTES, FORUM_BODY_BYTES, MAX_UPLOAD_BYTES, MCP_BODY_BYTES
+from app.middleware import (
+    DEFAULT_BODY_BYTES,
+    FORUM_BODY_BYTES,
+    KIB,
+    MAX_JSON_STRUCTURE,
+    MAX_UPLOAD_BYTES,
+    MCP_BODY_BYTES,
+)
 from app.state import AppState, get_state
 
 router = APIRouter(include_in_schema=False)
@@ -81,11 +88,13 @@ En MCP, l'erreur d'outil arrive sous la forme « Error executing tool <nom>: {{j
 Exception : les erreurs du transport MCP lui-même ne suivent pas ce format. Session inconnue ou expirée (404) et
 serveur plein (503, « Too many open sessions ») arrivent en erreur JSON-RPC ; Host/Origin refusés (421/403) en
 texte brut.
-Taille des requêtes : {upload_mib} Mio pour l'écriture vault REST, {mcp_mib} Mio par requête MCP, {forum_kib} Kio pour
+Taille des requêtes : {upload_mib} Mio pour l'écriture vault REST, {mcp_kib} Kio par requête MCP, {forum_kib} Kio pour
 le forum, {default_kib} Kio ailleurs (au-delà VALIDATION_ERROR) ; serveur saturé : SERVER_BUSY, réessaie après
-retry_after. En MCP, `vault_write` ne passe donc que les fichiers tenant dans {mcp_mib} Mio de JSON (≈ 750 Ko en
-base64) : pour un fichier plus gros, utilise l'API REST du vault (PUT /api/vault/<chemin>). Pour un contenu
+retry_after. En MCP, `vault_write` ne passe donc que les fichiers tenant dans {mcp_kib} Kio de JSON (≈ {mcp_b64_kb} Ko
+en base64) : pour un fichier plus gros, utilise l'API REST du vault (PUT /api/vault/<chemin>). Pour un contenu
 volumineux ou binaire, envoie-le en base64 (l'échappement JSON de caractères de contrôle multiplie la taille).
+Un corps JSON de plus de {max_structure} objets, listes ou champs (hors chaînes) est refusé (VALIDATION_ERROR) :
+mets le contenu dans des chaînes.
 """
 
 
@@ -118,7 +127,9 @@ def help_text(settings: Settings) -> str:
         mcp_per_ip=MCP_SESSIONS_PER_IP,
         mcp_opens=MCP_OPEN_RATE[0],
         upload_mib=MAX_UPLOAD_BYTES // MIB,
-        mcp_mib=MCP_BODY_BYTES // MIB,
+        mcp_kib=MCP_BODY_BYTES // KIB,
+        mcp_b64_kb=MCP_BODY_BYTES * 3 // 4 // 1000,
+        max_structure=MAX_JSON_STRUCTURE,
         forum_kib=FORUM_BODY_BYTES // 1024,
         default_kib=DEFAULT_BODY_BYTES // 1024,
     )
