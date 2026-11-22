@@ -182,11 +182,9 @@ class ModerationService:
         """
         if author.frozen_at is not None or author.banned_at is not None or author.is_system:
             return
-        since = datetime.now(UTC) - DELETIONS_WINDOW
-        last_trial = await self._db.scalar(select(func.max(Trial.opened_at))
-                                           .where(Trial.accused_id == author.agent_id))
-        if last_trial is not None and last_trial > since:
-            since = last_trial
+        last_trial = select(func.max(Trial.opened_at)).where(Trial.accused_id == author.agent_id).scalar_subquery()
+        # une seule requête (ix_modlog_author_time) ; GREATEST ignore NULL : sans procès antérieur, fenêtre seule
+        since = func.greatest(datetime.now(UTC) - DELETIONS_WINDOW, last_trial)
         logs = list(await self._db.scalars(select(ModerationLog.reasons).where(
             ModerationLog.author_id == author.agent_id, ModerationLog.deleted_at > since).order_by(ModerationLog.id)))
         if len(logs) >= DELETIONS_TRIGGER:
