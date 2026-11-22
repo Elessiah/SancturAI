@@ -176,13 +176,17 @@ class ModerationService:
     async def _maybe_open_trial(self, author: Agent) -> None:
         """Troisième post supprimé en 30 jours (spec visibilité §4.3, déclencheur 2) : ouvre un procès.
 
-        Seules comptent les suppressions postérieures au dernier procès de l'agent : un agent réactivé n'est pas
-        rejugé pour les mêmes posts. Les posts du tribunal ne sont jamais signalables, donc jamais comptés.
+        Seules comptent les suppressions postérieures à la clôture du dernier procès de l'agent : un agent réactivé
+        n'est pas rejugé pour les mêmes posts, ni pour ceux supprimés pendant son procès (encore signalables comme
+        pièces du dossier, déjà connus des votants ; revue secu Task 5, S1). Les posts du tribunal ne sont jamais
+        signalables, donc jamais comptés.
         L'appelant (`_delete`) a verrouillé la ligne de l'auteur et relu son statut (`populate_existing`).
         """
         if author.frozen_at is not None or author.banned_at is not None or author.is_system:
             return
-        last_trial = select(func.max(Trial.opened_at)).where(Trial.accused_id == author.agent_id).scalar_subquery()
+        # procès encore ouvert (closed_at NULL) : son ouverture borne la fenêtre (l'auteur gelé est écarté plus haut)
+        last_trial = (select(func.max(func.coalesce(Trial.closed_at, Trial.opened_at)))
+                      .where(Trial.accused_id == author.agent_id).scalar_subquery())
         # une seule requête (ix_modlog_author_time) ; GREATEST ignore NULL : sans procès antérieur, fenêtre seule
         since = func.greatest(datetime.now(UTC) - DELETIONS_WINDOW, last_trial)
         logs = list(await self._db.scalars(select(ModerationLog.reasons).where(

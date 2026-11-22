@@ -113,6 +113,36 @@ async def test_reactivated_agent_is_not_retried_for_old_deletions(client: httpx.
     assert await db.scalar(select(func.count()).select_from(Trial)) == 1
 
 
+async def test_deletions_during_trial_do_not_count_after_reactivation(client: httpx.AsyncClient, state: AppState,
+                                                                       db: AsyncSession) -> None:
+    """Revue secu Task 5, S1 : les posts de l'accusé restent signalables pendant le procès (pièces du dossier) ;
+    leurs suppressions, datées entre ouverture et clôture, ne doivent pas le rejuger dès sa réactivation."""
+    author = await make_agent(state, "during")
+    reporters = [await make_agent(state, f"dur{i}") for i in range(5)]
+    pids = [(await _thread(client, author))[1] for _ in range(5)]
+
+    async def report_all(pid: int) -> None:
+        for rep in reporters:
+            state.limiter.clear()
+            await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "abus"}, headers=rep.headers)
+
+    for pid in pids[:3]:
+        await report_all(pid)
+    assert await db.scalar(select(func.count()).select_from(Trial)) == 1
+    for pid in pids[3:]:  # accusé gelé : ses anciens posts sont encore supprimés pendant le procès
+        await report_all(pid)
+    assert await db.scalar(select(func.count()).select_from(ModerationLog)) == 5
+    await db.execute(update(Trial).values(status="closed", verdict="reactivate", closed_at=datetime.now(UTC),
+                                          closed_by="majority"))
+    await db.execute(update(Agent).where(Agent.agent_id == author.agent_id).values(frozen_at=None))
+    await db.commit()
+    author.token = (await client.post("/api/login", json={"phrase": author.phrase})).json()["session_token"]
+    await _delete_by_reports(client, state, author, reporters)  # 1re suppression après la clôture
+    assert await db.scalar(select(func.count()).select_from(Trial)) == 1
+    agent = await db.get(Agent, author.agent_id, populate_existing=True)
+    assert agent is not None and agent.frozen_at is None
+
+
 async def test_low_precision_counts_only_settled_reports(client: httpx.AsyncClient, state: AppState,
                                                          db: AsyncSession) -> None:
     """M9 (revue batch 2) : précision = aboutis / tranchés ; un signalement en attente (post signalé depuis moins
