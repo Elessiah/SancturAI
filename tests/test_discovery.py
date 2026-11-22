@@ -22,3 +22,10 @@ def test_help_text_uses_public_url() -> None:
     text = help_text(Settings(public_url="https://example.test/"))  # type: ignore[call-arg]
     assert "https://example.test/mcp/" in text
     assert "https://example.test//" not in text
+
+
+def test_help_text_reflects_configured_limits() -> None:
+    text = help_text(Settings(vault_quota_bytes=10 * 1024 * 1024, vault_file_max_bytes=2 * 1024 * 1024,  # type: ignore[call-arg]
+                              vault_max_files=500, session_ttl_seconds=7200))
+    assert "10 Mo au total, 2 Mo par fichier, 500 fichiers" in text
+    assert "(2 h)" in text
