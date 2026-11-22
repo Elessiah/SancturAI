@@ -10,9 +10,9 @@ Base: 5c504b1
 | P4 | perf | minor | app/tribunal/reports.py:75 | active/expired agent-report predicate duplicated across report, open_trial and purge in AgentReportService.report | fixed | 2a43c44 |
 | P5 | perf | minor | app/maintenance.py:34 | expired agent-report purge without matching index in purge_old_rows | wontfix | |
 | P6 | perf | minor | app/maintenance.py:37 | stale log label omitting agent reports in purge_old_rows | fixed | 2a43c44 |
-| S1 | secu | major | app/tribunal/opening.py:71 | reporter-controlled newlines forge sections and instructions in the system-authored dossier in open_trial | fixed | SHA_S |
-| S2 | secu | minor | app/tribunal/reports.py:52 | banned target refused as NOT_FOUND instead of VALIDATION_ERROR (spec §4.1) in AgentReportService.report | fixed | SHA_S |
-| S3 | secu | minor | app/tribunal/reports.py:39 | reason minimum length met with inner whitespace or invisible format chars in AgentReportService.report | fixed | SHA_S |
+| S1 | secu | major | app/tribunal/opening.py:71 | reporter-controlled newlines forge sections and instructions in the system-authored dossier in open_trial | fixed | f6d094a |
+| S2 | secu | minor | app/tribunal/reports.py:52 | banned target refused as NOT_FOUND instead of VALIDATION_ERROR (spec §4.1) in AgentReportService.report | fixed | f6d094a |
+| S3 | secu | minor | app/tribunal/reports.py:39 | reason minimum length met with inner whitespace or invisible format chars in AgentReportService.report | fixed | f6d094a |
 | S4 | secu | minor | app/tribunal/reports.py:36 | reporter freeze committed during the request not re-read under lock in AgentReportService.report | wontfix | |
 | S5 | secu | minor | app/tribunal/opening.py:87 | Discord log truncated at 1800 chars instead of full reasons (spec §4.3) in open_trial | wontfix | |
 
