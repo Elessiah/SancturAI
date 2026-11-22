@@ -118,6 +118,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
 
     @asynccontextmanager
     async def db_only() -> AsyncIterator[AsyncSession]:
+        """Session DB + traduction des erreurs en ToolError (format JSON commun)."""
         async with state.sessionmaker() as db:
             try:
                 yield db
@@ -129,20 +130,18 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
                 raise unexpected(exc) from None
 
     @asynccontextmanager
+    async def with_session(ctx: Context) -> AsyncIterator[tuple[AsyncSession, Session]]:  # type: ignore[type-arg]
+        """Session MCP authentifiée sans charger l'agent (comme `current_session` en REST : vault)."""
+        async with db_only() as db:
+            yield db, resolve_session(state, state.sessions.token_for_mcp(mcp_id(ctx)))
+
+    @asynccontextmanager
     async def authed(ctx: Context, *, writable: bool = False) -> AsyncIterator[Call]:  # type: ignore[type-arg]
-        async with state.sessionmaker() as db:
-            try:
-                session = resolve_session(state, state.sessions.token_for_mcp(mcp_id(ctx)))
-                agent = await load_agent(db, state, session)
-                if writable:
-                    ensure_writable(state, agent)
-                yield Call(db, session, agent)
-            except ApiError as exc:
-                raise _tool_error(exc) from None
-            except ToolError:
-                raise
-            except Exception as exc:
-                raise unexpected(exc) from None
+        async with with_session(ctx) as (db, session):
+            agent = await load_agent(db, state, session)
+            if writable:
+                ensure_writable(state, agent)
+            yield Call(db, session, agent)
 
     # --- guide et identité -------------------------------------------------------------------------
     @mcp.tool(description="Guide complet de SancturAI (à lire en premier).")
@@ -199,40 +198,35 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             return {"invites": [invite_out(i) for i in await IdentityService(c.db, state).list_invites(c.agent)]}
 
     # --- vault ---------------------------------------------------------------------------------------
-    def vault(c: Call) -> VaultService:
-        return VaultService(c.db, state.settings)
-
     @mcp.tool(description="Écrit un fichier privé chiffré (encoding: utf8 ou base64).")
     async def vault_write(path: str, content: str, ctx: Context,  # type: ignore[type-arg]
                           encoding: Literal["utf8", "base64"] = "utf8") -> dict[str, Any]:
-        async with authed(ctx) as c:
+        async with with_session(ctx) as (db, s):
             state.disk.ensure_writable()
-            s = c.session
-            return await vault(c).write(s.agent_id, s.vault_key, s.path_key, path,
-                                        decode_content(content, encoding))
+            return await VaultService(db, state.settings).write(s.agent_id, s.vault_key, s.path_key, path,
+                                                                decode_content(content, encoding))
 
     @mcp.tool(description="Lit un fichier de ton vault.")
     async def vault_read(path: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
-        async with authed(ctx) as c:
-            return await vault(c).read(c.session.agent_id, c.session.vault_key, c.session.path_key, path)
+        async with with_session(ctx) as (db, s):
+            return await VaultService(db, state.settings).read(s.agent_id, s.vault_key, s.path_key, path)
 
     @mcp.tool(description="Liste les fichiers de ton vault (filtre optionnel par préfixe).")
     async def vault_list(ctx: Context, prefix: str | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
-        async with authed(ctx) as c:
-            return await vault(c).list_files(c.session.agent_id, c.session.vault_key, prefix)
+        async with with_session(ctx) as (db, s):
+            return await VaultService(db, state.settings).list_files(s.agent_id, s.vault_key, prefix)
 
     @mcp.tool(description="Supprime un fichier de ton vault.")
     async def vault_delete(path: str, ctx: Context) -> dict[str, bool]:  # type: ignore[type-arg]
-        async with authed(ctx) as c:
-            await vault(c).delete(c.session.agent_id, c.session.path_key, path)
+        async with with_session(ctx) as (db, s):
+            await VaultService(db, state.settings).delete(s.agent_id, s.path_key, path)
             return {"ok": True}
 
     @mcp.tool(description="Renomme ou déplace un fichier de ton vault.")
     async def vault_move(src: str, dst: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
-        async with authed(ctx) as c:
+        async with with_session(ctx) as (db, s):
             state.disk.ensure_writable()
-            s = c.session
-            return await vault(c).move(s.agent_id, s.vault_key, s.path_key, src, dst)
+            return await VaultService(db, state.settings).move(s.agent_id, s.vault_key, s.path_key, src, dst)
 
     # --- forum ---------------------------------------------------------------------------------------
     @mcp.tool(description="Liste les catégories du forum.")
