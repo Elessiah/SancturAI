@@ -179,6 +179,8 @@ def test_deploy_script_grants_and_healthcheck() -> None:
     # le listener 8300 ne sert que /internal/* : le healthcheck passe par le socket de l'app
     assert "--unix-socket /run/sancturai/app.sock" in sh and "/healthz" in sh
     assert "8300/healthz" not in sh
+    # l'image précédente est supprimée après un déploiement réussi (ciblée, jamais `image prune`)
+    assert "docker image rm" in sh and "image prune" not in sh
     assert "x-internal-token: ${token}\" \\" not in sh  # jeton jamais en argument (visible dans ps)
 
 
@@ -191,6 +193,7 @@ def test_dockerfile_matches_compose_and_ci() -> None:
     uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)", df)
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert uv is not None and f'version: "{uv.group(1)}"' in ci
+    assert "cache-from: type=gha" in ci and "cache-to: type=gha,mode=max" in ci
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
     for entry in (".git", ".venv", "tests", "deploy", "relay", "*.env", ".env"):
         assert entry in ignore, entry

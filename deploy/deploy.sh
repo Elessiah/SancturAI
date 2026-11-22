@@ -19,6 +19,9 @@ notify() {
     -d "{\"kind\":\"log\",\"text\":\"$1\"}" >/dev/null || true
 }
 
+# Image précédente : devenue sans étiquette après le pull, elle est supprimée en fin de déploiement
+# (sinon chaque déploiement laisse ~200 Mo sur le disque du Pi). Ciblée : on ne touche pas aux autres images.
+old_image_id=$(docker image inspect -f '{{.Id}}' "${SANCTURAI_IMAGE}" 2>/dev/null || true)
 docker compose pull
 docker compose up -d --wait db
 docker compose run --rm --no-deps app alembic upgrade head
@@ -29,6 +32,10 @@ docker compose up -d app
 # Le listener 127.0.0.1:8300 ne sert que /internal/* : le healthcheck interroge le socket de l'app.
 for _ in $(seq 1 30); do
   if curl -fsS -m 2 --unix-socket /run/sancturai/app.sock http://localhost/healthz >/dev/null; then
+    new_image_id=$(docker image inspect -f '{{.Id}}' "${SANCTURAI_IMAGE}")
+    if [ -n "${old_image_id}" ] && [ "${old_image_id}" != "${new_image_id}" ]; then
+      docker image rm "${old_image_id}" >/dev/null 2>&1 || true
+    fi
     notify "Déploiement réussi : ${SANCTURAI_IMAGE}"
     echo "OK"
     exit 0

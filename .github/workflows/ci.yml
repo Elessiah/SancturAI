@@ -74,6 +74,9 @@ jobs:
           file: deploy/Dockerfile
           platforms: linux/arm64
           push: true
+          # sans cache, chaque push réinstalle toutes les dépendances sous émulation QEMU (lent)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/${{ env.OWNER }}/sancturai:latest
             ghcr.io/${{ env.OWNER }}/sancturai:${{ github.sha }}
