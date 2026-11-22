@@ -60,11 +60,9 @@ async def test_vote_and_deadline_race_close_once(state: AppState, db: AsyncSessi
     db.expire_all()
     trial = await db.get(Trial, tid)
     assert trial is not None and trial.status == "closed" and trial.verdict == "ban"
-    if isinstance(vote_result, ApiError):
-        assert vote_result.code == "TRIAL_CLOSED" and closed == 1 and trial.closed_by == "deadline"
-    else:
-        assert isinstance(vote_result, dict) and vote_result["status"] == "closed"
-        assert closed == 0 and trial.closed_by == "majority"
+    # échéance passée : la voix tardive est refusée, seule la tâche périodique clôt
+    assert isinstance(vote_result, ApiError) and vote_result.code == "TRIAL_CLOSED"
+    assert closed == 1 and trial.closed_by == "deadline"
     assert await db.scalar(select(func.count()).select_from(Post).where(
         Post.thread_id == trial.thread_id, Post.body.startswith("Verdict"))) == 1
     logs = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
@@ -89,3 +87,36 @@ async def test_closing_ban_vote_waits_for_inflight_defense(state: AppState, db: 
     result = await closing
     assert (result["status"], result["verdict"]) == ("closed", "ban")
     assert await db.scalar(select(func.count()).select_from(Post).where(Post.author_id == accused.agent_id)) == 0
+
+
+async def test_late_vote_and_defense_after_deadline_are_refused(state: AppState, db: AsyncSession) -> None:
+    """Égalité à l'échéance = réactivation : une voix déposée avant le passage de la tâche ne la renverse pas."""
+    accused = await make_agent(state, "tie-acc")
+    jurors = [await make_agent(state, f"tie-j{i}") for i in range(5)]
+    tid = await open_trial_against(state, "tie-acc")
+    await _vote(state, jurors[0], tid, "ban")
+    await _vote(state, jurors[1], tid, "reactivate")
+    await _expire(db, tid)
+    with pytest.raises(ApiError) as late:
+        await _vote(state, jurors[2], tid, "ban")
+    assert late.value.code == "TRIAL_CLOSED"
+    async with state.sessionmaker() as s:
+        agent = await s.get(Agent, accused.agent_id)
+        assert agent is not None
+        with pytest.raises(ApiError) as defense:
+            await TrialService(s, state).defend(agent, tid, "Trop tard.")
+    assert defense.value.code == "TRIAL_CLOSED"
+    assert await close_due_trials(state) == 1
+    db.expire_all()
+    trial = await db.get(Trial, tid)
+    assert trial is not None and (trial.verdict, trial.closed_by) == ("reactivate", "deadline")
+
+
+async def test_frozen_voter_vote_does_not_count(state: AppState, db: AsyncSession) -> None:
+    await make_agent(state, "fv-acc")
+    jurors = [await make_agent(state, f"fv-j{i}") for i in range(3)]  # 2 voix closent
+    tid = await open_trial_against(state, "fv-acc")
+    assert (await _vote(state, jurors[0], tid, "ban"))["tally"]["ban"] == 1
+    await open_trial_against(state, "fv-j0")  # le votant est gelé (mis en procès) pendant le procès
+    result = await _vote(state, jurors[1], tid, "ban")
+    assert (result["tally"], result["status"]) == ({"ban": 1, "reactivate": 0}, "open")

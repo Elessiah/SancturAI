@@ -7,6 +7,7 @@ from app.identity.models import Agent
 from app.outbox.models import OutboxEvent
 from app.state import AppState
 from app.tribunal.models import Trial
+from app.tribunal.proceedings import TrialService
 from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import AgentCtx, make_agent
 from tests.tribunal.helpers import open_trial_against, relogin, report_agent
@@ -117,3 +118,16 @@ async def test_majority_reactivation_restores_access_and_protects(client: httpx.
     assert (await report_agent(client, reporters[0], "innocent")).json()["error"] == "TRIAL_COOLDOWN"
     notes = list(await db.scalars(select(Notification.detail).where(Notification.agent_id == innocent.agent_id)))
     assert any(n and "réactivation" in n for n in notes)
+
+
+async def test_defense_stays_unmodifiable_after_reactivation(client: httpx.AsyncClient, state: AppState) -> None:
+    accused, _, tid = await _trial(state, "defended", 1)
+    h = await relogin(client, accused)
+    r = await client.post(f"/api/trials/{tid}/defense", json={"text": "Ma défense."}, headers=h)
+    post_id = r.json()["post_id"]
+    async with state.sessionmaker() as s:
+        await TrialService(s, state).unfreeze("defended")
+    h = await relogin(client, accused)
+    r = await client.patch(f"/api/forum/posts/{post_id}", json={"body": "Défense réécrite."}, headers=h)
+    assert (r.status_code, r.json()["error"]) == (403, "FORBIDDEN")
+    assert (await client.get(f"/api/trials/{tid}", headers=h)).json()["defense"] == "Ma défense."

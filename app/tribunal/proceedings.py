@@ -64,12 +64,23 @@ class TrialService:
         return await self._lock(trial_id)
 
     async def _tally(self, trial_id: int) -> dict[str, int]:
+        """Voix des votants encore éligibles : celle d'un votant gelé depuis (mis en procès) ne compte pas tant
+        qu'il l'est ; celle d'un banni est effacée par la purge (revue secu Task 7, S3)."""
         counts = dict.fromkeys(VERDICTS, 0)
-        rows = await self._db.execute(select(TrialVote.verdict, func.count()).where(TrialVote.trial_id == trial_id)
+        rows = await self._db.execute(select(TrialVote.verdict, func.count())
+                                      .join(Agent, Agent.agent_id == TrialVote.voter_id)
+                                      .where(TrialVote.trial_id == trial_id, Agent.frozen_at.is_(None))
                                       .group_by(TrialVote.verdict))
         for verdict, n in rows:
             counts[verdict] = n
         return counts
+
+    @staticmethod
+    def _ensure_open(trial: Trial) -> None:
+        """Échéance passée = procès clos pour les votants et l'accusé, même avant le passage de la tâche
+        périodique : une voix tardive renverserait le verdict de l'échéance (revue secu Task 7, S1, S2)."""
+        if trial.status != "open" or trial.deadline <= datetime.now(UTC):
+            raise ApiError("TRIAL_CLOSED", "this trial is closed")
 
     async def list_trials(self, status: str, page: int) -> dict[str, Any]:
         if status not in TRIAL_STATUSES:
@@ -111,8 +122,7 @@ class TrialService:
         trial = await self._lock(trial_id)
         if trial.accused_id != agent.agent_id:
             raise ApiError("FORBIDDEN", "only the accused can file a defense")
-        if trial.status != "open":
-            raise ApiError("TRIAL_CLOSED", "this trial is closed")
+        self._ensure_open(trial)
         if trial.defense_post_id is not None:
             raise ApiError("DEFENSE_EXISTS", "defense already filed")
         post = await thread_reply(self._db, trial.thread_id, agent.agent_id, text)
@@ -129,8 +139,7 @@ class TrialService:
         if verdict not in VERDICTS:
             raise ApiError("VALIDATION_ERROR", "verdict must be ban or reactivate")
         trial = await self._lock_for_closure(trial_id)
-        if trial.status != "open":
-            raise ApiError("TRIAL_CLOSED", "this trial is closed")
+        self._ensure_open(trial)
         if trial.accused_id == agent.agent_id or agent.is_system:
             raise ApiError("FORBIDDEN", "you cannot vote in this trial")
         now = datetime.now(UTC)

@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -210,6 +210,9 @@ class ForumService:
         self._writable(agent)
         self._check_body(body)
         post = await self._own_post(agent, post_id)
+        if await self._db.scalar(select(exists().where(Trial.defense_post_id == post.id))):
+            # défense « une seule fois, non modifiable » (spec visibilité §4.4) : pas même après la réactivation
+            raise ApiError("FORBIDDEN", "a trial defense cannot be modified")
         post.body = body
         post.edited_at = datetime.now(UTC)
         await self._db.flush()
