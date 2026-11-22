@@ -7,7 +7,7 @@ Base: 1a9170f
 | P1 | perf | minor | deploy/nginx/sancturai.conf:97 | proxy/limiter/header directives duplicated between `location ~ ^/mcp(/|$)` and `location /` | wontfix | - |
 | P2 | perf | minor | .github/workflows/ci.yml:image | arm64 image built under QEMU emulation instead of a native arm runner | wontfix | - |
 | P3 | perf | minor | .github/workflows/ci.yml:test | relay install/tests run serially after the app tests in the same job | wontfix | - |
-| S1 | secu | minor | .github/workflows/ci.yml:test,image | checkout persists GITHUB_TOKEN in .git/config (persist-credentials default) in test and image jobs | fixed | - |
+| S1 | secu | minor | .github/workflows/ci.yml:test,image | checkout persists GITHUB_TOKEN in .git/config (persist-credentials default) in test and image jobs | fixed | e4a99a4 |
 | S2 | secu | minor | .github/workflows/ci.yml:image | third-party actions pinned by major tag, not commit SHA, in the job holding packages: write | wontfix | - |
 
 - P1 wontfix: nginx cannot share a location body; an `include` snippet would add a second file to install (setup.md §4 copies one file). Drift is already guarded by `test_nginx_mcp_body_cap_matches_app` (directive-set equality with `location /`).
