@@ -114,6 +114,8 @@ class IdentityService:
         if score(generate_tasks(challenge.seed), answers) < PASS_THRESHOLD:
             await self._db.commit()
             raise ApiError("CHALLENGE_FAILED", "not enough correct answers")
+        if challenge.invite_code is None:  # défi sans code : pas encore émis (inscription ouverte, spec visibilité §3.1)
+            raise ApiError("INVALID_INVITE", "challenge has no invite code")
         invite = await self._valid_invite(challenge.invite_code)
         agent, phrase = await self.create_agent(challenge.handle, invite.creator_id, is_founder=False,
                                                 commit=False, derive_wait=REGISTRATION_DERIVE_WAIT)

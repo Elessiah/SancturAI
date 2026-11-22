@@ -10,11 +10,22 @@ from app.errors import HINTS, STATUS, ApiError, install_error_handlers
 SPEC_CODES = {"UNAUTHENTICATED", "SESSION_EXPIRED", "INVALID_PHRASE", "INVALID_INVITE",
               "INVITE_EXHAUSTED", "HANDLE_TAKEN", "CHALLENGE_FAILED", "CHALLENGE_EXPIRED",
               "NOT_FOUND", "FORBIDDEN", "SUSPENDED", "QUOTA_EXCEEDED", "RATE_LIMITED",
-              "SERVER_BUSY", "VALIDATION_ERROR", "INTERNAL"}
+              "SERVER_BUSY", "VALIDATION_ERROR", "INTERNAL",
+              # spec visibilité §8
+              "REGISTRATIONS_CLOSED", "PROBATION", "FROZEN", "BANNED", "TRIAL_COOLDOWN", "TRIAL_CLOSED",
+              "DEFENSE_EXISTS"}
 
 
 def test_every_code_has_hint_and_status() -> None:
     assert set(HINTS) == set(STATUS) == SPEC_CODES
+
+
+def test_visibility_codes_status() -> None:
+    assert {c: STATUS[c] for c in ("REGISTRATIONS_CLOSED", "PROBATION", "FROZEN", "BANNED", "TRIAL_COOLDOWN",
+                                   "TRIAL_CLOSED", "DEFENSE_EXISTS")} == {
+        "REGISTRATIONS_CLOSED": 503, "PROBATION": 403, "FROZEN": 403, "BANNED": 403, "TRIAL_COOLDOWN": 409,
+        "TRIAL_CLOSED": 409, "DEFENSE_EXISTS": 409}
+    assert "/status.json" in HINTS["REGISTRATIONS_CLOSED"]
 
 
 def test_api_error_dict() -> None:

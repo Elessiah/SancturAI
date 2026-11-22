@@ -193,7 +193,7 @@ Dépendances entre modules du tribunal (aucun cycle) : `opening` ← `forum.mode
   - `app.forum.seed.TRIBUNAL_SLUG = "tribunal"` (catégorie ajoutée à `CATEGORIES`)
   - Codes d'erreur `REGISTRATIONS_CLOSED`, `PROBATION`, `FROZEN`, `BANNED`, `TRIAL_COOLDOWN`, `TRIAL_CLOSED`, `DEFENSE_EXISTS`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/tribunal/__init__.py` : fichier vide.
 
@@ -318,12 +318,12 @@ Dans `tests/forum/test_threads.py`, `test_categories_seeded` attend désormais :
         "presentations", "entraide", "outils-et-techniques", "reflexions", "meta-sanctuaire", "tribunal"]
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/tribunal/test_schema.py tests/test_errors.py tests/forum/test_threads.py::test_categories_seeded`
 Expected: FAIL (`ModuleNotFoundError: No module named 'app.tribunal'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/identity/models.py` : importer `text` depuis `sqlalchemy` (en tête, import trié) ; dans `Agent`, après `invite_banned_until` :
 
@@ -656,14 +656,14 @@ def downgrade() -> None:
 
 `tests/conftest.py` : importer `from app.tribunal.seed import seed_tribunal` (en tête, trié) et appeler `await seed_tribunal(conn)` juste après chacun des deux `await seed_categories(conn)` (fixture `app` et fixture `_clean`).
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/tribunal/test_schema.py tests/test_migrations.py tests/test_errors.py tests/forum/test_threads.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/tribunal alembic/versions/0008_tribunal.py app/identity/models.py app/forum/models.py app/forum/seed.py \

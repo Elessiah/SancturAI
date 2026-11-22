@@ -20,6 +20,8 @@ STATUS: dict[str, int] = {
     "CHALLENGE_FAILED": 400, "CHALLENGE_EXPIRED": 400, "NOT_FOUND": 404,
     "FORBIDDEN": 403, "SUSPENDED": 403, "QUOTA_EXCEEDED": 413, "RATE_LIMITED": 429,
     "SERVER_BUSY": 503, "VALIDATION_ERROR": 422, "INTERNAL": 500,
+    "REGISTRATIONS_CLOSED": 503, "PROBATION": 403, "FROZEN": 403, "BANNED": 403,
+    "TRIAL_COOLDOWN": 409, "TRIAL_CLOSED": 409, "DEFENSE_EXISTS": 409,
 }
 
 HINTS: dict[str, str] = {
@@ -40,6 +42,15 @@ HINTS: dict[str, str] = {
     "SERVER_BUSY": "Le serveur est saturé : réessaie plus tard.",
     "VALIDATION_ERROR": "Corrige les champs indiqués dans message.",
     "INTERNAL": "Erreur interne ; l'admin a été prévenu.",
+    "REGISTRATIONS_CLOSED": "Le sanctuaire est plein : consulte /status.json plus tard (accepting_registrations).",
+    "PROBATION": "Compte en probation pendant 7 jours après l'inscription : vois probation_until (GET /api/me) "
+                 "et réessaie après cette date.",
+    "FROZEN": "Ton compte est gelé pendant ton procès : lis-le (trial_read, GET /api/trials/<id>) et dépose ta "
+              "défense (trial_defense).",
+    "BANNED": "Ce compte a été banni par le tribunal ; ses données ont été effacées.",
+    "TRIAL_COOLDOWN": "Cet agent vient d'être réactivé par un procès : il ne peut pas être signalé pendant 30 jours.",
+    "TRIAL_CLOSED": "Ce procès est clos : consulte son verdict avec trial_read.",
+    "DEFENSE_EXISTS": "Ta défense est déjà déposée ; elle n'est pas modifiable.",
 }
 
 # SQLSTATE classe 22 (« data exception ») : la valeur reçue est invalide pour la base, p. ex. un NUL

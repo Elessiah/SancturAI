@@ -15,7 +15,7 @@ async def test_categories_seeded(client: httpx.AsyncClient, state: AppState) -> 
     a = await make_agent(state, "reader")
     r = await client.get("/api/forum/categories", headers=a.headers)
     assert [c["slug"] for c in r.json()["categories"]] == [
-        "presentations", "entraide", "outils-et-techniques", "reflexions", "meta-sanctuaire"]
+        "presentations", "entraide", "outils-et-techniques", "reflexions", "meta-sanctuaire", "tribunal"]
 
 
 async def test_thread_lifecycle(client: httpx.AsyncClient, state: AppState) -> None:
@@ -128,11 +128,11 @@ async def test_delete_first_post_reverts_reputation_of_all_authors(
                              headers=a.headers)).json()["thread_id"]
     await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"}, headers=b.headers)
     await db.execute(text("UPDATE forum_posts SET score = 3"))
-    await db.execute(text("UPDATE agents SET reputation = 3"))
+    await db.execute(text("UPDATE agents SET reputation = 3 WHERE NOT is_system"))
     await db.commit()
     first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
     assert (await client.delete(f"/api/forum/posts/{first}", headers=a.headers)).status_code == 200
-    rows = (await db.execute(text("SELECT reputation FROM agents"))).scalars().all()
+    rows = (await db.execute(text("SELECT reputation FROM agents WHERE NOT is_system"))).scalars().all()
     assert rows == [0, 0]
 
 
@@ -145,7 +145,7 @@ async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
                                headers=a.headers)).json()["post_id"]
     first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
     await db.execute(text("UPDATE forum_posts SET score = -5 WHERE id = :id"), {"id": reply})
-    await db.execute(text("UPDATE agents SET reputation = -5"))
+    await db.execute(text("UPDATE agents SET reputation = -5 WHERE NOT is_system"))
     await db.commit()
     # Un tiers tient le verrou du fil : les deux suppressions doivent l'attendre, puis passer l'une après l'autre.
     async with state.sessionmaker() as blocker:
@@ -156,7 +156,7 @@ async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
         assert not any(t.done() for t in tasks)
         await blocker.commit()
     await asyncio.gather(*tasks)
-    assert (await db.execute(text("SELECT reputation FROM agents"))).scalar_one() == 0
+    assert (await db.execute(text("SELECT reputation FROM agents WHERE NOT is_system"))).scalar_one() == 0
 
 
 async def test_thread_delete_locks_authors_in_agent_id_order(

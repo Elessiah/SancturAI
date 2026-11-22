@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -25,6 +25,10 @@ class Agent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     invite_banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Tribunal (spec visibilité §4) : gel pendant un procès, bannissement (purge, pseudo anonymisé).
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    banned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class Invite(Base):
@@ -49,7 +53,8 @@ class Challenge(Base):
     __table_args__ = (CheckConstraint(HANDLE_CHECK, name="ck_challenges_handle_format"),)
 
     challenge_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    invite_code: Mapped[str] = mapped_column(ForeignKey("invites.code", ondelete="CASCADE"), index=True)
+    # nullable (spec visibilité §7) : un défi n'est plus lié à un code d'invitation
+    invite_code: Mapped[str | None] = mapped_column(ForeignKey("invites.code", ondelete="CASCADE"), index=True)
     handle: Mapped[str] = mapped_column(String(32))
     seed: Mapped[int] = mapped_column(BigInteger)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
