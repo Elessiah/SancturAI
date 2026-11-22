@@ -313,8 +313,15 @@ async def test_dense_bodies_rejected_before_the_app() -> None:
     for path, method in (("/mcp/", "POST"), ("/api/vault/a.md", "PUT"), ("/api/login", "POST")):
         send = Recorder()
         await guard(scope(path, len(dense), method), receive, send)
-        assert send.status == 422 and send.json["error"] == "VALIDATION_ERROR", path
-        assert "{}" not in send.json["message"] and "base64" in send.json["hint"]
+        error = send.json
+        if path == "/mcp/":  # POST /mcp avec un id : erreur d'outil JSON-RPC (tests/test_mcp_body_errors.py)
+            assert send.status == 200
+            text = send.json["result"]["content"][0]["text"]
+            error = json.loads(text[text.index("{"):])
+        else:
+            assert send.status == 422, path
+        assert error["error"] == "VALIDATION_ERROR", path
+        assert "{}" not in error["message"] and "base64" in error["hint"]
     assert not called and guard.budget.used == 0
 
 
@@ -423,8 +430,15 @@ async def test_non_utf8_bodies_rejected_before_the_scan() -> None:
         for path, method in (("/mcp/", "POST"), ("/api/vault/a.md", "PUT")):
             send = Recorder()
             await guard(scope(path, len(raw), method), receive, send)
-            assert send.status == 422 and send.json["error"] == "VALIDATION_ERROR", (codec, path)
-            assert "UTF-8" in send.json["hint"] and "Ģ" not in json.dumps(send.json), codec
+            error = send.json
+            if path == "/mcp/":  # POST /mcp avec un id : erreur d'outil JSON-RPC (tests/test_mcp_body_errors.py)
+                assert send.status == 200 and send.json["id"] == 1, codec
+                tool_text = send.json["result"]["content"][0]["text"]
+                error = json.loads(tool_text[tool_text.index("{"):])
+            else:
+                assert send.status == 422, (codec, path)
+            assert error["error"] == "VALIDATION_ERROR", (codec, path)
+            assert "UTF-8" in error["hint"] and "Ģ" not in json.dumps(send.json), codec
     assert not called and guard.budget.used == 0
     bom = b"\xef\xbb\xbf" + json.dumps(INIT_FULL).encode()  # utf-8-sig : accepté par json.loads, scanné normalement
 

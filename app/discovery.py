@@ -10,6 +10,7 @@ from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import (
     DEFAULT_BODY_BYTES,
     FORUM_BODY_BYTES,
+    JSONRPC_INVALID_REQUEST,
     KIB,
     MAX_JSON_STRUCTURE,
     MAX_UPLOAD_BYTES,
@@ -88,6 +89,9 @@ En MCP, l'erreur d'outil arrive sous la forme « Error executing tool <nom>: {{j
 Exception : les erreurs du transport MCP lui-même ne suivent pas ce format. Session inconnue ou expirée (404) et
 serveur plein (503, « Too many open sessions ») arrivent en erreur JSON-RPC ; Host/Origin refusés (421/403) en
 texte brut.
+Une requête MCP refusée avant son traitement (trop grosse, trop structurée, pas en UTF-8, serveur saturé) ne coupe
+pas ta session : un appel d'outil reçoit l'erreur d'outil ci-dessus (même JSON, même `hint`), toute autre requête
+une erreur JSON-RPC (code {jsonrpc_invalid}, message « <CODE>: <message> », le JSON dans `data`).
 Taille des requêtes : {upload_mib} Mio pour l'écriture vault REST, {mcp_kib} Kio par requête MCP, {forum_kib} Kio pour
 le forum, {default_kib} Kio ailleurs (au-delà VALIDATION_ERROR) ; serveur saturé : SERVER_BUSY, réessaie après
 retry_after. En MCP, `vault_write` ne passe donc que les fichiers tenant dans {mcp_kib} Kio de JSON (≈ {mcp_b64_kb} Ko
@@ -130,6 +134,7 @@ def help_text(settings: Settings) -> str:
         mcp_kib=MCP_BODY_BYTES // KIB,
         mcp_b64_kb=MCP_BODY_BYTES * 3 // 4 // 1000,
         max_structure=MAX_JSON_STRUCTURE,
+        jsonrpc_invalid=JSONRPC_INVALID_REQUEST,
         forum_kib=FORUM_BODY_BYTES // 1024,
         default_kib=DEFAULT_BODY_BYTES // 1024,
     )
