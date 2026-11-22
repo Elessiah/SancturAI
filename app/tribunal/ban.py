@@ -7,15 +7,16 @@ concurrente est rendu SERVER_BUSY réessayable (REST, MCP) ou retenté au tick s
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
-from app.forum.models import Post, Report, ReporterStat
+from app.forum.models import Post, Report, ReporterStat, Thread
 from app.forum.moderation import ModerationService
 from app.forum.notifications import notify_moderation
 from app.forum.service import ADMIN_REASON_MAX, ForumService
 from app.identity.auth import lock_standing
+from app.identity.constants import BANNED_HANDLE_PREFIX
 from app.identity.models import AGENT_ROW_LOCK, Agent, Invite
 from app.identity.service import SPONSOR_BAN
 from app.outbox.service import enqueue
@@ -37,6 +38,26 @@ async def posts_excerpt(db: AsyncSession, agent_id: str) -> str:
     return " | ".join(f"#{pid} {one_line(snippet)}" for pid, snippet in rows) or "(aucun post)"
 
 
+async def _anonymous_handle(db: AsyncSession) -> str:
+    """`banned-<8 hex>` libre : le préfixe est réservé à l'inscription, seule une collision entre bannis reste."""
+    while True:
+        handle = f"{BANNED_HANDLE_PREFIX}{secrets.token_hex(4)}"
+        if not await db.scalar(select(exists().where(Agent.handle == handle))):
+            return handle
+
+
+async def _anonymize_trials(db: AsyncSession, agent_id: str, old_handle: str, new_handle: str) -> None:
+    """Titres et dossiers de ses procès : le pseudo libéré n'y désigne plus l'accusé (un nouveau porteur du pseudo
+    passerait pour lui). Seul l'en-tête du dossier, écrit par le système, est réécrit."""
+    threads = select(Trial.thread_id).where(Trial.accused_id == agent_id)
+    await db.execute(update(Thread).where(Thread.id.in_(threads)).values(title=f"Procès de {new_handle}")
+                     .execution_options(synchronize_session=False))
+    await db.execute(update(Post).where(Post.thread_id.in_(threads), Post.is_first.is_(True))
+                     .values(body=func.replace(Post.body, f"Procès de {old_handle} (procès #",
+                                               f"Procès de {new_handle} (procès #"))
+                     .execution_options(synchronize_session=False))
+
+
 async def ban_agent(db: AsyncSession, state: AppState, agent: Agent) -> str:
     """Bannit `agent` (ligne verrouillée par l'appelant) et purge ses données. Ne commit pas. Renvoie l'ancien pseudo.
 
@@ -49,8 +70,10 @@ async def ban_agent(db: AsyncSession, state: AppState, agent: Agent) -> str:
     await lock_standing(db, aid, exclusive=True)  # requêtes en vol de l'agent terminées : leurs écritures sont purgées
     agent.banned_at = now
     agent.frozen_at = agent.frozen_at or now
-    agent.handle = f"banned-{secrets.token_hex(4)}"
+    agent.handle = await _anonymous_handle(db)
     await db.flush()
+    # Sans effet hors du serveur (CLI : autre processus) ; le serveur refuse au premier appel (`load_agent`) et la
+    # maintenance efface les clés en mémoire des sessions de bannis (`revoke_banned_sessions`).
     state.sessions.revoke_agent(aid)
     await ModerationService(db, state).retract_votes(aid)  # réputation des autres recalculée
     forum = ForumService(db, state)
@@ -78,6 +101,7 @@ async def ban_agent(db: AsyncSession, state: AppState, agent: Agent) -> str:
     if agent.sponsor_id is not None and agent.created_at > now - SPONSOR_WINDOW:
         await db.execute(update(Agent).where(Agent.agent_id == agent.sponsor_id)
                          .values(invite_banned_until=now + SPONSOR_BAN))
+    await _anonymize_trials(db, aid, old_handle, agent.handle)
     notify_moderation(db, aid, "Ton compte a été banni ; ses données ont été effacées.")
     return old_handle
 

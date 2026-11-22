@@ -12,7 +12,7 @@ from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
 from app.identity.auth import ensure_standing, ensure_writable
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
-from app.identity.constants import HANDLE_PATTERN, URLSAFE_ID_PATTERN
+from app.identity.constants import BANNED_HANDLE_PREFIX, HANDLE_PATTERN, URLSAFE_ID_PATTERN
 from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
 from app.outbox.service import enqueue
 from app.state import AppState
@@ -62,6 +62,15 @@ def registration_out(agent: Agent, phrase: str) -> dict[str, Any]:
     return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
 
 
+def check_handle(handle: str) -> None:
+    """Pseudo d'inscription : motif, et préfixe des comptes bannis réservé (ni usurpation d'un banni, ni collision
+    avec un pseudo anonymisé qui ferait échouer un bannissement)."""
+    if not HANDLE_RE.fullmatch(handle):
+        raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
+    if handle.startswith(BANNED_HANDLE_PREFIX):
+        raise ApiError("VALIDATION_ERROR", f"handle prefix {BANNED_HANDLE_PREFIX} is reserved")
+
+
 class IdentityService:
     def __init__(self, db: AsyncSession, state: AppState) -> None:
         self._db = db
@@ -103,8 +112,7 @@ class IdentityService:
     async def start_registration(self, invite_code: str | None, handle: str) -> dict[str, Any]:
         """Sans code : défi (spec visibilité §3.1). Avec un code valide : compte créé tout de suite, sans défi ;
         un code invalide ne retombe jamais sur le défi (INVALID_INVITE)."""
-        if not HANDLE_RE.fullmatch(handle):
-            raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
+        check_handle(handle)
         if invite_code is not None:
             _check_urlsafe_id(invite_code, "invite_code")
         await self._ensure_open()
@@ -166,8 +174,7 @@ class IdentityService:
     async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool, *, commit: bool = True,
                            derive_wait: float = 0.0, route: str | None = None) -> tuple[Agent, str]:
         """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord)."""
-        if not HANDLE_RE.fullmatch(handle):
-            raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")
+        check_handle(handle)
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         phrase = generate_phrase()

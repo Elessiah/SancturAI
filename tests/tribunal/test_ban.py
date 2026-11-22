@@ -12,6 +12,7 @@ from app.forum.models import Post, Report, Thread, Vote
 from app.forum.service import ForumService
 from app.identity.auth import load_agent
 from app.identity.models import Agent, Invite
+from app.maintenance import revoke_banned_sessions
 from app.outbox.models import OutboxEvent
 from app.state import AppState
 from app.tribunal.ban import admin_ban
@@ -178,3 +179,37 @@ async def test_in_flight_write_of_the_banned_agent_is_purged(client: httpx.Async
             await load_agent(s2, state, session)
     assert exc.value.code == "BANNED"
     await assert_forum_invariants(db)
+
+
+async def test_banned_prefix_is_reserved(client: httpx.AsyncClient) -> None:
+    r = await client.post("/api/register/start", json={"handle": "banned-0123abcd"})
+    assert (r.status_code, r.json()["error"]) == (422, "VALIDATION_ERROR"), r.text
+
+
+async def test_ban_anonymizes_trial_title_and_dossier(state: AppState, db: AsyncSession) -> None:
+    await make_agent(state, "accused")
+    await make_agent(state, "juror")
+    trial_id = await open_trial_against(state, "accused")
+    await _ban(state, "accused")
+    db.expire_all()
+    trial = await db.get(Trial, trial_id)
+    assert trial is not None
+    thread = await db.get(Thread, trial.thread_id)
+    banned = await db.get(Agent, trial.accused_id)
+    assert thread is not None and banned is not None
+    assert thread.title == f"Procès de {banned.handle}"
+    dossier = await db.scalar(select(Post.body).where(Post.thread_id == thread.id, Post.is_first.is_(True)))
+    assert dossier is not None and dossier.startswith(f"Procès de {banned.handle} (procès #")
+    assert "accused" not in dossier.split("\n", 1)[0]
+
+
+async def test_maintenance_revokes_sessions_of_banned_agents(state: AppState, db: AsyncSession) -> None:
+    outlaw = await make_agent(state, "cliban")
+    keeper = await make_agent(state, "keeper")
+    row = await db.get(Agent, outlaw.agent_id)
+    assert row is not None
+    row.banned_at = datetime.now(UTC)  # bannissement par la CLI : un autre processus, sessions du serveur intactes
+    await db.commit()
+    await revoke_banned_sessions(state)
+    assert state.sessions.get(outlaw.token) is None
+    assert state.sessions.get(keeper.token) is not None
