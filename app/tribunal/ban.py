@@ -50,13 +50,17 @@ async def ban_agent(db: AsyncSession, state: AppState, agent: Agent) -> str:
     state.sessions.revoke_agent(aid)
     await ModerationService(db, state).retract_votes(aid)  # réputation des autres recalculée
     forum = ForumService(db, state)
-    for first in (True, False):  # ses fils d'abord (emportent leurs réponses), puis ses réponses restantes
-        post_ids = list(await db.scalars(select(Post.id).where(Post.author_id == aid, Post.is_first.is_(first))
-                                         .order_by(Post.id)))
-        for pid in post_ids:
-            post = await db.get(Post, pid)
-            if post is not None:
-                await forum.remove_post(post)  # défense comprise ; signalements visant ses posts neutralisés
+    # Un seul parcours : ses fils d'abord, puis ses réponses hors de ses fils (celles-ci partent avec le fil).
+    own_threads = select(Post.thread_id).where(Post.author_id == aid, Post.is_first.is_(True))
+    posts = list(await db.scalars(select(Post).where(Post.author_id == aid,
+                                                     Post.is_first.is_(True) | Post.thread_id.not_in(own_threads))
+                                  .order_by(Post.is_first.desc(), Post.id)))
+    for post in posts:  # remove_post re-verrouille fil puis post ; défense comprise, signalements neutralisés
+        try:
+            await forum.remove_post(post)
+        except ApiError as exc:  # supprimé entre-temps (modération, fil retiré) : levé avant toute écriture
+            if exc.code != "NOT_FOUND":
+                raise
     await VaultService(db, state.settings).purge(aid)
     await db.execute(delete(Invite).where(Invite.creator_id == aid, Invite.used_by.is_(None)))
     removed = await db.execute(delete(Report).where(Report.agent_id == aid))
