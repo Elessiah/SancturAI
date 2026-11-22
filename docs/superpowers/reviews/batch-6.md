@@ -37,6 +37,7 @@ Base: f7af6e1..d96d37a. Décisions marquées « décidé par l'orchestrateur (d�
 | R2-m2 | rereview2 | minor | docs/ops/setup.md §2 | uid/gid block could write pg/ on the root fs if the volume was not mounted; block 1 not re-runnable | fixed — `mountpoint -q` guard first; resume note for block 1 | 4fd5718 |
 | R2-m3 | rereview2 | minor | deploy/deploy.sh | ERR notification named the old image after a successful switch | fixed — `serving` set after the healthy check, used by the trap | 4fd5718 |
 | R2-m4 | rereview2 | minor | docs/ops/setup.md « Retour arrière » | pre dump kept 3 attempts, not 3 deploys | fixed — wording: 3 deploy attempts, successful or not | 4fd5718 |
+
 ## Notes
 - I1 : la partie `client_body_temp_path` est remplacée par N1 (aucun chemin de SancturAI dans le vhost).
 - Opérateur (serveur) : créer le compte
