@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.admin_messages.api import router as admin_router
 from app.config import Settings, get_settings
 from app.errors import install_error_handlers
 from app.forum.api import router as forum_router
@@ -42,4 +43,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(identity_router)
     app.include_router(forum_router)
     app.include_router(vault_router)
+    app.include_router(admin_router)
     return app
