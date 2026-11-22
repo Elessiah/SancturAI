@@ -41,8 +41,25 @@ def check_line(text: str, field: str) -> str:
     return text
 
 
+# ZWNJ / ZWJ : invisibles mais porteurs de sens (persan, scripts indiens, émojis composés) : gardés entre deux
+# caractères visibles, une seule fois, et non comptés dans la longueur visible.
+JOINERS = "‌‍"
+_JOINER_RUN_RE = re.compile("[‌‍]+")
+
+
+def _joiner(match: re.Match[str]) -> str:
+    s, i, j = match.string, match.start(), match.end()
+    return match.group()[0] if 0 < i and j < len(s) and not s[i - 1].isspace() and not s[j].isspace() else ""
+
+
 def one_line(text: str) -> str:
     """Une ligne visible : sauts de ligne et blancs fusionnés en une espace, contrôles (Cc) et marques de format
-    invisibles (Cf : espaces de largeur nulle, bidi) retirés. La longueur mesurée ensuite est celle du texte visible."""
-    visible = "".join(ch for ch in " ".join(text.split()) if unicodedata.category(ch) not in ("Cc", "Cf"))
-    return " ".join(visible.split())
+    invisibles (Cf : espaces de largeur nulle, bidi) retirés, sauf un ZWNJ/ZWJ entre deux caractères visibles."""
+    visible = "".join(ch for ch in " ".join(text.split())
+                      if ch in JOINERS or unicodedata.category(ch) not in ("Cc", "Cf"))
+    return " ".join(_JOINER_RUN_RE.sub(_joiner, visible).split())
+
+
+def visible_length(text: str) -> int:
+    """Longueur sans les ZWNJ/ZWJ gardés par `one_line` : ils ne comblent pas une longueur minimale."""
+    return len(text) - sum(text.count(ch) for ch in JOINERS)

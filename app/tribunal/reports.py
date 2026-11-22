@@ -12,7 +12,7 @@ from app.identity.auth import ensure_not_probation, ensure_writable
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.identity.service import HANDLE_RE
 from app.state import AppState
-from app.text import check_text, one_line
+from app.text import check_text, one_line, visible_length
 from app.tribunal.models import AgentReport, Trial
 from app.tribunal.opening import open_trial
 from app.tribunal.rules import (
@@ -37,7 +37,7 @@ class AgentReportService:
         ensure_not_probation(reporter, "agent reports")
         # une ligne visible : ni remplissage invisible pour atteindre 200, ni structure forgée dans le dossier (S1)
         reason = one_line(check_text(reason, "reason"))
-        if not REPORT_REASON_MIN <= len(reason) <= REPORT_REASON_MAX:
+        if visible_length(reason) < REPORT_REASON_MIN or len(reason) > REPORT_REASON_MAX:  # colonne String(1000)
             raise ApiError("VALIDATION_ERROR", f"reason must be {REPORT_REASON_MIN}..{REPORT_REASON_MAX} chars: "
                                                "cite the posts and the behaviour you observed")
         if not HANDLE_RE.fullmatch(handle):

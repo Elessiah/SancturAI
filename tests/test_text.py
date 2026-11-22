@@ -1,7 +1,7 @@
 import pytest
 
 from app.errors import ApiError
-from app.text import check_line, check_text, strip_control
+from app.text import check_line, check_text, one_line, strip_control, visible_length
 
 
 def test_strip_control_removes_nul_and_c0_keeps_newlines() -> None:
@@ -34,3 +34,11 @@ def test_check_line_rejects_bidi_and_invisible_format_chars(char: str) -> None:
         check_line(f"titre{char}nocif", "title")
     assert exc.value.code == "VALIDATION_ERROR"
     assert check_text(f"corps{char}ok", "body")  # les corps (markdown multilingue) les gardent
+
+
+def test_one_line_keeps_meaningful_joiners_and_drops_stray_ones() -> None:
+    """Secu tour 2 : ZWNJ (persan) et ZWJ (émojis composés) gardés entre deux caractères visibles ; bidi retirés."""
+    family = "\U0001f468‍\U0001f469‍\U0001f467"
+    assert one_line(f"je veux : می‌خواهم {family}") == f"je veux : می‌خواهم {family}"
+    assert one_line("a‍‍‍b ‍c‍\n‮d") == "a‍b c d"
+    assert visible_length("a‍b") == 2
