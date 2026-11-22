@@ -20,15 +20,19 @@ async def purge_old_rows(state: AppState) -> None:
     except Exception:
         log.exception("notification prune failed")  # n'empêche pas la purge outbox/défis ci-dessous
         state.errors.record()  # échec persistant visible par l'admin (compté au tick suivant)
-    async with state.sessionmaker() as db:
-        month_ago = func.now() - text("interval '30 days'")
-        await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at < month_ago))
-        # lignes abandonnées par le relais : sinon la table croît sans borne (revue batch 1, I4)
-        await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at.is_(None),
-                                                   OutboxEvent.attempts >= RELAY_MAX_ATTEMPTS,
-                                                   OutboxEvent.created_at < month_ago))
-        await db.execute(delete(Challenge).where(Challenge.expires_at < func.now() - text("interval '1 day'")))
-        await db.commit()
+    try:
+        async with state.sessionmaker() as db:
+            month_ago = func.now() - text("interval '30 days'")
+            await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at < month_ago))
+            # lignes abandonnées par le relais : sinon la table croît sans borne (revue batch 1, I4)
+            await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at.is_(None),
+                                                       OutboxEvent.attempts >= RELAY_MAX_ATTEMPTS,
+                                                       OutboxEvent.created_at < month_ago))
+            await db.execute(delete(Challenge).where(Challenge.expires_at < func.now() - text("interval '1 day'")))
+            await db.commit()
+    except Exception:
+        log.exception("outbox/challenge purge failed")
+        state.errors.record()  # batch 5, M4 : visible par l'admin comme l'échec de la purge des notifications
 
 
 async def run_maintenance_once(state: AppState) -> None:

@@ -190,3 +190,13 @@ async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
     assert "ix_notif_prune" in plans[0] and "ix_notif_prune_unread" not in plans[0], plans[0]
     assert "ix_notif_prune_unread" in plans[1], plans[1]
     await db.rollback()
+
+
+async def test_outbox_purge_failure_is_counted(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch 5, M4 : l'échec de la purge outbox/défis est compté comme celui de la purge des notifications."""
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("delete down")
+
+    monkeypatch.setattr("app.maintenance.delete", boom)
+    await purge_old_rows(state)
+    assert state.errors.take() == 1
