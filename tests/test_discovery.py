@@ -49,6 +49,8 @@ def test_help_text_documents_mcp_transport_limits() -> None:
     assert MCP_OPEN_RATE[1] == 3600  # le guide dit « par heure »
     assert f"{MCP_SESSIONS_PER_IP} sessions ouvertes" in text and f"{MCP_OPEN_RATE[0]} ouvertures" in text
     assert "JSON-RPC" in text and "texte brut" in text  # erreurs de transport hors format
+    flat = " ".join(text.split())
+    assert "ne coupe pas ta session" in flat and "code -32600" in flat and "jusqu'à 1 Mio" in flat  # refus de BodyLimitMiddleware en JSON-RPC
     assert "16 Mio" in text and "128 Kio" in text and "64 Kio" in text
     from app.middleware import MCP_BODY_BYTES
 
