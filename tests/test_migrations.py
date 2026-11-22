@@ -40,4 +40,4 @@ async def test_migrations_match_models(pg_url: str) -> None:
     expected = {c.name for t in Base.metadata.tables.values() for c in t.constraints
                 if isinstance(c, CheckConstraint)}
     assert expected <= checks, f"CHECK manquants : {expected - checks}"
-    assert {"ck_vault_files_size_nonneg", "ck_outbox_attempts_nonneg", "ck_outbox_kind"} <= checks
+    assert {"ck_vault_files_size_nonneg", "ck_outbox_attempts_nonneg", "ck_outbox_kind", "ck_notif_kind"} <= checks

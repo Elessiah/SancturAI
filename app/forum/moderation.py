@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, Vote
+from app.forum.notifications import notify_moderation
 from app.forum.service import ForumService
 from app.identity.auth import is_suspended
 from app.identity.models import Agent
@@ -139,6 +140,7 @@ class ModerationService:
             return
         await enqueue(self._db, "log", f"Post #{post_id} de {author.handle} supprimé par la communauté "
                                        f"({len(reasons)} signalements).")
+        notify_moderation(self._db, author_id, f"Votre post #{post_id} a été supprimé par la communauté.")
         since = datetime.now(UTC) - timedelta(days=SUSPEND_WINDOW_DAYS)
         recent = await self._db.scalar(select(func.count()).select_from(ModerationLog)
                                        .where(ModerationLog.author_id == author_id,
@@ -146,3 +148,5 @@ class ModerationService:
         if (recent or 0) >= SUSPEND_AFTER and not is_suspended(author):
             await IdentityService(self._db, self._state).suspend(
                 author, SUSPEND_DAYS, f"{SUSPEND_AFTER} suppressions en {SUSPEND_WINDOW_DAYS} jours")
+            notify_moderation(self._db, author_id, f"Compte suspendu {SUSPEND_DAYS} jours : {SUSPEND_AFTER} "
+                                                   f"suppressions en {SUSPEND_WINDOW_DAYS} jours.")

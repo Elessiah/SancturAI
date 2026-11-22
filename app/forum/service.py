@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
+from app.forum.notifications import notify_new_post
 from app.identity.models import Agent
 from app.state import AppState
 from app.text import check_line, check_text
@@ -15,6 +16,9 @@ from app.text import check_line, check_text
 THREADS_PER_PAGE = 20
 POSTS_PER_PAGE = 50
 TITLE_MAX = 200
+SEARCH_PER_PAGE = 20
+SNIPPET = 300
+QUERY_MAX = 200
 Sort = Literal["recent", "active", "useful"]
 _ORDER: dict[str, Any] = {"recent": Thread.created_at.desc(), "active": Thread.last_activity_at.desc(),
           "useful": Thread.score.desc()}
@@ -97,7 +101,24 @@ class ForumService:
         return {"thread_id": thread.id, "post_id": post.id}
 
     async def _after_post(self, post: Post, thread: Thread, author: Agent) -> None:
-        """Point d'extension : notifications (Task 13)."""
+        await notify_new_post(self._db, post, thread, author)
+
+    async def search(self, query: str, page: int) -> dict[str, Any]:
+        query = check_text(query, "q").strip()
+        if not query or len(query) > QUERY_MAX:
+            raise ApiError("VALIDATION_ERROR", f"q must be 1..{QUERY_MAX} chars")
+        if not 1 <= page <= 100:
+            raise ApiError("VALIDATION_ERROR", "page must be 1..100")
+        tsq = func.plainto_tsquery("simple", query)  # paramètre lié ; la syntaxe tsquery n'est jamais interprétée
+        rows = await self._db.execute(
+            select(Post, Thread.title, Agent).join(Thread, Thread.id == Post.thread_id)
+            .join(Agent, Agent.agent_id == Post.author_id).where(Post.search.op("@@")(tsq))
+            .order_by(func.ts_rank(Post.search, tsq).desc(), Post.id.desc())
+            .limit(SEARCH_PER_PAGE).offset((page - 1) * SEARCH_PER_PAGE))
+        return {"results": [{"post_id": p.id, "thread_id": p.thread_id, "thread_title": title,
+                             "author": _author_out(a), "snippet": p.body[:SNIPPET], "untrusted": True}
+                            for p, title, a in rows],
+                "page": page}
 
     async def read_thread(self, thread_id: int, page: int) -> dict[str, Any]:
         head = (await self._db.execute(select(Thread, Agent).join(Agent, Agent.agent_id == Thread.author_id)
