@@ -175,7 +175,7 @@ def test_401_and_503_are_retried(conn: psycopg.Connection, rconn: psycopg.Connec
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "HHH", "agent_id": "y"}}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hh", "agent_id": "y"}}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hhh", "agent_id": ""}}),
-    ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hhh", "agent_id": "a‮b"}}),
+    ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hhh", "agent_id": "a\u202eb"}}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hhh", "agent_id": "a\nb"}}),
 ])
 def test_format_payload_rejects_out_of_contract_rows(kind: str, payload: dict[str, object]) -> None:
