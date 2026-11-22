@@ -22,9 +22,18 @@ Actions de l'admin, jamais lancées par le code ni par la CI (spec visibilité �
 l'implémentation.
 
 ```bash
-# installer mcp-publisher (Linux/macOS ; voir https://github.com/modelcontextprotocol/registry/releases)
-curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
-  | tar xz mcp-publisher
+# installer mcp-publisher (Linux/macOS) depuis une version FIXÉE, jamais `latest` : choisir une version sur
+# https://github.com/modelcontextprotocol/registry/releases et la noter ici (ex. VERSION=v1.2.3)
+VERSION=vX.Y.Z
+ASSET="mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz"
+BASE="https://github.com/modelcontextprotocol/registry/releases/download/$VERSION"
+curl -fLO "$BASE/$ASSET"
+# vérifier la somme de contrôle publiée par le projet avec cette release : télécharger le fichier de sommes listé
+# dans ses assets (nom exact relevé sur la page de la release, en général `*checksums.txt`), puis
+curl -fLo checksums.txt "$BASE/<fichier de sommes de la release>"
+# doit afficher « <archive>: OK » (macOS : shasum -a 256 --check --ignore-missing) ; sinon, ne rien extraire
+sha256sum --check --ignore-missing checksums.txt
+tar xzf "$ASSET" mcp-publisher
 # vérifier que server.json suit le schéma courant : dans un dossier temporaire, générer un fichier de référence
 # et comparer son $schema et ses champs obligatoires ; s'ils diffèrent, mettre server.json à jour
 (cd "$(mktemp -d)" && /chemin/vers/mcp-publisher init && cat server.json)

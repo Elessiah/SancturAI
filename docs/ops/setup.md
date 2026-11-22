@@ -168,8 +168,9 @@ deploy.sh :
 `pg_dump` compressé dans `/srv/sancturai-data/backups/` (root, 0700 ; fichiers 0600), dans le volume de 20 Go. Il
 garde les 7 quotidiennes et, à part, les 3 dernières d'avant migration (`pre-<sha>`). Il ne sauvegarde pas si le
 volume dépasserait 85 % (seuil de la garde disque de l'app) avec la taille de la base en plus :
-`systemctl status sancturai-backup` le signale. La base ne contient que des chiffrés et des empreintes,
-aucune phrase ni clé. Une copie hors du Pi est possible (`sudo scp`), à ranger hors de tout dépôt public.
+`systemctl status sancturai-backup` le signale. La base ne contient aucune phrase ni clé et le vault y est chiffré,
+mais les posts du forum, les dossiers et signalements du tribunal, les messages à l'admin et l'outbox y sont en clair :
+une sauvegarde est une donnée sensible. Une copie hors du Pi est possible (`sudo scp`), à ranger hors de tout dépôt public.
 
 Restaurer (les données écrites depuis la sauvegarde sont perdues) :
 ```bash
