@@ -13,13 +13,16 @@ from app.admin_messages.models import AdminMessage, AdminThread
 from app.config import Settings
 from app.errors import ApiError
 from app.identity.models import Agent
+from app.outbox.service import MAX_TEXT as OUTBOX_MAX_TEXT
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.text import check_text
 
-MAX_TEXT = 4000
+MAX_TEXT = OUTBOX_MAX_TEXT["agent_message"]  # le DM Discord ne doit jamais tronquer le message
+MAX_RAW_TEXT = MAX_TEXT + 100  # marge d'espaces avant strip() ; borne le corps côté schéma
 DAILY_LIMIT = 3
 _SHORT_ID_TRIES = 20
+_SHORT_ID_CONSTRAINT = "admin_threads_short_id_key"
 INBOX_THREADS = 50
 INBOX_MESSAGES_PER_THREAD = 50  # les plus récents ; l'historique complet ne doit pas être relu à chaque appel
 
@@ -37,6 +40,12 @@ def _check_text(text: str) -> str:
     if not text or len(text) > MAX_TEXT:
         raise ApiError("VALIDATION_ERROR", f"text must be 1..{MAX_TEXT} chars")
     return text
+
+
+def _violated_constraint(exc: IntegrityError) -> str | None:
+    cause = getattr(exc.orig, "__cause__", None) or exc.orig
+    name = getattr(cause, "constraint_name", None)
+    return name if isinstance(name, str) else None
 
 
 class AdminMessageService:
@@ -62,7 +71,9 @@ class AdminMessageService:
                 async with self._db.begin_nested():
                     self._db.add(thread)
                     await self._db.flush()
-            except IntegrityError:
+            except IntegrityError as exc:
+                if _violated_constraint(exc) != _SHORT_ID_CONSTRAINT:
+                    raise  # autre contrainte (FK agent supprimé…) : inutile de réessayer
                 continue
             return thread
         raise ApiError("SERVER_BUSY", "no free short id")

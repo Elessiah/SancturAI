@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.admin_messages.service import MAX_TEXT, AdminMessageService, verify_internal
+from app.admin_messages.service import MAX_RAW_TEXT, AdminMessageService, verify_internal
 from app.identity.deps import current_agent, require_disk
 from app.identity.models import Agent
 from app.state import AppState, get_db, get_state
@@ -13,13 +13,13 @@ router = APIRouter(tags=["admin-messages"])
 
 
 class SendIn(BaseModel):
-    text: str = Field(max_length=MAX_TEXT + 100)
+    text: str = Field(max_length=MAX_RAW_TEXT)
     short_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}$")
 
 
 class ReplyIn(BaseModel):
     short_id: str = Field(pattern=r"^[0-9a-f]{4}$")
-    text: str = Field(max_length=MAX_TEXT + 100)
+    text: str = Field(max_length=MAX_RAW_TEXT)
 
 
 @router.post("/api/admin-messages", dependencies=[Depends(require_disk)])

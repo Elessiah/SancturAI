@@ -127,3 +127,14 @@ async def test_inbox_bounded_per_thread(client: httpx.AsyncClient, state: AppSta
     msgs = (await client.get("/api/admin-messages", headers=a.headers)).json()["threads"][0]["messages"]
     assert len(msgs) == svc.INBOX_MESSAGES_PER_THREAD
     assert msgs[-1]["text"] == f"r{svc.INBOX_MESSAGES_PER_THREAD + 4}"
+
+
+async def test_create_thread_only_retries_short_id_collisions(state: AppState, db: AsyncSession) -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.admin_messages.service import AdminMessageService
+
+    ghost = Agent(agent_id="ghost-agent", handle="ghost")  # absent de la base : violation de FK, pas de short_id
+    with pytest.raises(IntegrityError):
+        await AdminMessageService(db, state)._create_thread(ghost)
