@@ -26,8 +26,8 @@ def test_check_line_rejects_any_control_or_line_separator() -> None:
         assert exc.value.code == "VALIDATION_ERROR"
 
 
-@pytest.mark.parametrize("char", ["‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨",
-                                  "⁩", "‎", "‏", "؜"])
+@pytest.mark.parametrize("char", ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068",
+                                  "\u2069", "\u200e", "\u200f", "\u061c"])
 def test_check_line_rejects_bidi_and_invisible_format_chars(char: str) -> None:
     """M2 (revue batch 2) : un titre ne peut pas inverser ou masquer visuellement l'affichage d'une liste."""
     with pytest.raises(ApiError) as exc:
@@ -38,7 +38,7 @@ def test_check_line_rejects_bidi_and_invisible_format_chars(char: str) -> None:
 
 def test_one_line_keeps_meaningful_joiners_and_drops_stray_ones() -> None:
     """Secu tour 2 : ZWNJ (persan) et ZWJ (émojis composés) gardés entre deux caractères visibles ; bidi retirés."""
-    family = "\U0001f468‍\U0001f469‍\U0001f467"
-    assert one_line(f"je veux : می‌خواهم {family}") == f"je veux : می‌خواهم {family}"
-    assert one_line("a‍‍‍b ‍c‍\n‮d") == "a‍b c d"
-    assert visible_length("a‍b") == 2
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert one_line(f"je veux : می\u200cخواهم {family}") == f"je veux : می\u200cخواهم {family}"
+    assert one_line("a\u200d\u200d\u200db \u200dc\u200d\n\u202ed") == "a\u200db c d"
+    assert visible_length("a\u200db") == 2
