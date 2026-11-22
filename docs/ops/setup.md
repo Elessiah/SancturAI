@@ -38,6 +38,7 @@ df -h /srv/sancturai-data   # ~20G
 ```
 
 ## 3. Slice, socket et relais
+Budget mémoire de la tranche (`MemoryMax=1.5G`) : db 512m + app 896m + relais 128M = 1,5G ; le reste du serveur reste prioritaire.
 ```bash
 sudo cp ~/apps/SancturAI/deploy/systemd/sancturai.slice /etc/systemd/system/
 sudo cp ~/apps/SancturAI/deploy/systemd/sancturai-relay.service /etc/systemd/system/

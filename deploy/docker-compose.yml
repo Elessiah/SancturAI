@@ -52,7 +52,7 @@ services:
     volumes:
       - /run/sancturai:/run/sancturai
       - /srv/sancturai-data:/data:ro
-    mem_limit: 1g
+    mem_limit: 896m  # budget tranche : db 512m + app 896m + relais 128M = 1,5G = MemoryMax de sancturai.slice
     cpus: 1.0
     pids_limit: 256
     depends_on:

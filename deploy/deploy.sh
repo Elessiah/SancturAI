@@ -6,6 +6,7 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "lancer avec sudo : sudo ./deploy.sh" >&2
   exit 1
 fi
+[ -f .env ] || [ -n "${SANCTURAI_IMAGE:-}" ] || { echo "deploy/.env absent (voir env.example)" >&2; exit 1; }
 : "${SANCTURAI_IMAGE:=$(grep -E '^SANCTURAI_IMAGE=' .env | cut -d= -f2-)}"
 export SANCTURAI_IMAGE
 

@@ -50,6 +50,10 @@ def test_hardening_and_limits() -> None:
         assert "mem_limit" in svc and "cpus" in svc and "pids_limit" in svc, name
     app = compose()["services"]["app"]
     assert app["read_only"] is True and app["user"] == "10001:33"
+    # budget mémoire : db + app + relais (128M) tiennent dans MemoryMax=1.5G de la tranche
+    limits = {n: svc["mem_limit"] for n, svc in compose()["services"].items()}
+    assert limits == {"db": "512m", "app": "896m"}
+    assert 512 + 896 + 128 <= 1536
     assert "--workers 1" in " ".join(app["command"])
     assert "--no-access-log" in " ".join(app["command"])  # chemins vault en clair dans les URL
 
