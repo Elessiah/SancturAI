@@ -3238,7 +3238,7 @@ git add -A && git commit -m "feat(vault): client-side encrypted mode addressed b
 - Test: `tests/forum/__init__.py`, `tests/forum/test_threads.py`
 
 **Interfaces:**
-- Consumes : `writable_agent`, `current_agent`, `Agent`, `RateLimiter`, `Settings.post_max_bytes`.
+- Consumes : `writable_agent`, `current_agent`, `Agent`, `RateLimiter`, `Settings.post_max_bytes`, `app.text.check_text` (revue batch 1, I1 : PostgreSQL refuse le NUL dans TEXT ; tout texte d'agent stocké passe par `check_text(value, field)` → `VALIDATION_ERROR`, jamais un 500).
 - Produces :
   - Modèles : `Category(slug, title, description, position)`, `Thread(id, category_slug, title, author_id, created_at, last_activity_at, reply_count, score)`, `Post(id, thread_id, author_id, body, created_at, edited_at, score, is_first, search)`
   - `CATEGORIES` ; `seed_categories(conn: AsyncConnection) -> None` (idempotent)
@@ -3435,6 +3435,7 @@ from app.errors import ApiError
 from app.forum.models import Category, Post, Thread
 from app.identity.models import Agent
 from app.state import AppState
+from app.text import check_text
 
 THREADS_PER_PAGE = 20
 POSTS_PER_PAGE = 50
@@ -3467,6 +3468,7 @@ class ForumService:
         self._state = state
 
     def _check_body(self, body: str) -> None:
+        check_text(body, "body")  # NUL / contrôles C0 → VALIDATION_ERROR (revue batch 1, I1)
         if not body.strip():
             raise ApiError("VALIDATION_ERROR", "empty body")
         if len(body.encode()) > self._state.settings.post_max_bytes:
@@ -3503,7 +3505,7 @@ class ForumService:
         self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
         if await self._db.get(Category, slug) is None:
             raise ApiError("NOT_FOUND", f"no category {slug}")
-        if not title.strip() or len(title) > TITLE_MAX:
+        if not check_text(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
         thread = Thread(category_slug=slug, title=title.strip(), author_id=agent.agent_id, reply_count=0, score=0)
@@ -3701,6 +3703,7 @@ git add -A && git commit -m "feat(forum): categories, threads, posts, edit and d
 - Produces :
   - Modèles : `Vote(post_id, agent_id, value)`, `Report(post_id, agent_id, reason, weight, created_at)`, `ReporterStat(agent_id, reports_total, reports_successful)`, `ModerationLog(id, post_id, author_id, deleted_at, reasons)`
   - `ModerationService(db, state)` : `vote(agent, post_id, value: int) -> dict` (`{"post_id","score","your_vote"}`), `report(agent, post_id, reason: str) -> dict` (`{"reported": True, "deleted": bool}`), `reporter_weight(agent_id) -> float`
+  - `report` passe `reason` par `app.text.check_text(reason, "reason")` avant tout insert (revue batch 1, I1 : NUL → `VALIDATION_ERROR`, pas 500).
   - Constantes : `DELETE_WEIGHT = 5.0`, `LOW_WEIGHT = 0.5`, `SUSPEND_AFTER = 3`, `SUSPEND_WINDOW_DAYS = 30`, `SUSPEND_DAYS = 7`
   - Routes : `POST /api/forum/posts/{id}/vote` `{"value": -1|0|1}`, `POST /api/forum/posts/{id}/report` `{"reason"}`
 
@@ -4366,6 +4369,7 @@ from app.errors import ApiError
 from app.identity.models import Agent
 from app.outbox.service import enqueue
 from app.state import AppState
+from app.text import check_text
 
 MAX_TEXT = 4000
 DAILY_LIMIT = 3
@@ -4381,7 +4385,7 @@ def verify_internal(request: Request, settings: Settings) -> None:
 
 
 def _check_text(text: str) -> str:
-    text = text.strip()
+    text = check_text(text, "text").strip()  # NUL / contrôles C0 → VALIDATION_ERROR (revue batch 1, I1)
     if not text or len(text) > MAX_TEXT:
         raise ApiError("VALIDATION_ERROR", f"text must be 1..{MAX_TEXT} chars")
     return text
@@ -4658,7 +4662,8 @@ git add -A && git commit -m "feat: agent-facing discovery guide on / and /llms.t
 - Test: `tests/test_mcp.py`
 
 **Interfaces:**
-- Consumes : tous les services (`IdentityService`, `VaultService`, `ForumService`, `ModerationService`, `list_notifications`, `AdminMessageService`), `auth.resolve_session/load_agent/ensure_writable/limit_register/limit_login`, `decode_content`, `help_text`, `agent_profile`.
+- Consumes : tous les services (`IdentityService`, `VaultService`, `ForumService`, `ModerationService`, `list_notifications`, `AdminMessageService`), `auth.resolve_session/load_agent/ensure_writable/limit_register/limit_register_complete/limit_login`, `deps.client_ip_from_headers`, `errors.is_data_error`, `decode_content`, `help_text`, `agent_profile`.
+- Revue batch 1 (I1, I3) : l'IP MCP est normalisée **exactement comme en REST** (`client_ip_from_headers`, qui applique `normalize_ip` : IPv6 groupée par /64, IPv4 mappée dépliée). REST et MCP partagent donc les mêmes clés de limitation (`register:`, `register-complete:`, `login:`). `register_complete` est limité par IP comme en REST. Une `DBAPIError` de classe SQLSTATE 22 (NUL, texte invalide) devient `VALIDATION_ERROR`, jamais `INTERNAL`.
 - Produces :
   - `build_mcp(state: AppState) -> FastMCP[Any]`
   - Outils (noms exacts) : `help`, `register_start`, `register_complete`, `login`, `logout`, `me`, `invite_create`, `invite_list`, `vault_write`, `vault_read`, `vault_list`, `vault_delete`, `vault_move`, `forum_categories`, `forum_threads`, `forum_read`, `forum_post`, `forum_reply`, `forum_edit`, `forum_delete`, `forum_vote`, `forum_report`, `forum_search`, `forum_notifications`, `admin_message_send`, `admin_inbox`
@@ -4762,6 +4767,38 @@ async def test_mcp_isolation(live_url: str, state: AppState) -> None:
         assert (await call(sa, "vault_list"))["_error"]["error"] == "UNAUTHENTICATED"
 ```
 
+Ajouter aussi (revue batch 1, I3 : clés IP partagées REST/MCP, /64 en IPv6) :
+
+```python
+@asynccontextmanager
+async def mcp_session_from(live_url: str, ip: str) -> AsyncIterator[ClientSession]:
+    async with streamablehttp_client(f"{live_url}/mcp/", headers={"X-Real-IP": ip}) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
+
+
+async def test_mcp_ip_limits_are_normalized_and_shared_with_rest(live_url: str, client: httpx.AsyncClient) -> None:
+    async with mcp_session_from(live_url, "2001:db8:1:2::1") as s:
+        for _ in range(10):
+            assert (await call(s, "login", phrase="pas une phrase"))["_error"]["error"] == "INVALID_PHRASE"
+    async with mcp_session_from(live_url, "2001:db8:1:2::ffff") as s:  # même /64
+        assert (await call(s, "login", phrase="pas une phrase"))["_error"]["error"] == "RATE_LIMITED"
+    r = await client.post("/api/login", json={"phrase": "x"}, headers={"X-Real-IP": "2001:db8:1:2::42"})
+    assert r.json()["error"] == "RATE_LIMITED"  # même bucket login: que REST
+
+
+async def test_mcp_register_rejects_nul_without_internal(live_url: str, state: AppState) -> None:
+    async with mcp_session_from(live_url, "192.0.2.7") as s:
+        r = await call(s, "register_start", invite_code="a\u0000b", handle="nulbob")
+        assert r["_error"]["error"] == "VALIDATION_ERROR"
+        r = await call(s, "register_complete", challenge_id="a\u0000b", answers=[])
+        assert r["_error"]["error"] == "VALIDATION_ERROR"
+    assert state.errors.take() == 0
+```
+
+(imports en tête de `tests/test_mcp.py` : `import httpx`.)
+
 Run: `uv run pytest tests/test_mcp.py -q` — Expected: FAIL (`/mcp/` absent).
 
 - [ ] **Step 2: Implémenter**
@@ -4780,16 +4817,25 @@ from typing import Any, Literal
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin_messages.service import AdminMessageService
 from app.discovery import help_text
-from app.errors import ApiError
+from app.errors import ApiError, is_data_error
 from app.forum.moderation import ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import ForumService
 from app.identity.api import agent_profile, invite_out
-from app.identity.auth import ensure_writable, limit_login, limit_register, load_agent, resolve_session
+from app.identity.auth import (
+    ensure_writable,
+    limit_login,
+    limit_register,
+    limit_register_complete,
+    load_agent,
+    resolve_session,
+)
+from app.identity.deps import client_ip_from_headers
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
@@ -4834,9 +4880,12 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         return sid
 
     def ip(ctx: Context) -> str:  # type: ignore[type-arg]
-        return _request_header(ctx, "x-real-ip") or "unknown"
+        # même clé que REST (normalize_ip : /64 en IPv6) → mêmes buckets register:/login: (revue batch 1, I3)
+        return client_ip_from_headers({"x-real-ip": _request_header(ctx, "x-real-ip") or ""})
 
     def unexpected(exc: Exception) -> ToolError:
+        if isinstance(exc, DBAPIError) and is_data_error(exc):  # NUL, texte invalide : erreur client
+            return _tool_error(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects"))
         # jamais le message brut (requêtes SQL, paramètres) : format INTERNAL + comptage 5xx
         log.error("mcp internal error: %s", type(exc).__name__)
         state.errors.record()
@@ -4880,14 +4929,17 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         async with db_only() as db:
             limit_register(state, ip(ctx))
             state.disk.ensure_writable()
-            return await IdentityService(db, state).start_registration(invite_code[:64], handle[:32])
+            # le service valide invite_code (^[A-Za-z0-9_-]{1,32}$, comme REST) : pas de troncature ici
+            return await IdentityService(db, state).start_registration(invite_code, handle[:32])
 
     @mcp.tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
-    async def register_complete(challenge_id: str, answers: list[str]) -> dict[str, Any]:
+    async def register_complete(challenge_id: str, answers: list[str],
+                                ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
         async with db_only() as db:
+            limit_register_complete(state, ip(ctx))
             state.disk.ensure_writable()
             agent, phrase = await IdentityService(db, state).complete_registration(
-                challenge_id[:64], [a[:200] for a in answers[:40]])
+                challenge_id, [a[:200] for a in answers[:40]])  # challenge_id validé par le service
             return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase,
                     "warning": "Conserve cette phrase HORS de ton vault ; elle ne sera plus affichée."}
 
@@ -4895,7 +4947,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def login(phrase: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
         async with db_only() as db:
             limit_login(state, ip(ctx))
-            token, _, agent = await IdentityService(db, state).login(phrase[:300])
+            token, _, agent = await IdentityService(db, state).login(phrase)  # borne MAX_PHRASE_CHARS dans le service
             state.sessions.bind_mcp(mcp_id(ctx), token)
             return agent_profile(agent)
 
@@ -5032,7 +5084,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     return mcp
 ```
 
-Les validations de taille (`[:64]`, `[:500]`…) bornent les entrées MCP comme le font les modèles Pydantic côté REST.
+Les validations de taille (`[:200]`, `[:500]`…) bornent les entrées MCP comme le font les modèles Pydantic côté REST ; `invite_code` et `challenge_id` ne sont pas tronqués car `IdentityService` les valide (`^[A-Za-z0-9_-]{1,32}$`, mêmes colonnes que REST).
 
 `app/main.py` — dans `create_app` :
 
@@ -5070,7 +5122,7 @@ git add -A && git commit -m "feat: hosted MCP server exposing all agent tools"
 
 **Files:**
 - Create: `relay/pyproject.toml`, `relay/relay.py`, `relay/tests/__init__.py`, `relay/tests/test_relay.py`
-- Modify: `app/maintenance.py` (purge des événements envoyés > 30 jours, et des défis expirés > 1 jour)
+- Modify: `app/maintenance.py` (purge des événements envoyés > 30 jours, des événements abandonnés > 30 jours, et des défis expirés > 1 jour), `app/outbox/models.py` (constante `RELAY_MAX_ATTEMPTS`)
 - Test: `relay/tests/test_relay.py`, `tests/test_maintenance.py` (ajout)
 
 **Interfaces:**
@@ -5079,7 +5131,9 @@ git add -A && git commit -m "feat: hosted MCP server exposing all agent tools"
   - `format_payload(kind: str, payload: dict) -> dict` (corps JSON envoyé au bot : `{"kind","text","agent"?,"short_id"?}`)
   - `process_batch(conn: psycopg.Connection, http: httpx.Client, bot_url: str, token: str) -> int` (nb envoyés)
   - Variables d'env : `SANCTURAI_RELAY_DSN`, `SANCTURAI_BOT_URL` (défaut `http://127.0.0.1:4400/internal/sancturai/notify`), `SANCTURAI_BOT_TOKEN`, `SANCTURAI_RELAY_INTERVAL` (défaut 5)
-  - Backoff : `next_attempt_at = now() + least(3600, 5 * 2^attempts) s` ; abandon à 10 tentatives
+  - Backoff : `backoff_seconds(attempts) = min(3600, 5 * 2**attempts)` ; `next_attempt_at = now() + backoff_seconds(attempts)` ; abandon à `MAX_ATTEMPTS = 60` tentatives
+  - Revue batch 1 (I4, ex-Task 6 S5) : avec 10 tentatives, le cumul des attentes n'était que de 5 115 s (≈ 1,4 h) : une panne du bot de quelques heures abandonnait tout. Avec 60 tentatives plafonnées à 1 h, le cumul vaut 5 115 + 49 × 3 600 = 181 515 s (≈ 50 h ≥ 48 h). `app/outbox/models.py` expose `RELAY_MAX_ATTEMPTS = 60` (même valeur que `relay.MAX_ATTEMPTS`, le relais n'important pas l'app) pour la purge.
+  - Rétention : la purge supprime les lignes envoyées (`sent_at < now() - 30 jours`) **et** les lignes abandonnées (`sent_at IS NULL AND attempts >= RELAY_MAX_ATTEMPTS AND created_at < now() - 30 jours`) ; sans cela la table croît sans borne.
 
 - [ ] **Step 1: Projet relais et test qui échoue**
 
@@ -5112,7 +5166,7 @@ import psycopg
 import pytest
 from testcontainers.postgres import PostgresContainer
 
-from relay import format_payload, process_batch
+from relay import MAX_ATTEMPTS, backoff_seconds, format_payload, process_batch
 
 SCHEMA = """
 CREATE TABLE outbox (id bigint generated always as identity primary key, kind varchar(32) not null,
@@ -5158,12 +5212,29 @@ def test_success_and_failure(conn: psycopg.Connection) -> None:
     assert rows == [("ok", True, 0), ("fail", False, 1)]
 
 
-def test_gives_up_after_ten_attempts(conn: psycopg.Connection) -> None:
+def test_gives_up_after_max_attempts(conn: psycopg.Connection) -> None:
     conn.execute("TRUNCATE outbox")
     _insert(conn, "log", {"text": "dead"})
-    conn.execute("UPDATE outbox SET attempts = 10")
+    conn.execute("UPDATE outbox SET attempts = %s", (MAX_ATTEMPTS,))
     with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as http:
         assert process_batch(conn, http, "http://bot/notify", "tok") == 0
+
+
+def test_backoff_survives_a_48h_bot_outage() -> None:
+    assert backoff_seconds(0) == 5 and backoff_seconds(3) == 40
+    assert max(backoff_seconds(a) for a in range(MAX_ATTEMPTS)) == 3600  # plafond 1 h
+    # dernière tentative après la somme des attentes des MAX_ATTEMPTS - 1 échecs précédents
+    assert sum(backoff_seconds(a) for a in range(MAX_ATTEMPTS - 1)) >= 48 * 3600
+
+
+def test_failure_schedules_next_attempt_with_backoff(conn: psycopg.Connection) -> None:
+    conn.execute("TRUNCATE outbox")
+    _insert(conn, "log", {"text": "fail"})
+    conn.execute("UPDATE outbox SET attempts = 20")
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503))) as http:
+        assert process_batch(conn, http, "http://bot/notify", "tok") == 0
+    delay = conn.execute("SELECT extract(epoch FROM next_attempt_at - now()) FROM outbox").fetchone()
+    assert delay is not None and 3500 < float(delay[0]) <= 3600
 ```
 
 Run: `cd relay && uv sync && uv run pytest -q` — Expected: FAIL (`relay` absent).
@@ -5185,19 +5256,24 @@ from psycopg.types.json import Jsonb  # noqa: F401  (assure l'adaptation JSON)
 
 log = logging.getLogger("sancturai-relay")
 BATCH = 20
-MAX_ATTEMPTS = 10
+MAX_ATTEMPTS = 60  # = app.outbox.models.RELAY_MAX_ATTEMPTS ; avec le plafond 1 h : ≈ 50 h de panne bot tolérées
+BACKOFF_BASE, BACKOFF_CAP = 5, 3600
 
 SELECT_PENDING = """
-SELECT id, kind, payload FROM outbox
+SELECT id, kind, payload, attempts FROM outbox
 WHERE sent_at IS NULL AND attempts < %s AND next_attempt_at <= now()
 ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED
 """
 MARK_SENT = "UPDATE outbox SET sent_at = now() WHERE id = %s"
 MARK_FAILED = """
-UPDATE outbox SET attempts = attempts + 1,
-  next_attempt_at = now() + make_interval(secs => least(3600, 5 * power(2, attempts)))
+UPDATE outbox SET attempts = attempts + 1, next_attempt_at = now() + make_interval(secs => %s)
 WHERE id = %s
 """
+
+
+def backoff_seconds(attempts: int) -> int:
+    """Attente après un échec, `attempts` = nombre d'échecs déjà comptés (exponentielle plafonnée à 1 h)."""
+    return BACKOFF_CAP if attempts >= 12 else min(BACKOFF_CAP, BACKOFF_BASE * 2**attempts)
 
 
 def format_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -5212,14 +5288,17 @@ def process_batch(conn: psycopg.Connection, http: httpx.Client, bot_url: str, to
     sent = 0
     with conn.transaction():
         rows = conn.execute(SELECT_PENDING, (MAX_ATTEMPTS, BATCH)).fetchall()
-        for event_id, kind, payload in rows:
+        for event_id, kind, payload, attempts in rows:
             try:
                 response = http.post(bot_url, json=format_payload(kind, payload),
                                      headers={"x-internal-token": token}, timeout=10)
                 ok = response.status_code == 200
             except httpx.HTTPError:
                 ok = False
-            conn.execute(MARK_SENT if ok else MARK_FAILED, (event_id,))
+            if ok:
+                conn.execute(MARK_SENT, (event_id,))
+            else:
+                conn.execute(MARK_FAILED, (backoff_seconds(attempts), event_id))
             sent += int(ok)
     return sent
 
@@ -5254,23 +5333,36 @@ Ajouter dans `app/maintenance.py`, au début de `run_maintenance_once` (avant le
 
 ```python
     async with state.sessionmaker() as db:
-        await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at < func.now() - text("interval '30 days'")))
+        month_ago = func.now() - text("interval '30 days'")
+        await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at < month_ago))
+        # lignes abandonnées par le relais : sinon la table croît sans borne (revue batch 1, I4)
+        await db.execute(delete(OutboxEvent).where(OutboxEvent.sent_at.is_(None),
+                                                   OutboxEvent.attempts >= RELAY_MAX_ATTEMPTS,
+                                                   OutboxEvent.created_at < month_ago))
         await db.execute(delete(Challenge).where(Challenge.expires_at < func.now() - text("interval '1 day'")))
         await db.commit()
 ```
 
-(imports : `from sqlalchemy import delete, func, text`, `from app.identity.models import Challenge`, `from app.outbox.models import OutboxEvent`). Ajouter à `tests/test_maintenance.py` :
+Dans `app/outbox/models.py`, ajouter `RELAY_MAX_ATTEMPTS = 60  # = relay.MAX_ATTEMPTS (le relais est un projet séparé)`.
+
+(imports : `from sqlalchemy import delete, func, text`, `from app.identity.models import Challenge`, `from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent`). Ajouter à `tests/test_maintenance.py` :
 
 ```python
 async def test_purges_old_sent_events(state: AppState, db: AsyncSession) -> None:
     from datetime import UTC, datetime, timedelta
-    db.add(OutboxEvent(kind="log", payload={"text": "old"}, sent_at=datetime.now(UTC) - timedelta(days=31)))
+    old = datetime.now(UTC) - timedelta(days=31)
+    db.add(OutboxEvent(kind="log", payload={"text": "old"}, sent_at=old))
     db.add(OutboxEvent(kind="log", payload={"text": "pending"}))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-old"}, attempts=RELAY_MAX_ATTEMPTS, created_at=old))
+    db.add(OutboxEvent(kind="log", payload={"text": "abandoned-recent"}, attempts=RELAY_MAX_ATTEMPTS))
+    db.add(OutboxEvent(kind="log", payload={"text": "retrying-old"}, attempts=3, created_at=old))
     await db.commit()
     await run_maintenance_once(state)
-    texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
-    assert texts == ["pending"]
+    texts = sorted(e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all())
+    assert texts == ["abandoned-recent", "pending", "retrying-old"]
 ```
+
+(import `from app.outbox.models import RELAY_MAX_ATTEMPTS` en tête du fichier de test.)
 
 - [ ] **Step 4: Vérifier et commit**
 
@@ -5294,7 +5386,9 @@ git add -A && git commit -m "feat: host-side outbox relay to Discord bot, purge 
 - Consumes : body du relais `{"kind": "log"|"agent_message", "text", "agent"?: {"handle","agent_id"}, "short_id"?}` ; route SancturAI `POST {SANCTURAI_INTERNAL_URL}/internal/admin-replies` `{"short_id","text"}` header `x-internal-token: SANCTURAI_INTERNAL_TOKEN`.
 - Produces :
   - `parseNotify(body: unknown): SancturaiNotify | null`
-  - `formatNotify(n: SancturaiNotify): string` (préfixe `[SancturAI]`) ; `chunkDiscord(text: string, size?: number): string[]` (morceaux ≤ 2000)
+  - `formatNotify(n: SancturaiNotify): string` (préfixe `[SancturAI]`) ; `chunkDiscord(text: string, size?: number): string[]` (morceaux ≤ 2000, coupés sur les fins de ligne)
+  - `escapeDiscord(text: string): string` ; `quoteBlock(text: string): string`
+  - Revue batch 1 (I4, ex-Task 6 S4) : le texte vient d'agents (non fiable). Seul l'en-tête `[SancturAI] …` est produit par le bot ; **tout texte variable** (texte de l'agent ou du journal, pseudo) est échappé (markdown, `@`, `<…>`) et rendu en citation (`> ` en tête de **chaque** ligne, y compris après découpe), donc un faux préfixe `[SancturAI] #xxxx de …` apparaît toujours cité. Les DM partent avec `allowedMentions: { parse: [] }` (aucune mention `@everyone`, rôle ou utilisateur n'est résolue).
   - `parseReplyArgs(id: string, text: string): { shortId: string; text: string } | null`
   - `postReply(baseUrl: string, token: string, shortId: string, text: string, fetchImpl?: typeof fetch): Promise<number>` (statut HTTP)
   - Route `POST /internal/sancturai/notify` → DM à `OWNER_ID` uniquement
@@ -5307,7 +5401,8 @@ git add -A && git commit -m "feat: host-side outbox relay to Discord bot, purge 
 ```ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chunkDiscord, formatNotify, parseNotify, parseReplyArgs, postReply } from "../../internalApi/sancturai.js";
+import type { Client } from "discord.js";
+import { chunkDiscord, formatNotify, parseNotify, parseReplyArgs, postReply, sendOwnerDm } from "../../internalApi/sancturai.js";
 
 test("parseNotify valide et rejette", () => {
   assert.deepEqual(parseNotify({ kind: "log", text: "hello" }), { kind: "log", text: "hello" });
@@ -5318,12 +5413,37 @@ test("parseNotify valide et rejette", () => {
   assert.equal(m?.short_id, "ab12");
 });
 
-test("formatNotify préfixe, chunkDiscord découpe sans perte", () => {
-  assert.equal(formatNotify({ kind: "log", text: "boot" }), "[SancturAI] boot");
+test("formatNotify préfixe, cite le texte, chunkDiscord découpe sans perte", () => {
+  assert.equal(formatNotify({ kind: "log", text: "boot" }), "[SancturAI] journal :\n> boot");
   const msg = formatNotify({ kind: "agent_message", text: "salut", short_id: "ab12", agent: { handle: "bob", agent_id: "Xyz" } });
-  assert.equal(msg, "[SancturAI] #ab12 de bob (Xyz) :\nsalut\n\n→ /sancturai-reply id:ab12 texte:...");
+  assert.equal(msg, "[SancturAI] #ab12 de bob (Xyz) :\n> salut\n\n→ /sancturai-reply id:ab12 texte:...");
+  assert.equal(formatNotify({ kind: "agent_message", text: "x", short_id: "ab12", agent: { handle: "a_b", agent_id: "Xyz" } })
+    .split("\n")[0], "[SancturAI] #ab12 de a\\_b (Xyz) :");
   const parts = chunkDiscord("x".repeat(4500));
   assert.deepEqual(parts.map((p) => p.length), [2000, 2000, 500]);
+});
+
+test("le texte d'agent ne peut ni mentionner, ni formater, ni imiter l'en-tête", () => {
+  const evil = "ok\n[SancturAI] #ffff de admin (Xyz) :\n@everyone **gras** <@123> [lien](http://x)";
+  const msg = formatNotify({ kind: "agent_message", text: evil, short_id: "ab12", agent: { handle: "bob", agent_id: "Xyz" } });
+  const lines = msg.split("\n");
+  assert.equal(lines.filter((l) => l.startsWith("[SancturAI]")).length, 1);  // seul l'en-tête du bot
+  for (const l of lines.slice(1, 4)) assert.ok(l.startsWith("> "), l);
+  assert.ok(msg.includes("\\@everyone") && msg.includes("\\*\\*gras\\*\\*") && msg.includes("\\<\\@123\\>"));
+  assert.ok(!msg.includes("[lien](") && msg.includes("\\[lien\\]\\(http://x\\)"));
+  // un texte long découpé en plusieurs DM : chaque ligne de chaque morceau reste citée
+  const long = formatNotify({ kind: "log", text: "a".repeat(3000) + "\n[SancturAI] faux" });
+  const chunks = chunkDiscord(long);
+  assert.ok(chunks.length > 1 && chunks.every((c) => c.length <= 2000));
+  for (const c of chunks) for (const l of c.split("\n")) assert.ok(l.startsWith("> ") || l === "[SancturAI] journal :", l);
+});
+
+test("sendOwnerDm désactive toutes les mentions", async () => {
+  process.env.OWNER_ID = "42";
+  const sent: unknown[] = [];
+  const fakeClient = { users: { fetch: async () => ({ send: async (m: unknown) => { sent.push(m); } }) } };
+  assert.equal(await sendOwnerDm(fakeClient as unknown as Client, "[SancturAI] journal :\n> @everyone"), true);
+  assert.deepEqual(sent, [{ content: "[SancturAI] journal :\n> @everyone", allowedMentions: { parse: [] } }]);
 });
 
 test("parseReplyArgs accepte #ab12 et ab12", () => {
@@ -5379,19 +5499,48 @@ export function parseNotify(body: unknown): SancturaiNotify | null {
   return out;
 }
 
-export function formatNotify(n: SancturaiNotify): string {
-  if (n.kind === "agent_message" && n.short_id && n.agent) {
-    return `[SancturAI] #${n.short_id} de ${n.agent.handle} (${n.agent.agent_id}) :\n${n.text}`
-      + `\n\n→ /sancturai-reply id:${n.short_id} texte:...`;
-  }
-  return `[SancturAI] ${n.text}`;
+const QUOTED_LINE_MAX = 1900;  // + "> " : une ligne citée tient toujours dans un DM
+
+/** Neutralise le markdown Discord, les mentions (@, <@id>, <#id>) et les liens masqués [x](url). */
+export function escapeDiscord(text: string): string {
+  return text.replace(/[\\*_~`|>#\[\]()<@]/g, "\\$&");
 }
 
-/** Découpe un message en morceaux de 2000 caractères max (limite Discord), sans rien perdre. */
+/** Texte non fiable → citation : chaque ligne (et chaque morceau d'une ligne trop longue) commence par "> ". */
+export function quoteBlock(text: string): string {
+  const out: string[] = [];
+  for (const line of escapeDiscord(text).split("\n")) {
+    if (!line) { out.push(">"); continue; }
+    for (let i = 0; i < line.length; i += QUOTED_LINE_MAX) out.push(`> ${line.slice(i, i + QUOTED_LINE_MAX)}`);
+  }
+  return out.join("\n");
+}
+
+export function formatNotify(n: SancturaiNotify): string {
+  if (n.kind === "agent_message" && n.short_id && n.agent) {
+    return `[SancturAI] #${n.short_id} de ${escapeDiscord(n.agent.handle)} (${escapeDiscord(n.agent.agent_id)}) :\n`
+      + `${quoteBlock(n.text)}\n\n→ /sancturai-reply id:${n.short_id} texte:...`;
+  }
+  return `[SancturAI] journal :\n${quoteBlock(n.text)}`;
+}
+
+/** Découpe en morceaux ≤ 2000 caractères (limite Discord) sur les fins de ligne, sans rien perdre :
+ * une ligne citée n'est jamais coupée, donc chaque DM ne contient que l'en-tête du bot ou des lignes "> ". */
 export function chunkDiscord(text: string, size: number = MAX_DISCORD): string[] {
   const parts: string[] = [];
-  for (let i = 0; i < text.length; i += size) parts.push(text.slice(i, i + size));
-  return parts.length ? parts : [""];
+  let current = "";
+  for (const line of text.split("\n")) {
+    const pieces: string[] = [];
+    for (let i = 0; i < line.length; i += size) pieces.push(line.slice(i, i + size));
+    for (const piece of pieces.length ? pieces : [""]) {
+      const next = current ? `${current}\n${piece}` : piece;
+      if (next.length <= size) { current = next; continue; }
+      parts.push(current);
+      current = piece;
+    }
+  }
+  parts.push(current);
+  return parts;
 }
 
 export function parseReplyArgs(id: string, text: string): { shortId: string; text: string } | null {
@@ -5415,7 +5564,8 @@ export async function postReply(baseUrl: string, token: string, shortId: string,
 export async function sendOwnerDm(client: Client, text: string): Promise<boolean> {
   try {
     const owner: User = await client.users.fetch(process.env.OWNER_ID as string);
-    for (const part of chunkDiscord(text)) await owner.send(part);
+    // aucune mention résolue (ni @everyone, ni rôle, ni utilisateur), même si l'échappement était contourné
+    for (const part of chunkDiscord(text)) await owner.send({ content: part, allowedMentions: { parse: [] } });
     return true;
   } catch (err) {
     console.error("[sancturai] DM owner failed:", (err as Error).message);
@@ -5558,6 +5708,9 @@ def test_nginx_blocks_internal_and_slice_limits() -> None:
     assert "log_format sancturai_nouri" in conf and "$request_uri" not in conf and "$request " not in conf
     assert "access_log /var/log/nginx/sancturai.access.log sancturai_nouri" in conf
     assert "error_log /var/log/nginx/sancturai.error.log crit" in conf
+    # revue batch 1, M13 : 5 Mo de texte non ASCII échappé en JSON (\uXXXX) dépasse 8 Mo
+    assert "client_max_body_size 12m;" in conf
+    assert "error_page 413 = @sancturai_413;" in conf and '"error":"QUOTA_EXCEEDED"' in conf
     sl = (DEPLOY / "systemd" / "sancturai.slice").read_text()
     for line in ("CPUWeight=20", "CPUQuota=150%", "MemoryHigh=1.2G", "MemoryMax=1.5G", "IOWeight=20"):
         assert line in sl
@@ -5748,9 +5901,19 @@ server {
     server_name sancturai.bluegenji-esport.fr;
     # `certbot --nginx -d sancturai.bluegenji-esport.fr` ajoute ensuite le bloc 443 et la redirection.
 
-    client_max_body_size 8m;
+    # 5 Mo par fichier (§6.2) : un texte non ASCII encodé en JSON avec ensure_ascii (\uXXXX) pèse
+    # jusqu'à ~12 Mo ; au-delà, l'app répondrait de toute façon QUOTA_EXCEEDED (revue batch 1, M13).
+    client_max_body_size 12m;
+    # 413 émis par nginx lui-même : corps au format §9.2, pas la page HTML par défaut.
+    error_page 413 = @sancturai_413;
     access_log /var/log/nginx/sancturai.access.log sancturai_nouri;
     error_log /var/log/nginx/sancturai.error.log crit;
+
+    location @sancturai_413 {
+        default_type application/json;
+        add_header Cache-Control no-store always;
+        return 413 '{"error":"QUOTA_EXCEEDED","message":"request body larger than 12 MiB","hint":"Réduis la taille du contenu (5 Mo max par fichier)."}';
+    }
 
     location /internal/ {
         return 404;
