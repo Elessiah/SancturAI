@@ -14,7 +14,8 @@ x-hardening: &hardening
 services:
   db:
     <<: *hardening
-    image: postgres:17-alpine
+    # épinglée par digest (index multi-arch de 17.12-alpine3.24) : mise à jour volontaire, jamais au hasard d'un pull
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     read_only: true  # §4.2 : seuls les montages (données, socket) et /tmp sont inscriptibles
     tmpfs: ["/tmp:size=64m"]
     # §4.2 : non-root et aucune capacité (70 = postgres de l'image alpine) ; pg/ et pg-socket/ sont créés
@@ -43,7 +44,7 @@ services:
 
   app:
     <<: *hardening
-    image: ${SANCTURAI_IMAGE:?set SANCTURAI_IMAGE in deploy/.env}
+    image: ${SANCTURAI_IMAGE:?set SANCTURAI_IMAGE in deploy/.env}  # ghcr.io/<compte>/sancturai:<SHA>, posé par deploy.sh
     user: "10001:33"
     read_only: true
     tmpfs: ["/tmp:size=64m"]
@@ -65,6 +66,7 @@ services:
 networks:
   internal:
     internal: true
+    enable_ipv6: false  # explicite : un démon réglé sur IPv6 par défaut redonnerait à l'hôte une passerelle v6
     # Sans cette option, l'hôte garde une IP sur le pont (passerelle .1) et les conteneurs atteignent
     # tous les services de l'hôte qui écoutent sur 0.0.0.0 (vérifié) : internal ne bloque que le routage.
     driver_opts:

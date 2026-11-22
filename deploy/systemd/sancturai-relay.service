@@ -7,7 +7,8 @@ Wants=network-online.target
 Slice=sancturai.slice
 User=elessiah
 # Le socket Postgres appartient à 70:70 en 0770 (db non-root : il ne peut pas lui donner un autre groupe).
-SupplementaryGroups=70
+# sancturai-pg (gid 70) : groupe dédié créé par setup.md §2, qui échoue si le gid 70 est déjà pris.
+SupplementaryGroups=sancturai-pg
 WorkingDirectory=/home/elessiah/apps/SancturAI/relay
 EnvironmentFile=/home/elessiah/apps/.secrets/sancturai-relay.env
 Environment=UV_OFFLINE=1
@@ -17,9 +18,13 @@ RestartSec=10
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=read-only
+# /home vide (tmpfs) : ni ~/.ssh, ni les secrets ni le code des autres services. Seuls uv, son Python et le
+# relais sont remontés. EnvironmentFile est lu par systemd avant la mise en place du bac à sable.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/elessiah/.local/bin/uv /home/elessiah/apps/SancturAI/relay -/home/elessiah/.local/share/uv
+BindPaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv
 # pg-socket : connect() sur le socket Postgres ; l'entrypoint passe le répertoire en 3775, le socket reste 0770
-ReadWritePaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv /srv/sancturai-data/pg-socket
+ReadWritePaths=/srv/sancturai-data/pg-socket
 MemoryMax=128M
 # §4.1 : le relais ne parle qu'au bot (127.0.0.1:4400) et à Postgres (socket Unix). Les dépendances
 # sont installées avant le démarrage (`uv sync`, setup.md) : aucun accès au réseau n'est nécessaire.

@@ -40,6 +40,9 @@ def test_network_is_internal_and_no_ports() -> None:
         assert svc["networks"] == ["internal"]
     # internal: true seul laisse à l'hôte une IP sur le pont : les conteneurs joindraient ses services
     assert c["networks"]["internal"]["driver_opts"] == {"com.docker.network.bridge.inhibit_ipv4": "true"}
+    assert c["networks"]["internal"]["enable_ipv6"] is False  # pas de passerelle v6 de l'hôte non plus
+    # image Postgres épinglée par digest ; l'app par SHA de commit (deploy.sh), jamais :latest
+    assert re.fullmatch(r"postgres:17-alpine@sha256:[0-9a-f]{64}", c["services"]["db"]["image"])
 
 
 def test_hardening_and_limits() -> None:
@@ -57,9 +60,12 @@ def test_hardening_and_limits() -> None:
     db = compose()["services"]["db"]
     assert db["user"] == "70:70" and "cap_add" not in db
     relay = (DEPLOY / "systemd" / "sancturai-relay.service").read_text(encoding="utf-8").splitlines()
-    assert "SupplementaryGroups=70" in relay
+    assert "SupplementaryGroups=sancturai-pg" in relay
     doc = (ROOT / "docs" / "ops" / "setup.md").read_text(encoding="utf-8")
-    assert "install -d -o 70 -g 70 -m 700 /srv/sancturai-data/pg " in doc
+    # gid/uid 70 réservés à un groupe/compte dédié (uid 70 = superutilisateur postgres en `peer` sur le socket)
+    assert "sudo groupadd --gid 70 sancturai-pg" in doc and "sudo useradd --system --uid 70 --gid 70" in doc
+    assert doc.index("groupadd --gid 70") < doc.index("/srv/sancturai-data/pg\n")
+    assert "install -d -o 70 -g 70 -m 700 /srv/sancturai-data/pg\n" in doc
     assert "install -d -o 70 -g 70 -m 770 /srv/sancturai-data/pg-socket" in doc
     # budget mémoire : db + app + relais (128M) tiennent dans MemoryMax=1.5G de la tranche
     limits = {n: svc["mem_limit"] for n, svc in compose()["services"].items()}
@@ -200,8 +206,13 @@ def test_roles_script_passes_passwords_as_psql_variables() -> None:
 def test_deploy_script_grants_and_healthcheck() -> None:
     sh = (DEPLOY / "deploy.sh").read_text(encoding="utf-8")
     assert sh.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in sh
-    assert "GRANT USAGE ON SCHEMA public TO relay; GRANT SELECT, UPDATE ON outbox TO relay;" in sh
+    # UPDATE limité à l'état d'envoi (relay/tests vérifie ces droits contre un vrai Postgres)
+    assert ("REVOKE UPDATE ON outbox FROM relay; GRANT USAGE ON SCHEMA public TO relay; "
+            "GRANT SELECT, UPDATE (sent_at, attempts, next_attempt_at) ON outbox TO relay;") in sh
     assert sh.index("alembic upgrade head") < sh.index("GRANT USAGE") < sh.index("docker compose up -d app")
+    # image épinglée par SHA de commit validé ; corps JSON de notify sérialisé, jamais interpolé
+    assert '[[ "${sha}" =~ ^[0-9a-f]{40}$ ]]' in sh and 'SANCTURAI_IMAGE="${current_image%:*}:${sha}"' in sh
+    assert "json.dumps" in sh and '\\"text\\":' not in sh
     # le listener 8300 ne sert que /internal/* : le healthcheck passe par le socket de l'app
     assert "--unix-socket /run/sancturai/app.sock" in sh and "/healthz" in sh
     assert "8300/healthz" not in sh
@@ -235,6 +246,10 @@ def test_relay_unit() -> None:
     for line in ("IPAddressDeny=any", "IPAddressAllow=localhost", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
                  "CapabilityBoundingSet=", "Environment=UV_OFFLINE=1"):
         assert line in lines, line
+    # /home masqué (clés SSH, secrets et code des autres services) ; seuls uv et le relais sont remontés
+    assert "ProtectHome=tmpfs" in lines and "ProtectHome=read-only" not in unit
+    assert "BindPaths=/home/elessiah/.cache/uv /home/elessiah/apps/SancturAI/relay/.venv" in lines
+    assert not any(line.startswith(("ReadWritePaths=", "Bind")) and ".secrets" in line for line in lines)
     tmp = (DEPLOY / "tmpfiles" / "sancturai.conf").read_text(encoding="utf-8")
     assert "d /run/sancturai 2770 10001 www-data -" in tmp
 
@@ -256,6 +271,9 @@ def test_setup_doc_fits_existing_vhost() -> None:
     assert "sudo nginx -t && sudo systemctl reload nginx" in doc
     assert "certbot --nginx" not in doc  # le certificat existe déjà ; certbot réécrirait le fichier
     assert "20G" in doc and "nofail" in doc
+    # dossier de secrets partagé : jamais re-chmodé s'il existe
+    assert "[ -d ~/apps/.secrets ] || install -d -m 700 ~/apps/.secrets" in doc
+    assert "socket.getaddrinfo('example.com', 443)" in doc  # DNS externe en échec (§7)
 
 
 def test_scripts_are_executable_in_git() -> None:

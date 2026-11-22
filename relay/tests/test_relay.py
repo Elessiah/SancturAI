@@ -1,5 +1,7 @@
 import json
+import re
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import psycopg
@@ -163,6 +165,36 @@ def test_out_of_contract_and_oversized_rows_are_abandoned_unsent(conn: psycopg.C
     assert calls == 0
     assert conn.execute("SELECT attempts, sent_at FROM outbox").fetchall() == [(MAX_ATTEMPTS, None)] * 2
     assert "secret-agent-text" not in caplog.text
+
+
+def test_relay_works_with_deploy_grants_only(conn: psycopg.Connection) -> None:
+    """Droits réels de prod (deploy.sh) : le relais règle ses lots, mais ne peut réécrire ni kind ni payload."""
+    sh = (Path(__file__).resolve().parents[2] / "deploy" / "deploy.sh").read_text(encoding="utf-8")
+    grants = re.search(r'-c "(REVOKE UPDATE ON outbox FROM relay;[^"]*)"', sh)
+    assert grants is not None
+    conn.execute("TRUNCATE outbox")
+    conn.execute("DROP ROLE IF EXISTS relay")
+    conn.execute("CREATE ROLE relay LOGIN PASSWORD 'relay-pw'")
+    conn.execute(grants.group(1))
+    for text in ("ok", "fail", "bad"):
+        _insert(conn, "log", {"text": text})
+    _insert(conn, "other", {"text": "x"})  # hors contrat : abandon
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response({"ok": 200, "fail": 503, "bad": 400}[json.loads(request.content)["text"]])
+
+    info = conn.info
+    with psycopg.connect(host=info.host, port=info.port, dbname=info.dbname, user="relay",
+                         password="relay-pw", autocommit=True) as relay_conn:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+            assert process_batch(relay_conn, http, "http://bot/notify", "tok") == 4
+        for column in ("payload = '{}'", "kind = 'log'"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                relay_conn.execute(f"UPDATE outbox SET {column}")  # noqa: S608 (littéraux du test)
+    rows = conn.execute("SELECT kind, sent_at IS NOT NULL, attempts FROM outbox ORDER BY id").fetchall()
+    assert rows == [("log", True, 0), ("log", False, 1), ("log", False, MAX_ATTEMPTS), ("other", False, MAX_ATTEMPTS)]
+    conn.execute("DROP OWNED BY relay")
+    conn.execute("DROP ROLE relay")
 
 
 @pytest.mark.parametrize("token", [None, "", "  "])
