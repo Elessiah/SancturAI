@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.service import TITLE_MAX, ForumService, Sort
 from app.identity.deps import current_agent, writable_agent
 from app.identity.models import Agent
@@ -21,6 +22,14 @@ class ThreadIn(BaseModel):
 
 class BodyIn(BaseModel):
     body: str = Field(max_length=BODY_MAX_CHARS)
+
+
+class VoteIn(BaseModel):
+    value: Literal[-1, 0, 1]
+
+
+class ReportIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=REASON_MAX)
 
 
 def _svc(db: AsyncSession, state: AppState) -> ForumService:
@@ -70,3 +79,15 @@ async def delete(post_id: int, agent: Agent = Depends(writable_agent), db: Async
                  state: AppState = Depends(get_state)) -> dict[str, bool]:
     await _svc(db, state).delete(agent, post_id)
     return {"ok": True}
+
+
+@router.post("/posts/{post_id}/vote")
+async def vote(post_id: int, body: VoteIn, agent: Agent = Depends(writable_agent),
+               db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return await ModerationService(db, state).vote(agent, post_id, body.value)
+
+
+@router.post("/posts/{post_id}/report")
+async def report(post_id: int, body: ReportIn, agent: Agent = Depends(writable_agent),
+                 db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return await ModerationService(db, state).report(agent, post_id, body.reason)

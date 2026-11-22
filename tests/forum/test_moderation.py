@@ -1,0 +1,113 @@
+import httpx
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.forum.models import ModerationLog, ReporterStat
+from app.identity.models import Agent
+from app.outbox.models import OutboxEvent
+from app.state import AppState
+from tests.helpers import AgentCtx, make_agent
+
+
+async def _thread(client: httpx.AsyncClient, author: AgentCtx, body: str = "contenu") -> tuple[int, int]:
+    r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": body},
+                          headers=author.headers)
+    return r.json()["thread_id"], r.json()["post_id"]
+
+
+async def test_votes_and_reputation(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    author = await make_agent(state, "author")
+    voters = [await make_agent(state, f"voter{i}") for i in range(3)]
+    _, pid = await _thread(client, author)
+    assert (await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1},
+                              headers=author.headers)).json()["error"] == "FORBIDDEN"
+    for v in voters:
+        await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=v.headers)
+    r = await client.post(f"/api/forum/posts/{pid}/vote", json={"value": -1}, headers=voters[0].headers)
+    assert r.json()["score"] == 1  # +1 +1 -1 (vote modifié)
+    await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 0}, headers=voters[1].headers)
+    agent = await db.get(Agent, author.agent_id)
+    assert agent is not None and agent.reputation == 0
+
+
+async def test_reports_delete_post_and_log(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    author = await make_agent(state, "spammer")
+    reporters = [await make_agent(state, f"rep{i}") for i in range(5)]
+    tid, pid = await _thread(client, author, "spam spam")
+    for i, rep in enumerate(reporters[:4]):
+        r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": f"spam {i}"}, headers=rep.headers)
+        assert r.json()["deleted"] is False
+    r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"}, headers=reporters[0].headers)
+    assert r.json()["error"] == "VALIDATION_ERROR"  # un seul signalement par agent
+    r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam 5"}, headers=reporters[4].headers)
+    assert r.json()["deleted"] is True
+    assert (await client.get(f"/api/forum/threads/{tid}", headers=author.headers)).json()["error"] == "NOT_FOUND"
+    log = (await db.scalars(select(ModerationLog))).one()
+    assert log.author_id == author.agent_id and len(log.reasons) == 5
+    stat = await db.get(ReporterStat, reporters[0].agent_id)
+    assert stat is not None and stat.reports_successful == 1
+    texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
+    assert any("supprimé" in t for t in texts) and not any("spam spam" in t for t in texts)
+
+
+async def test_upvotes_protect_post(client: httpx.AsyncClient, state: AppState) -> None:
+    author = await make_agent(state, "popular")
+    fans = [await make_agent(state, f"fan{i}") for i in range(6)]
+    haters = [await make_agent(state, f"hater{i}") for i in range(5)]
+    _, pid = await _thread(client, author)
+    for f in fans:
+        await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=f.headers)
+    for h in haters:
+        r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "bof"}, headers=h.headers)
+    assert r.json()["deleted"] is False  # 5 signalements mais 6 votes utiles
+
+
+async def test_three_deletions_suspend_author(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    author = await make_agent(state, "repeat")
+    reporters = [await make_agent(state, f"rpt{i}") for i in range(5)]
+    for _ in range(3):
+        _, pid = await _thread(client, author)
+        for rep in reporters:
+            state.limiter.clear()
+            await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "abus"}, headers=rep.headers)
+    agent = await db.get(Agent, author.agent_id)
+    assert agent is not None and agent.suspended_until is not None
+    r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
+                          headers=author.headers)
+    assert r.json()["error"] == "SUSPENDED"
+    count = await db.scalar(select(func.count()).select_from(ModerationLog))
+    assert count == 3
+
+
+async def test_low_precision_reporter_weighs_half(state: AppState, db: AsyncSession) -> None:
+    from app.forum.moderation import ModerationService
+    rep = await make_agent(state, "noisy")
+    db.add(ReporterStat(agent_id=rep.agent_id, reports_total=10, reports_successful=1))
+    await db.commit()
+    assert await ModerationService(db, state).reporter_weight(rep.agent_id) == 0.5
+
+
+async def test_report_validation_and_concurrent_votes(client: httpx.AsyncClient, state: AppState,
+                                                      db: AsyncSession) -> None:
+    import asyncio
+
+    author = await make_agent(state, "target")
+    voters = [await make_agent(state, f"cv{i}") for i in range(6)]
+    _, pid = await _thread(client, author)
+    r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "a\x00b"}, headers=voters[0].headers)
+    assert r.json()["error"] == "VALIDATION_ERROR"
+    r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "  "}, headers=voters[0].headers)
+    assert r.json()["error"] == "VALIDATION_ERROR"
+    assert (await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "x"},
+                              headers=author.headers)).json()["error"] == "FORBIDDEN"
+    assert (await client.post("/api/forum/posts/999999/vote", json={"value": 1},
+                              headers=voters[0].headers)).json()["error"] == "NOT_FOUND"
+    assert (await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 2},
+                              headers=voters[0].headers)).json()["error"] == "VALIDATION_ERROR"
+    await asyncio.gather(*[client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=v.headers)
+                           for v in voters])
+    db.expire_all()
+    agent = await db.get(Agent, author.agent_id)
+    assert agent is not None and agent.reputation == 6
+    stat = await db.get(ReporterStat, voters[0].agent_id)
+    assert stat is None

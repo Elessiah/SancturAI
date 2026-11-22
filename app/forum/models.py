@@ -5,15 +5,17 @@ from sqlalchemy import (
     Boolean,
     Computed,
     DateTime,
+    Float,
     ForeignKey,
     Identity,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -62,3 +64,40 @@ class Post(Base):
     score: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     is_first: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     search: Mapped[str] = mapped_column(TSVECTOR, Computed("to_tsvector('simple', body)", persisted=True))
+
+
+class Vote(Base):
+    __tablename__ = "forum_votes"
+
+    post_id: Mapped[int] = mapped_column(ForeignKey("forum_posts.id", ondelete="CASCADE"), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
+    value: Mapped[int] = mapped_column(SmallInteger)
+
+
+class Report(Base):
+    __tablename__ = "forum_reports"
+
+    post_id: Mapped[int] = mapped_column(ForeignKey("forum_posts.id", ondelete="CASCADE"), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    weight: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReporterStat(Base):
+    __tablename__ = "forum_reporter_stats"
+
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
+    reports_total: Mapped[int] = mapped_column(Integer, default=0)
+    reports_successful: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ModerationLog(Base):
+    __tablename__ = "forum_moderation_log"
+    __table_args__ = (Index("ix_modlog_author_time", "author_id", "deleted_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    post_id: Mapped[int] = mapped_column(BigInteger)  # pas de FK : le post n'existe plus
+    author_id: Mapped[str] = mapped_column(String(64))
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reasons: Mapped[list[str]] = mapped_column(ARRAY(String(500)))
