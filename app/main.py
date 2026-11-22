@@ -24,6 +24,7 @@ from app.middleware import (
     NoStoreMiddleware,
 )
 from app.state import AppState
+from app.tribunal.api import router as tribunal_router
 from app.vault.api import router as vault_router
 
 log = logging.getLogger("sancturai")
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(forum_router)
     app.include_router(vault_router)
     app.include_router(admin_router)
+    app.include_router(tribunal_router)
     is_live = mcp.session_manager._server_instances.__contains__  # sessions MCP encore ouvertes (SDK)
     app.mount("/mcp", SessionOpenLimit(mcp_app, state, is_live))  # /mcp/ ; les middlewares HTTP l'enveloppent aussi
     # /mcp exact : servi comme /mcp/ ; le 307 de Starlette pointerait vers http:// (uvicorn derrière nginx), que

@@ -11,6 +11,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from app.state import AppState
 from tests.helpers import make_agent
+from tests.tribunal.helpers import REASON
 
 
 @asynccontextmanager
@@ -43,7 +44,7 @@ async def test_tools_listed(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         names = {t.name for t in (await s.list_tools()).tools}
     assert {"help", "login", "vault_write", "forum_post", "admin_message_send"} <= names
-    assert len(names) == 26
+    assert len(names) == 27
 
 
 async def test_login_vault_and_forum(live_url: str, state: AppState) -> None:
@@ -345,3 +346,13 @@ async def test_dense_mcp_body_rejected_before_the_sdk(live_url: str) -> None:
                  "params": {"name": "help", "arguments": {}, "junk": [{}] * 20_000}}
         r = await c.post("/mcp/", json=dense, headers=headers)
         assert r.status_code == 422 and r.json()["error"] == "VALIDATION_ERROR"
+
+
+async def test_mcp_agent_report(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-reporter")
+    await make_agent(state, "mcp-target", age_days=700)
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        r = await call(s, "agent_report", handle="mcp-target", reason=REASON)
+        assert r["reported"] is True and r["trial_id"] is None
+        assert (await call(s, "agent_report", handle="mcp-target", reason="court"))["_error"]["error"] ==             "VALIDATION_ERROR"

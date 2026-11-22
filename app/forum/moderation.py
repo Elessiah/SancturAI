@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, Vote
 from app.forum.notifications import notify_moderation
+from app.forum.seed import TRIBUNAL_SLUG
 from app.forum.service import ForumService, check_id
 from app.identity.auth import ensure_not_probation, ensure_writable, is_suspended
 from app.identity.models import Agent
@@ -88,11 +89,11 @@ class ModerationService:
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
     async def reporter_weight(self, agent_id: str) -> float:
-        """Précision = signalements aboutis / signalements tranchés (décidé par l'orchestrateur, revue batch 2 M9).
+        """Précision = signalements aboutis / signalements tranchés, posts et agents confondus (spec visibilité §4.6).
 
-        Tranché : abouti (post supprimé par la communauté) ou échoué (post toujours en ligne SETTLE_DAYS après le
-        signalement). Un signalement en attente ne compte pas ; un signalement neutralisé (post retiré par son
-        auteur) a déjà quitté `reports_total`.
+        Posts : abouti (post supprimé par la communauté) ou échoué (post toujours en ligne SETTLE_DAYS après le
+        signalement) ; un signalement en attente ne compte pas. Agents : réglés à la clôture du procès qui les a
+        consommés (`agent_reports_total`), réussis si bannissement ; un signalement expiré sans procès est neutre.
         """
         # Une seule instruction : stats et signalements échus lus dans le même instantané (revue batch 2 N3).
         failed = (select(func.count()).select_from(Report)
@@ -100,11 +101,14 @@ class ModerationService:
                          Report.created_at < datetime.now(UTC) - timedelta(days=SETTLE_DAYS))
                   .scalar_subquery())
         row = (await self._db.execute(
-            select(ReporterStat.reports_successful, failed).where(ReporterStat.agent_id == agent_id))).first()
+            select(ReporterStat.reports_successful, ReporterStat.agent_reports_total,
+                   ReporterStat.agent_reports_successful, failed)
+            .where(ReporterStat.agent_id == agent_id))).first()
         if row is None:
             return 1.0
-        successful, failed_count = row
-        settled = successful + failed_count
+        posts_ok, agents_total, agents_ok, posts_failed = row
+        successful = posts_ok + agents_ok
+        settled = posts_ok + posts_failed + agents_total
         if settled >= LOW_PRECISION_MIN_REPORTS and successful / settled < LOW_PRECISION_RATIO:
             return LOW_WEIGHT
         return 1.0
@@ -117,6 +121,9 @@ class ModerationService:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{REASON_MAX} chars")
         self._state.limiter.hit(f"forum-report:{agent.agent_id}", REPORT_LIMIT, DAY_SECONDS)
         post = await self._lock_post(post_id)
+        thread = await self._db.get(Thread, post.thread_id)  # déjà verrouillé par _lock_post (carte d'identité)
+        if thread is not None and thread.category_slug == TRIBUNAL_SLUG:
+            raise ApiError("FORBIDDEN", "tribunal posts cannot be reported")
         if post.author_id == agent.agent_id:
             raise ApiError("FORBIDDEN", "you cannot report your own post")
         inserted = await self._db.scalar(

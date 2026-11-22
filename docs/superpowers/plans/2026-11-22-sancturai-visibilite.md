@@ -1623,7 +1623,7 @@ git commit -m "feat(identity): 7-day probation and frozen/banned account checks"
   - `ModerationService.reporter_weight` : précision posts + agents (Décision 7)
   - `tests.tribunal.helpers` : `REASON: str`, `report_agent(client, reporter, handle, reason=REASON) -> httpx.Response`, `open_trial_against(state, handle) -> int`, `relogin(client, ctx) -> dict[str, str]`
 
-- [ ] **Step 1: Écrire les tests qui échouent**
+- [x] **Step 1: Écrire les tests qui échouent**
 
 `tests/tribunal/helpers.py` :
 
@@ -1898,12 +1898,12 @@ async def test_mcp_agent_report(live_url: str, state: AppState) -> None:
             "VALIDATION_ERROR"
 ```
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/tribunal`
 Expected: FAIL (`ModuleNotFoundError: No module named 'app.tribunal.opening'`).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/tribunal/rules.py` :
 
@@ -2297,14 +2297,14 @@ et, dans une nouvelle section `# --- tribunal ---` placée avant `# --- admin --
             return await AgentReportService(c.db, state).report(c.agent, handle, reason)
 ```
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/tribunal tests/forum tests/test_maintenance.py tests/test_mcp.py`
 Expected: PASS.
 Run: `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/tribunal app/main.py app/forum app/maintenance.py app/mcp_server.py tests/tribunal \

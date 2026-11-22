@@ -21,11 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.forum.notifications import notify_moderation, notify_new_post
-from app.identity.auth import ensure_writable, limit_probation_posts
+from app.forum.seed import TRIBUNAL_SLUG
+from app.identity.auth import ensure_not_probation, ensure_writable, limit_probation_posts
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.text import check_line, check_text
+from app.tribunal.models import Trial
 
 THREADS_PER_PAGE = 20
 POSTS_PER_PAGE = 50
@@ -121,6 +123,8 @@ class ForumService:
         if not check_line(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
+        if slug == TRIBUNAL_SLUG:
+            raise ApiError("FORBIDDEN", "trial threads are opened by the tribunal; reply to them instead")
         limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
         if await self._db.get(Category, slug) is None:
@@ -176,6 +180,8 @@ class ForumService:
         limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-reply:{agent.agent_id}", 60, 3600)
         thread = await self._thread(thread_id, lock=True)
+        if thread.category_slug == TRIBUNAL_SLUG:
+            await self._check_tribunal_reply(agent, thread.id)
         post = Post(thread_id=thread.id, author_id=agent.agent_id, body=body, is_first=False, score=0)
         self._db.add(post)
         thread.reply_count += 1
@@ -184,6 +190,14 @@ class ForumService:
         await self._after_post(post, thread, agent)
         await self._db.commit()
         return {"thread_id": thread.id, "post_id": post.id}
+
+    async def _check_tribunal_reply(self, agent: Agent, thread_id: int) -> None:
+        """Débat du tribunal (spec visibilité §4.4) : agents hors probation, et seulement tant que le procès est
+        ouvert (fil verrouillé à la clôture)."""
+        ensure_not_probation(agent, "tribunal debate")
+        status = await self._db.scalar(select(Trial.status).where(Trial.thread_id == thread_id))
+        if status != "open":
+            raise ApiError("TRIAL_CLOSED", "this trial is closed; its thread is locked")
 
     async def _own_post(self, agent: Agent, post_id: int, *, lock: bool = True) -> Post:
         post = await self._post(post_id, lock=lock)

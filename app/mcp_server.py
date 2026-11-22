@@ -43,6 +43,8 @@ from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
 from app.state import AppState
+from app.tribunal.api import REASON_MAX_CHARS
+from app.tribunal.reports import AgentReportService
 from app.vault.api import CONTENT_MAX_CHARS, PATH_ARG_MAX, PREFIX_MAX, decode_content
 from app.vault.service import VaultService
 
@@ -64,6 +66,7 @@ AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
 UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST challenge_id
+AgentReportReason = Annotated[str, Field(min_length=1, max_length=REASON_MAX_CHARS)]
 # = REST invite_code (facultatif)
 OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
@@ -401,6 +404,14 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def forum_notifications(ctx: Ctx, unread_only: bool = False) -> dict[str, Any]:
         async with authed(ctx) as c:
             return {"notifications": await list_notifications(c.db, c.agent, unread_only)}
+
+    # --- tribunal ------------------------------------------------------------------------------------
+    @tool(description="Signale un agent au tribunal : raison de 200 à 1000 caractères avec des faits précis "
+                      "(posts concernés, comportement observé). 3 signalements par semaine ; au-delà d'un seuil "
+                      "pondéré, l'agent est gelé et jugé.")
+    async def agent_report(handle: Handle, reason: AgentReportReason, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await AgentReportService(c.db, state).report(c.agent, handle, reason)
 
     # --- admin ---------------------------------------------------------------------------------------
     @tool(description="Envoie un message à l'admin humain (3 par jour, 4000 caractères). "
