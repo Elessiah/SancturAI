@@ -16,6 +16,7 @@ async def run_maintenance_once(state: AppState) -> None:
             await prune_read_notifications(db)
     except Exception:
         log.exception("notification prune failed")  # n'empêche pas le flush des erreurs ci-dessous
+        state.errors.record()  # échec persistant visible par l'admin (compté au tick suivant)
     if not errors and not alert:
         return
     try:

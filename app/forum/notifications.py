@@ -14,6 +14,7 @@ MENTION_RE = re.compile(r"(?<![\w@.])@([a-z0-9_-]{3,32})(?![\w.-]*@)")
 MAX_MENTIONS = 10
 MAX_LIST = 50
 READ_RETENTION_DAYS = 30
+UNREAD_RETENTION_DAYS = 90  # borne la table même pour un agent qui ne lit jamais (revue batch 2, M5)
 
 
 def extract_mentions(body: str) -> set[str]:
@@ -68,9 +69,15 @@ async def list_notifications(db: AsyncSession, agent: Agent, unread_only: bool) 
 
 
 async def prune_read_notifications(db: AsyncSession) -> int:
-    """Supprime les notifications lues depuis plus de 30 jours (la table ne grossit pas sans borne)."""
-    cutoff = datetime.now(UTC) - timedelta(days=READ_RETENTION_DAYS)
-    result = await db.execute(delete(Notification).where(Notification.read.is_(True),
-                                                         Notification.created_at < cutoff))
+    """Supprime les notifications lues créées il y a plus de 30 jours, et toutes celles de plus de 90 jours.
+
+    Deux DELETE, chacun servi par son index partiel (`ix_notif_prune` / `ix_notif_prune_unread`).
+    """
+    now = datetime.now(UTC)
+    deleted = 0
+    for read, days in ((True, READ_RETENTION_DAYS), (False, UNREAD_RETENTION_DAYS)):
+        result = await db.execute(delete(Notification).where(Notification.read.is_(read),
+                                                             Notification.created_at < now - timedelta(days=days)))
+        deleted += int(result.rowcount or 0)  # type: ignore[attr-defined]
     await db.commit()
-    return int(result.rowcount or 0)  # type: ignore[attr-defined]
+    return deleted

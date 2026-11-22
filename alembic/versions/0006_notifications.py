@@ -23,6 +23,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('read', sa.Boolean(), server_default='false', nullable=False),
     sa.CheckConstraint("kind IN ('reply', 'mention', 'moderation')", name='ck_notif_kind'),
+    sa.CheckConstraint("(kind = 'moderation' AND thread_id IS NULL AND post_id IS NULL AND detail IS NOT NULL) OR (kind <> 'moderation' AND thread_id IS NOT NULL AND post_id IS NOT NULL)",
+                       name='ck_notif_moderation_shape'),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['post_id'], ['forum_posts.id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['thread_id'], ['forum_threads.id'], ondelete='CASCADE'),
@@ -31,9 +33,19 @@ def upgrade() -> None:
     op.create_index('ix_notif_agent_read', 'forum_notifications', ['agent_id', 'read', 'id'], unique=False)
     op.create_index('ix_notif_prune', 'forum_notifications', ['created_at'], unique=False,
                     postgresql_where=sa.text('read'))
+    op.create_index('ix_notif_prune_unread', 'forum_notifications', ['created_at'], unique=False,
+                    postgresql_where=sa.text('NOT read'))
+    op.create_index('ix_notif_thread', 'forum_notifications', ['thread_id'], unique=False,
+                    postgresql_where=sa.text('thread_id IS NOT NULL'))
+    op.create_index('ix_notif_post', 'forum_notifications', ['post_id'], unique=False,
+                    postgresql_where=sa.text('post_id IS NOT NULL'))
 
 
 def downgrade() -> None:
+    op.drop_index('ix_notif_post', table_name='forum_notifications', postgresql_where=sa.text('post_id IS NOT NULL'))
+    op.drop_index('ix_notif_thread', table_name='forum_notifications',
+                  postgresql_where=sa.text('thread_id IS NOT NULL'))
+    op.drop_index('ix_notif_prune_unread', table_name='forum_notifications', postgresql_where=sa.text('NOT read'))
     op.drop_index('ix_notif_prune', table_name='forum_notifications', postgresql_where=sa.text('read'))
     op.drop_index('ix_notif_agent_read', table_name='forum_notifications')
     op.drop_table('forum_notifications')

@@ -27,6 +27,7 @@ def upgrade() -> None:
     sa.Column('agent_id', sa.String(length=64), nullable=False),
     sa.Column('reports_total', sa.Integer(), nullable=False),
     sa.Column('reports_successful', sa.Integer(), nullable=False),
+    sa.CheckConstraint('reports_successful >= 0', name='ck_reporter_stats_nonneg'),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('agent_id')
     )
@@ -45,6 +46,7 @@ def upgrade() -> None:
     sa.Column('post_id', sa.BigInteger(), nullable=False),
     sa.Column('agent_id', sa.String(length=64), nullable=False),
     sa.Column('value', sa.SmallInteger(), nullable=False),
+    sa.CheckConstraint('value IN (-1, 1)', name='ck_votes_value'),
     sa.Column('voted_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['post_id'], ['forum_posts.id'], ondelete='CASCADE'),

@@ -34,6 +34,7 @@ async def test_migrations_match_models(pg_url: str) -> None:
     async with engine.connect() as conn:
         diff = await conn.run_sync(lambda c: compare_metadata(MigrationContext.configure(c), Base.metadata))
         checks = set((await conn.execute(text("SELECT conname FROM pg_constraint WHERE contype = 'c'"))).scalars())
+        indexes = set((await conn.execute(text("SELECT indexname FROM pg_indexes"))).scalars())
     await engine.dispose()
     assert diff == [], f"migration manquante : {diff}"
     # compare_metadata ignore les CHECK : on vérifie leur présence à part
@@ -41,3 +42,8 @@ async def test_migrations_match_models(pg_url: str) -> None:
                 if isinstance(c, CheckConstraint)}
     assert expected <= checks, f"CHECK manquants : {expected - checks}"
     assert {"ck_vault_files_size_nonneg", "ck_outbox_attempts_nonneg", "ck_outbox_kind", "ck_notif_kind"} <= checks
+    # revue batch 2, M4 : garde-fous en base sur les compteurs et valeurs du forum
+    assert {"ck_votes_value", "ck_threads_reply_count_nonneg", "ck_reporter_stats_nonneg",
+            "ck_notif_moderation_shape"} <= checks
+    # revue batch 2, I4 (cascades ON DELETE sans index = parcours séquentiel par post supprimé) ; M5 (purge)
+    assert {"ix_notif_thread", "ix_notif_post", "ix_notif_prune", "ix_notif_prune_unread"} <= indexes

@@ -179,3 +179,26 @@ async def test_withdrawn_upvote_reevaluates(client: httpx.AsyncClient, state: Ap
     await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 0}, headers=fans[0].headers)
     r = await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=fans[1].headers)
     assert r.json()["error"] == "NOT_FOUND"
+
+
+async def test_db_checks_reject_impossible_forum_rows(client: httpx.AsyncClient, state: AppState,
+                                                     db: AsyncSession) -> None:
+    """M4 (revue batch 2) : la base refuse un vote hors ±1, un compteur négatif, une notification incohérente."""
+    import pytest
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    a, b = await make_agent(state, "chk-a"), await make_agent(state, "chk-b")
+    tid, pid = await _thread(client, a)
+    for stmt, params in [
+        ("INSERT INTO forum_votes (post_id, agent_id, value) VALUES (:p, :b, 2)", {"p": pid, "b": b.agent_id}),
+        ("UPDATE forum_threads SET reply_count = -1 WHERE id = :t", {"t": tid}),
+        ("INSERT INTO forum_reporter_stats (agent_id, reports_total, reports_successful) VALUES (:b, 0, -1)",
+         {"b": b.agent_id}),
+        ("INSERT INTO forum_notifications (agent_id, kind, thread_id, post_id) VALUES (:b, 'moderation', :t, :p)",
+         {"b": b.agent_id, "t": tid, "p": pid}),
+        ("INSERT INTO forum_notifications (agent_id, kind, detail) VALUES (:b, 'reply', 'x')", {"b": b.agent_id}),
+    ]:
+        with pytest.raises(IntegrityError):
+            await db.execute(text(stmt), params)
+        await db.rollback()

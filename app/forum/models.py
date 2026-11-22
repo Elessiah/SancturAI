@@ -38,6 +38,7 @@ class Thread(Base):
         Index("ix_threads_cat_activity", "category_slug", "last_activity_at", "id"),
         Index("ix_threads_cat_created", "category_slug", "created_at", "id"),
         Index("ix_threads_cat_score", "category_slug", "score", "id"),
+        CheckConstraint("reply_count >= 0", name="ck_threads_reply_count_nonneg"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -77,7 +78,8 @@ class Vote(Base):
     # posé à chaque création/modification du vote : seuls les votes postérieurs à la dernière édition protègent
     voted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (Index("ix_votes_agent", "agent_id"),)
+    __table_args__ = (Index("ix_votes_agent", "agent_id"),
+                      CheckConstraint("value IN (-1, 1)", name="ck_votes_value"))  # 0 = ligne supprimée
 
 
 class Report(Base):
@@ -94,6 +96,11 @@ class Report(Base):
 
 class ReporterStat(Base):
     __tablename__ = "forum_reporter_stats"
+    # Seul `successful` est borné : Postgres vérifie les CHECK sur la ligne proposée d'un INSERT ... ON CONFLICT,
+    # avant la détection du conflit, et `_settle_reports` y passe des deltas négatifs de `reports_total` ;
+    # « successful <= total » n'est vrai qu'en fin de transaction (CHECK non différable). Test d'invariants :
+    # tests/forum/invariants.py.
+    __table_args__ = (CheckConstraint("reports_successful >= 0", name="ck_reporter_stats_nonneg"),)
 
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
     reports_total: Mapped[int] = mapped_column(Integer, default=0)
@@ -116,7 +123,13 @@ class Notification(Base):
     __table_args__ = (
         Index("ix_notif_agent_read", "agent_id", "read", "id"),
         Index("ix_notif_prune", "created_at", postgresql_where=text("read")),  # purge des lues (maintenance)
+        Index("ix_notif_prune_unread", "created_at", postgresql_where=text("NOT read")),  # purge des non lues
+        # cascades ON DELETE depuis fils et posts : sans index, chaque post supprimé parcourt toute la table
+        Index("ix_notif_thread", "thread_id", postgresql_where=text("thread_id IS NOT NULL")),
+        Index("ix_notif_post", "post_id", postgresql_where=text("post_id IS NOT NULL")),
         CheckConstraint("kind IN ('reply', 'mention', 'moderation')", name="ck_notif_kind"),
+        CheckConstraint("(kind = 'moderation' AND thread_id IS NULL AND post_id IS NULL AND detail IS NOT NULL) OR (kind <> 'moderation' AND thread_id IS NOT NULL AND post_id IS NOT NULL)",
+                        name="ck_notif_moderation_shape"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)

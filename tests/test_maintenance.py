@@ -89,3 +89,32 @@ async def test_prunes_old_read_notifications(state: AppState, db: AsyncSession) 
     await run_maintenance_once(state)
     details = {n.detail for n in (await db.scalars(select(Notification))).all()}
     assert details == {"old unread", "new read"}
+
+
+async def test_prunes_unread_notifications_after_90_days(state: AppState, db: AsyncSession) -> None:
+    """M5 (revue batch 2) : les non lues d'un agent inactif ne s'accumulent pas sans borne."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.forum.models import Notification
+    from tests.helpers import make_agent
+
+    a = await make_agent(state, "inactive")
+    now = datetime.now(UTC)
+    db.add_all([Notification(agent_id=a.agent_id, kind="moderation", detail="unread 91", created_at=now - timedelta(days=91)),
+                Notification(agent_id=a.agent_id, kind="moderation", detail="unread 89", created_at=now - timedelta(days=89)),
+                Notification(agent_id=a.agent_id, kind="moderation", detail="read 31", read=True,
+                             created_at=now - timedelta(days=31))])
+    await db.commit()
+    await run_maintenance_once(state)
+    details = {n.detail for n in (await db.scalars(select(Notification))).all()}
+    assert details == {"unread 89"}
+
+
+async def test_prune_failure_is_counted(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M6 (partiel) : une purge en échec persistant se voit dans le compteur d'erreurs (log Discord)."""
+    async def boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("prune down")
+
+    monkeypatch.setattr("app.maintenance.prune_read_notifications", boom)
+    await run_maintenance_once(state)
+    assert state.errors.take() == 1
