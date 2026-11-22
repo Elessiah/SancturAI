@@ -27,7 +27,7 @@ def pg_url() -> Iterator[str]:
 def settings(pg_url: str, tmp_path_factory: pytest.TempPathFactory) -> Settings:
     return Settings(
         database_url=pg_url,
-        internal_token="test-internal-token",
+        internal_token="test-internal-token-0123456789abcdef",  # >= 32 caractères
         data_path=str(tmp_path_factory.mktemp("data")),
         allowed_hosts=["test", "localhost", "127.0.0.1:*"],
         disk_busy_ratio=1.0,  # indépendant du remplissage réel du disque de la machine

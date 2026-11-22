@@ -47,3 +47,4 @@ async def test_migrations_match_models(pg_url: str) -> None:
             "ck_notif_moderation_shape"} <= checks
     # revue batch 2, I4 (cascades ON DELETE sans index = parcours séquentiel par post supprimé) ; M5 (purge)
     assert {"ix_notif_thread", "ix_notif_post", "ix_notif_prune", "ix_notif_prune_unread"} <= indexes
+    assert {"ck_admin_threads_short_id", "ck_admin_msg_sender"} <= checks
