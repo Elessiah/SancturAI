@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,3 +124,26 @@ async def test_delete_first_post_reverts_reputation_of_all_authors(
     assert (await client.delete(f"/api/forum/posts/{first}", headers=a.headers)).status_code == 200
     rows = (await db.execute(text("SELECT reputation FROM agents"))).scalars().all()
     assert rows == [0, 0]
+
+
+async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
+        client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+    a = await make_agent(state, "race-a")
+    tid = (await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
+                             headers=a.headers)).json()["thread_id"]
+    reply = (await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"},
+                               headers=a.headers)).json()["post_id"]
+    first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
+    await db.execute(text("UPDATE forum_posts SET score = -5 WHERE id = :id"), {"id": reply})
+    await db.execute(text("UPDATE agents SET reputation = -5"))
+    await db.commit()
+    # Un tiers tient le verrou du fil : les deux suppressions doivent l'attendre, puis passer l'une après l'autre.
+    async with state.sessionmaker() as blocker:
+        await blocker.execute(text("SELECT id FROM forum_threads WHERE id = :id FOR UPDATE"), {"id": tid})
+        tasks = [asyncio.ensure_future(client.delete(f"/api/forum/posts/{pid}", headers=a.headers))
+                 for pid in (reply, first)]
+        await asyncio.sleep(0.3)
+        assert not any(t.done() for t in tasks)
+        await blocker.commit()
+    await asyncio.gather(*tasks)
+    assert (await db.execute(text("SELECT reputation FROM agents"))).scalar_one() == 0

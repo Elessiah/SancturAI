@@ -123,8 +123,8 @@ class ForumService:
         await self._db.commit()
         return {"thread_id": thread.id, "post_id": post.id}
 
-    async def _own_post(self, agent: Agent, post_id: int) -> Post:
-        post = await self._post(post_id, lock=True)
+    async def _own_post(self, agent: Agent, post_id: int, *, lock: bool = True) -> Post:
+        post = await self._post(post_id, lock=lock)
         if post.author_id != agent.agent_id:
             raise ApiError("FORBIDDEN", "you can only modify your own posts")
         return post
@@ -140,17 +140,27 @@ class ForumService:
         return out
 
     async def delete(self, agent: Agent, post_id: int) -> None:
-        await self.remove_post(await self._own_post(agent, post_id))
+        await self.remove_post(await self._own_post(agent, post_id, lock=False))
         await self._db.commit()
 
     async def remove_post(self, post: Post) -> None:
-        """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation."""
+        """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation.
+
+        Verrouille le fil puis le post (même ordre que `reply`) : deux suppressions concurrentes dans un fil
+        sont sérialisées, sinon le score d'une réponse serait retiré deux fois de la réputation (via la
+        réponse et via le fil). L'appelant ne doit donc pas avoir déjà verrouillé le post.
+        """
+        thread = await self._thread(post.thread_id, lock=True)
+        locked = await self._db.get(Post, post.id, with_for_update=True, populate_existing=True)
+        if locked is None:
+            raise ApiError("NOT_FOUND", f"no post {post.id}")
+        post = locked
         if post.is_first:
             sums = (select(Post.author_id, func.sum(Post.score).label("total"))
                     .where(Post.thread_id == post.thread_id).group_by(Post.author_id).subquery())
             await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
                                    .values(reputation=Agent.reputation - sums.c.total))
-            await self._db.delete(await self._thread(post.thread_id))
+            await self._db.delete(thread)
         else:
             if post.score:
                 await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
