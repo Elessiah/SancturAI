@@ -2,7 +2,10 @@
 from datetime import datetime, timedelta
 from typing import Literal
 
+from sqlalchemy import ColumnElement, and_
+
 from app.identity.models import Agent
+from app.tribunal.models import AgentReport
 
 Trigger = Literal["agent_reports", "deleted_posts"]
 Verdict = Literal["ban", "reactivate"]
@@ -35,3 +38,14 @@ def report_threshold(agent: Agent, now: datetime) -> float:
 def majority(eligible_count: int) -> int:
     """Voix nécessaires pour dépasser strictement eligible_count / 2 (clôture anticipée, §4.5)."""
     return eligible_count // 2 + 1
+
+
+def active_reports(target_id: str, now: datetime) -> ColumnElement[bool]:
+    """Signalements actifs de `target_id` : non consommés et de moins de REPORT_ACTIVE (§4.1)."""
+    return and_(AgentReport.target_id == target_id, AgentReport.trial_id.is_(None),
+                AgentReport.created_at >= now - REPORT_ACTIVE)
+
+
+def expired_reports(now: datetime) -> ColumnElement[bool]:
+    """Signalements expirés sans procès : neutres, purgeables (§4.1, §4.6)."""
+    return and_(AgentReport.trial_id.is_(None), AgentReport.created_at < now - REPORT_ACTIVE)

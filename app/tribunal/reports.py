@@ -19,9 +19,10 @@ from app.tribunal.rules import (
     AGENT_REPORT_LIMIT,
     AGENT_REPORT_WINDOW_SECONDS,
     PROTECTION,
-    REPORT_ACTIVE,
     REPORT_REASON_MAX,
     REPORT_REASON_MIN,
+    active_reports,
+    expired_reports,
     report_threshold,
 )
 
@@ -57,7 +58,7 @@ class AgentReportService:
         # un signalement expiré sans procès est neutre : il ne bloque pas un nouveau signalement (Décision 17)
         await self._db.execute(delete(AgentReport).where(
             AgentReport.reporter_id == reporter.agent_id, AgentReport.target_id == target.agent_id,
-            AgentReport.trial_id.is_(None), AgentReport.created_at < now - REPORT_ACTIVE))
+            expired_reports(now)))
         weight = await ModerationService(self._db, self._state).reporter_weight(reporter.agent_id)
         inserted = await self._db.scalar(
             insert(AgentReport).values(reporter_id=reporter.agent_id, target_id=target.agent_id, reason=reason,
@@ -67,9 +68,8 @@ class AgentReportService:
             .returning(AgentReport.id))
         if inserted is None:
             raise ApiError("VALIDATION_ERROR", "you already reported this agent")
-        total = await self._db.scalar(select(func.coalesce(func.sum(AgentReport.weight), 0.0)).where(
-            AgentReport.target_id == target.agent_id, AgentReport.trial_id.is_(None),
-            AgentReport.created_at >= now - REPORT_ACTIVE))
+        total = await self._db.scalar(select(func.coalesce(func.sum(AgentReport.weight), 0.0))
+                                      .where(active_reports(target.agent_id, now)))
         trial_id = None
         if float(total or 0.0) >= report_threshold(target, now):
             trial_id = (await open_trial(self._db, self._state, target, "agent_reports", [])).id

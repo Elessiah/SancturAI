@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, text
 
@@ -10,6 +11,7 @@ from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.tribunal.models import AgentReport
+from app.tribunal.rules import expired_reports
 
 log = logging.getLogger("sancturai")
 
@@ -31,11 +33,10 @@ async def purge_old_rows(state: AppState) -> None:
                                                        OutboxEvent.created_at < month_ago))
             await db.execute(delete(Challenge).where(Challenge.expires_at < func.now() - text("interval '1 day'")))
             # signalements d'agent expirés sans procès : neutres (spec visibilité §4.1)
-            await db.execute(delete(AgentReport).where(AgentReport.trial_id.is_(None),
-                                                       AgentReport.created_at < month_ago))
+            await db.execute(delete(AgentReport).where(expired_reports(datetime.now(UTC))))
             await db.commit()
     except Exception:
-        log.exception("outbox/challenge purge failed")
+        log.exception("outbox/challenge/agent-report purge failed")
         state.errors.record()  # batch 5, M4 : visible par l'admin comme l'échec de la purge des notifications
 
 

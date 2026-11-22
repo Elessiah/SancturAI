@@ -177,11 +177,12 @@ class ForumService:
     async def reply(self, agent: Agent, thread_id: int, body: str) -> dict[str, Any]:
         self._writable(agent)
         self._check_body(body)  # avant le quota (M12)
-        limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-reply:{agent.agent_id}", 60, 3600)
         thread = await self._thread(thread_id, lock=True)
         if thread.category_slug == TRIBUNAL_SLUG:
             await self._check_tribunal_reply(agent, thread.id)
+        # quota de probation débité seulement pour une réponse recevable (fil existant, tribunal autorisé)
+        limit_probation_posts(self._state, agent)
         post = Post(thread_id=thread.id, author_id=agent.agent_id, body=body, is_first=False, score=0)
         self._db.add(post)
         thread.reply_count += 1

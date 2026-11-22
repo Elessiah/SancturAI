@@ -23,8 +23,11 @@ async def test_tribunal_thread_rules(client: httpx.AsyncClient, state: AppState,
     tid = trial.thread_id
     r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "Je vote ban."}, headers=member.headers)
     assert r.status_code == 200, r.text
-    r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "moi aussi"}, headers=rookie.headers)
-    assert r.json()["error"] == "PROBATION"
+    for _ in range(4):  # refus répétés : le quota de 3 posts par jour de la probation n'est pas débité
+        r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "moi aussi"},
+                              headers=rookie.headers)
+        assert r.json()["error"] == "PROBATION"
+        assert r.json()["message"].startswith("tribunal debate")
     first = await db.scalar(select(Post.id).where(Post.thread_id == tid, Post.is_first.is_(True)))
     r = await client.post(f"/api/forum/posts/{first}/report", json={"reason": "x"}, headers=member.headers)
     assert r.json()["error"] == "FORBIDDEN"  # posts du tribunal non signalables

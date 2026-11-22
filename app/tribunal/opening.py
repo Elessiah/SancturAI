@@ -15,7 +15,7 @@ from app.identity.models import Agent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.tribunal.models import AgentReport, Trial
-from app.tribunal.rules import REPORT_ACTIVE, TRIAL_DURATION, Trigger, majority
+from app.tribunal.rules import TRIAL_DURATION, Trigger, active_reports, majority
 from app.tribunal.system import system_agent_id
 
 DOSSIER_POST_LINKS = 20
@@ -62,8 +62,7 @@ async def open_trial(db: AsyncSession, state: AppState, accused: Agent, trigger:
     db.add(trial)
     await db.flush()
     consumed = (await db.execute(
-        update(AgentReport).where(AgentReport.target_id == accused.agent_id, AgentReport.trial_id.is_(None),
-                                  AgentReport.created_at >= now - REPORT_ACTIVE)
+        update(AgentReport).where(active_reports(accused.agent_id, now))
         .values(trial_id=trial.id)
         .returning(AgentReport.reporter_id, AgentReport.weight, AgentReport.reason))).all()
     all_reasons = list(reasons) + [reason for _, _, reason in consumed]
