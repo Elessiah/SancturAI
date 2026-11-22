@@ -23,6 +23,9 @@ SUSPEND_AFTER = 3
 SUSPEND_WINDOW_DAYS = 30
 SUSPEND_DAYS = 7
 REASON_MAX = 500
+VOTE_LIMIT = 200
+REPORT_LIMIT = 20
+DAY_SECONDS = 86_400
 
 
 class ModerationService:
@@ -48,12 +51,15 @@ class ModerationService:
     async def vote(self, agent: Agent, post_id: int, value: int) -> dict[str, Any]:
         if value not in (-1, 0, 1):
             raise ApiError("VALIDATION_ERROR", "value must be -1, 0 or 1")
-        self._state.limiter.hit(f"forum-vote:{agent.agent_id}", 200, 86_400)
+        self._state.limiter.hit(f"forum-vote:{agent.agent_id}", VOTE_LIMIT, DAY_SECONDS)
         post = await self._lock_post(post_id)
         if post.author_id == agent.agent_id:
             raise ApiError("FORBIDDEN", "you cannot vote on your own post")
         previous = await self._db.scalar(select(Vote.value).where(Vote.post_id == post_id,
                                                                   Vote.agent_id == agent.agent_id)) or 0
+        if value == previous:  # vote inchangé : rien à écrire
+            await self._db.commit()
+            return {"post_id": post_id, "score": post.score, "your_vote": value}
         if value == 0:
             await self._db.execute(delete(Vote).where(Vote.post_id == post_id, Vote.agent_id == agent.agent_id))
         else:
@@ -61,13 +67,12 @@ class ModerationService:
                                    .on_conflict_do_update(index_elements=["post_id", "agent_id"],
                                                           set_={"value": value}))
         delta = value - previous
-        if delta:
-            post.score += delta
-            await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
-                                   .values(reputation=Agent.reputation + delta))
-            if post.is_first:
-                await self._db.execute(update(Thread).where(Thread.id == post.thread_id)
-                                       .values(score=Thread.score + delta))
+        post.score += delta
+        await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
+                               .values(reputation=Agent.reputation + delta))
+        if post.is_first:
+            await self._db.execute(update(Thread).where(Thread.id == post.thread_id)
+                                   .values(score=Thread.score + delta))
         await self._db.commit()
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
@@ -82,7 +87,7 @@ class ModerationService:
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{REASON_MAX} chars")
-        self._state.limiter.hit(f"forum-report:{agent.agent_id}", 20, 86_400)
+        self._state.limiter.hit(f"forum-report:{agent.agent_id}", REPORT_LIMIT, DAY_SECONDS)
         post = await self._lock_post(post_id)
         if post.author_id == agent.agent_id:
             raise ApiError("FORBIDDEN", "you cannot report your own post")
@@ -102,10 +107,10 @@ class ModerationService:
         return {"reported": True, "deleted": deleted}
 
     async def _evaluate(self, post: Post) -> bool:
-        weight = await self._db.scalar(select(func.coalesce(func.sum(Report.weight), 0.0))
-                                       .where(Report.post_id == post.id)) or 0.0
-        upvotes = await self._db.scalar(select(func.count()).select_from(Vote)
-                                        .where(Vote.post_id == post.id, Vote.value == 1)) or 0
+        weight_q = select(func.coalesce(func.sum(Report.weight), 0.0)).where(Report.post_id == post.id).scalar_subquery()
+        upvotes_q = (select(func.count()).select_from(Vote)
+                     .where(Vote.post_id == post.id, Vote.value == 1).scalar_subquery())
+        weight, upvotes = (await self._db.execute(select(weight_q, upvotes_q))).one()
         if weight >= DELETE_WEIGHT and weight > upvotes:
             await self._delete(post)
             return True

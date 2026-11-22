@@ -73,6 +73,8 @@ class Vote(Base):
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
     value: Mapped[int] = mapped_column(SmallInteger)
 
+    __table_args__ = (Index("ix_votes_agent", "agent_id"),)
+
 
 class Report(Base):
     __tablename__ = "forum_reports"
@@ -82,6 +84,8 @@ class Report(Base):
     reason: Mapped[str] = mapped_column(String(500))
     weight: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (Index("ix_reports_agent", "agent_id"),)
 
 
 class ReporterStat(Base):
