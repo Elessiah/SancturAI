@@ -130,4 +130,6 @@ async def test_defense_stays_unmodifiable_after_reactivation(client: httpx.Async
     h = await relogin(client, accused)
     r = await client.patch(f"/api/forum/posts/{post_id}", json={"body": "Défense réécrite."}, headers=h)
     assert (r.status_code, r.json()["error"]) == (403, "FORBIDDEN")
+    r = await client.delete(f"/api/forum/posts/{post_id}", headers=h)
+    assert (r.status_code, r.json()["error"]) == (403, "FORBIDDEN")
     assert (await client.get(f"/api/trials/{tid}", headers=h)).json()["defense"] == "Ma défense."

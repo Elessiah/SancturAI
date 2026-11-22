@@ -210,9 +210,7 @@ class ForumService:
         self._writable(agent)
         self._check_body(body)
         post = await self._own_post(agent, post_id)
-        if await self._db.scalar(select(exists().where(Trial.defense_post_id == post.id))):
-            # défense « une seule fois, non modifiable » (spec visibilité §4.4) : pas même après la réactivation
-            raise ApiError("FORBIDDEN", "a trial defense cannot be modified")
+        await self._ensure_not_defense(post)
         post.body = body
         post.edited_at = datetime.now(UTC)
         await self._db.flush()
@@ -222,8 +220,16 @@ class ForumService:
 
     async def delete(self, agent: Agent, post_id: int) -> None:
         self._writable(agent)
-        await self.remove_post(await self._own_post(agent, post_id, lock=False))
+        post = await self._own_post(agent, post_id, lock=False)
+        await self._ensure_not_defense(post)
+        await self.remove_post(post)
         await self._db.commit()
+
+    async def _ensure_not_defense(self, post: Post) -> None:
+        """Défense « une seule fois, non modifiable » (spec visibilité §4.4) : ni réécrite ni retirée par son auteur,
+        pas même après la réactivation ; la purge d'un banni et l'admin passent par `remove_post`."""
+        if await self._db.scalar(select(exists().where(Trial.defense_post_id == post.id))):
+            raise ApiError("FORBIDDEN", "a trial defense cannot be modified")
 
     async def admin_remove(self, post_id: int, reason: str) -> dict[str, Any]:
         """Retrait par l'admin (CLI `forum-remove`, recours légal §7.4) : passe par `remove_post`, donc réputation
