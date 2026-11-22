@@ -1,3 +1,5 @@
+import time
+
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +13,15 @@ from tests.helpers import make_agent
 def test_extract_mentions() -> None:
     assert extract_mentions("salut @bob et @alice-2, mail a@b.c") == {"bob", "alice-2"}
     assert len(extract_mentions(" ".join(f"@user{i:02d}" for i in range(30)))) == 10
+    assert extract_mentions("@bob@example.org et -@carol@x") == set()  # pseudo suivi d'un autre @ : pas une mention
+
+
+def test_extract_mentions_linear_on_pathological_body() -> None:
+    # chaque « @ » précédé de « - » est un candidat ; l'ancien lookahead balayait tout le reste du mot (O(n²), ~3 s)
+    body = ("@" + "a" * 32 + "-") * (32768 // 34)
+    start = time.perf_counter()
+    assert extract_mentions(body) == {"a" * 32}
+    assert time.perf_counter() - start < 0.2
 
 
 async def test_search(client: httpx.AsyncClient, state: AppState) -> None:

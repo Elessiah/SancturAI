@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.forum.models import Notification, Post, Thread
 from app.identity.models import Agent
 
-MENTION_RE = re.compile(r"(?<![\w@.])@([a-z0-9_-]{3,32})(?![\w.@-]*@)")
+# Le lookahead s'arrête au premier « @ » suivant (classe sans « @ ») : coût linéaire. Avec `[\w.@-]*@`, chaque
+# candidat parcourait tout le reste du mot : « @abc-@abc-… » (32 Ko) bloquait la boucle asyncio ~3 s.
+MENTION_RE = re.compile(r"(?<![\w@.])@([a-z0-9_-]{3,32})(?![\w.-]*@)")
 MAX_MENTIONS = 10
 MAX_LIST = 50
 READ_RETENTION_DAYS = 30
