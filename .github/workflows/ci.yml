@@ -67,6 +67,11 @@ jobs:
           file: deploy/Dockerfile
           platforms: linux/amd64
           push: false
+          load: true
+          tags: sancturai:ci
+      # Fumée : hors de /app (comme alembic et la CLI en prod), le code et la commande `sancturai` sont trouvés
+      - if: hashFiles('deploy/Dockerfile') != ''
+        run: docker run --rm --workdir / sancturai:ci sh -c 'python -c "import app.db_models, app.cli, app.main" && command -v sancturai && command -v alembic'
 
   image:
     needs: test

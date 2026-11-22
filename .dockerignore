@@ -14,3 +14,4 @@ tests
 relay
 deploy
 scripts
+!deploy/sancturai-cli.sh
