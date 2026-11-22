@@ -89,6 +89,20 @@ class SessionStore:
             return None
         return token
 
+    def drop_dead_mcp(self, is_live: Callable[[str], bool]) -> None:
+        """Sessions MCP closes (DELETE, inactivité) : un token lié par login n'est joignable que par elles,
+        donc ses clés sont effacées dès que toutes ses sessions MCP sont closes, au lieu de vivre jusqu'au TTL."""
+        for mcp_id in [m for m in self._mcp if not is_live(m)]:
+            token = self._mcp.pop(mcp_id)
+            siblings = self._mcp_by_token.get(token)
+            if siblings is not None:
+                siblings.discard(mcp_id)
+                if not siblings:
+                    del self._mcp_by_token[token]
+                    self.revoke(token)
+        for mcp_id in [m for m in self._mcp_revoked if not is_live(m)]:
+            del self._mcp_revoked[mcp_id]  # id mort : plus aucune requête ne peut le présenter
+
     def mcp_expired(self, mcp_session_id: str) -> bool:
         """La session MCP a-t-elle porté un token désormais révoqué ou expiré ?"""
         return self._mcp_revoked.get(mcp_session_id, 0.0) > self._clock()

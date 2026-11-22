@@ -90,3 +90,20 @@ def test_sessions_per_agent_are_capped_oldest_evicted() -> None:
     assert all(store.get(t) is not None for t in tokens[1:] + [newest, other])
     store.revoke_agent("a")
     assert len(store._sessions) == 1 and list(store._by_agent) == ["b"]
+
+
+def test_drop_dead_mcp_erases_unreachable_tokens() -> None:
+    store = SessionStore(ttl_seconds=3600)
+    t1, _ = store.create("a", b"v" * 32, b"p" * 32)
+    store.bind_mcp("m1", t1)
+    store.bind_mcp("m2", t1)
+    t2, _ = store.create("b", b"v" * 32, b"p" * 32)
+    store.bind_mcp("m3", t2)
+    t3, _ = store.create("c", b"v" * 32, b"p" * 32)  # token REST, sans session MCP : intouché
+    store.drop_dead_mcp(lambda sid: sid == "m2")
+    assert store.get(t1) is not None  # m2 encore ouverte
+    assert store.get(t2) is None  # seule session MCP close : clés effacées
+    assert store.get(t3) is not None
+    assert not store.mcp_expired("m3")  # id mort : pas de marqueur conservé
+    store.drop_dead_mcp(lambda sid: False)
+    assert store.get(t1) is None and store.get(t3) is not None

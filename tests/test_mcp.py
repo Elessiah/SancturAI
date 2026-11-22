@@ -202,35 +202,6 @@ async def test_mcp_open_sessions_capped_per_ip(live_url: str) -> None:
         assert (await c.post("/mcp/", json=INIT, headers=headers)).status_code == 200  # place libérée
 
 
-async def test_session_open_limit_serializes_large_bodies(state: AppState) -> None:
-    from app.mcp_server import MCP_SMALL_BODY_BYTES, SessionOpenLimit
-
-    running = 0
-    peak = 0
-
-    async def inner(scope: Any, receive: Any, send: Any) -> None:
-        nonlocal running, peak
-        running += 1
-        peak = max(peak, running)
-        await asyncio.sleep(0.05)
-        running -= 1
-
-    guard = SessionOpenLimit(inner, state, lambda sid: True)
-
-    def scope(length: str | None) -> dict[str, Any]:
-        raw = [(b"mcp-session-id", b"s")] + ([(b"content-length", length.encode())] if length else [])
-        return {"type": "http", "method": "POST", "headers": raw, "client": ("127.0.0.1", 1)}
-
-    async def noop(*_: Any) -> Any:
-        return None
-
-    big = str(MCP_SMALL_BODY_BYTES + 1)
-    await asyncio.gather(*(guard(scope(v), noop, noop) for v in (big, big, None)))
-    assert peak == 1  # gros corps (ou longueur inconnue) : un à la fois
-    await asyncio.gather(*(guard(scope("100"), noop, noop) for _ in range(3)))
-    assert peak == 3  # petits corps : en parallèle
-
-
 async def test_session_open_limit_counts_concurrent_opens(state: AppState) -> None:
     from app.mcp_server import MCP_SESSIONS_PER_IP, SessionOpenLimit
 
@@ -259,56 +230,107 @@ async def test_session_open_limit_counts_concurrent_opens(state: AppState) -> No
     assert guard.opening == {}
 
 
-async def test_session_open_limit_bounds_large_body_lock(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.mcp_server as m
+async def test_mcp_session_cap_sized_for_container(state: AppState) -> None:
+    from app.mcp_server import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, build_mcp
 
-    async def stalled(scope: Any, receive: Any, send: Any) -> None:  # lecteur lent : la réponse ne finit jamais
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await asyncio.sleep(3600)
-
-    guard = m.SessionOpenLimit(stalled, state, lambda sid: True)
-    big = [(b"mcp-session-id", b"s"), (b"content-length", str(m.MCP_SMALL_BODY_BYTES + 1).encode())]
-    scope = {"type": "http", "method": "POST", "headers": big, "client": ("127.0.0.1", 1)}
-    statuses: list[int] = []
-
-    async def send(message: Any) -> None:
-        if message["type"] == "http.response.start":
-            statuses.append(message["status"])
-
-    async def receive() -> Any:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 0.05)
-    await asyncio.wait_for(asyncio.gather(guard(scope, receive, send), guard(scope, receive, send)), 2)
-    assert statuses == [200, 200] and not guard.large_body.locked()  # détention bornée, verrou rendu
-
-    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 1.0)
-    monkeypatch.setattr(m, "MCP_LARGE_BODY_WAIT", 0.05)
-    statuses.clear()
-    await asyncio.gather(guard(scope, receive, send), guard(scope, receive, send))
-    assert sorted(statuses) == [200, 503]  # attente bornée : SERVER_BUSY
-    assert not guard.large_body.locked()
+    mcp = build_mcp(state)
+    mcp.streamable_http_app()
+    assert MCP_MAX_SESSIONS == 1000 and mcp.session_manager.max_sessions == MCP_MAX_SESSIONS
+    assert MCP_IDLE_TIMEOUT == 1800 and mcp.session_manager.session_idle_timeout == MCP_IDLE_TIMEOUT
 
 
-async def test_large_body_hold_expiry_before_response_is_json(state: AppState,
-                                                               monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.mcp_server as m
+async def test_mcp_without_trailing_slash(live_url: str, state: AppState) -> None:
+    async with httpx.AsyncClient(base_url=live_url) as c:
+        r = await c.post("/mcp", json=INIT, headers={**MCP_HEADERS, "X-Real-IP": "192.0.2.90"})
+        assert r.status_code == 200 and r.headers.get("mcp-session-id")  # pas de 307
+        assert r.headers.get("cache-control") == "no-store"
+    a = await make_agent(state, "mcp-noslash")
+    async with streamablehttp_client(f"{live_url}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            assert (await call(s, "login", phrase=a.phrase))["handle"] == "mcp-noslash"
 
-    async def slow_upload(scope: Any, receive: Any, send: Any) -> None:  # aucune réponse avant la borne
-        await asyncio.sleep(3600)
 
-    guard = m.SessionOpenLimit(slow_upload, state, lambda sid: True)
-    big = [(b"mcp-session-id", b"s"), (b"content-length", str(m.MCP_SMALL_BODY_BYTES + 1).encode())]
-    sent: list[Any] = []
+async def test_closed_mcp_session_erases_bound_keys(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-close")
+    async with streamablehttp_client(f"{live_url}/mcp/") as (read, write, get_sid):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            await call(s, "login", phrase=a.phrase)
+            sid = get_sid()
+            assert sid and state.sessions.token_for_mcp(sid) is not None
+    # le client envoie DELETE à la fermeture : le token, jamais montré au client, est révoqué
+    assert state.sessions.token_for_mcp(sid) is None
+    assert list(state.sessions._by_agent[a.agent_id]) == [a.token]  # reste : le token REST de make_agent
 
-    async def send(message: Any) -> None:
-        sent.append(message)
 
-    async def receive() -> Any:
-        return {"type": "http.request", "body": b"", "more_body": False}
+async def test_mcp_pages_rejected_like_rest(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-pages")
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        for tool, args in (("forum_threads", {"category": "presentations", "page": 0}),
+                           ("forum_threads", {"category": "presentations", "page": 10_001}),
+                           ("forum_read", {"thread_id": 1, "page": 0}),
+                           ("forum_search", {"query": "x", "page": 101})):
+            assert (await call(s, tool, **args))["_error"]["error"] == "VALIDATION_ERROR", (tool, args)
 
-    monkeypatch.setattr(m, "MCP_LARGE_BODY_HOLD", 0.05)
-    await guard({"type": "http", "method": "POST", "headers": big, "client": ("127.0.0.1", 1)}, receive, send)
-    assert sent[0]["status"] == 503 and (b"retry-after", b"5") in sent[0]["headers"]
-    assert json.loads(sent[1]["body"])["error"] == "SERVER_BUSY"
-    assert not guard.large_body.locked()
+
+async def test_mcp_register_checks_before_spending_ip_budget(live_url: str, state: AppState,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    async with mcp_session_from(live_url, "192.0.2.91") as s:
+        for _ in range(6):  # > 5/h register: : un code mal formé ne consomme pas le budget
+            r = await call(s, "register_start", invite_code="pas valide!", handle="bob")
+            assert r["_error"]["error"] == "VALIDATION_ERROR"
+            r = await call(s, "register_complete", challenge_id="x" * 33, answers=[])
+            assert r["_error"]["error"] == "VALIDATION_ERROR"
+        monkeypatch.setattr(state.disk, "is_busy", lambda: True)
+        for _ in range(6):  # disque plein : SERVER_BUSY sans consommer le budget
+            r = await call(s, "register_start", invite_code="abc", handle="bob")
+            assert r["_error"]["error"] == "SERVER_BUSY"
+            r = await call(s, "register_complete", challenge_id="abc", answers=[])
+            assert r["_error"]["error"] == "SERVER_BUSY"
+        monkeypatch.undo()
+        assert (await call(s, "register_start", invite_code="abc", handle="bob"))["_error"]["error"] == "INVALID_INVITE"
+
+
+async def test_mcp_disk_guards_and_suspension(live_url: str, state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.identity.models import Agent
+
+    a = await make_agent(state, "mcp-guards")
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        await call(s, "vault_write", path="/a.md", content="x")
+        monkeypatch.setattr(state.disk, "is_busy", lambda: True)
+        for tool, args in (("vault_write", {"path": "/b.md", "content": "x"}),
+                           ("vault_move", {"src": "/a.md", "dst": "/c.md"}),
+                           ("admin_message_send", {"text": "bonjour"})):
+            assert (await call(s, tool, **args))["_error"]["error"] == "SERVER_BUSY", tool
+        monkeypatch.undo()
+        async with state.sessionmaker() as db:
+            await db.execute(update(Agent).where(Agent.agent_id == a.agent_id)
+                             .values(suspended_until=datetime.now(UTC) + timedelta(days=1)))
+            await db.commit()
+        r = await call(s, "forum_post", category="presentations", title="t", body="b")
+        assert r["_error"]["error"] == "SUSPENDED"
+
+
+async def test_mcp_shares_agent_bucket_with_rest(live_url: str, state: AppState, client: httpx.AsyncClient) -> None:
+    a = await make_agent(state, "mcp-bucket")
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        for _ in range(60):
+            assert (await client.get("/api/me", headers=a.headers)).status_code == 200
+        assert (await call(s, "me"))["_error"]["error"] == "RATE_LIMITED"
+
+
+async def test_dict_tools_return_payload_once(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-once")
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        await call(s, "vault_write", path="/a.md", content="souvenir")
+        result = await s.call_tool("vault_read", {"path": "/a.md"})
+        assert result.structuredContent is None and len(result.content) == 1

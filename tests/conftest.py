@@ -90,7 +90,11 @@ async def live_url(app: FastAPI) -> AsyncIterator[str]:
     sock.close()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, lifespan="off", log_level="warning"))
     task = asyncio.create_task(server.serve())
+    deadline = asyncio.get_running_loop().time() + 30
     while not server.started:  # noqa: ASYNC110
+        if task.done() or asyncio.get_running_loop().time() > deadline:  # échec de bind : échoue, ne bloque pas
+            server.should_exit = True
+            raise RuntimeError("live test server did not start")
         await asyncio.sleep(0.05)
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True

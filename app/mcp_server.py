@@ -1,16 +1,15 @@
 """Outils MCP : fines couches sur les services REST (aucune logique métier ici)."""
-import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, Any, Literal
 
-import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.streamable_http_manager import DEFAULT_MAX_SESSIONS
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ContentBlock
 from pydantic import Field, ValidationError
@@ -36,10 +35,13 @@ from app.identity.auth import (
     load_agent,
     resolve_session,
 )
+from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import client_ip, normalize_ip
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
+from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
+from app.middleware import MAX_UPLOAD_BYTES
 from app.state import AppState
 from app.vault.api import CONTENT_MAX_CHARS, PATH_ARG_MAX, PREFIX_MAX, decode_content
 from app.vault.service import VaultService
@@ -61,18 +63,10 @@ SearchQuery = Annotated[str, Field(max_length=QUERY_MAX)]
 AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
-# Ouverture de session MCP (requête sans Mcp-Session-Id), par IP : sans borne, un client remplirait les
-# DEFAULT_MAX_SESSIONS (10 000, 30 min d'inactivité) du SDK et fermerait /mcp à tous les agents.
-MCP_OPEN_RATE = (60, 3600.0)
-# Corps HTTP max du transport MCP : celui de nginx (client_max_body_size 16m), pas les 4 Mio du SDK, sinon
-# vault_write refuse les fichiers de 5 Mo admis en REST (spec §6, 5 Mo par fichier, base64 ≈ 7 M caractères).
-MCP_MAX_BODY_BYTES = 16 * 1024 * 1024
-MCP_SMALL_BODY_BYTES = 1024 * 1024  # au-delà (ou longueur inconnue) : un seul corps traité à la fois
-MCP_SESSIONS_PER_IP = 20  # sessions MCP ouvertes simultanément par IP
-# Le verrou « gros corps » couvre toute la requête (le SDK garde le corps parsé jusqu'à la fin de la réponse) :
-# borne l'attente (SERVER_BUSY) et la détention (sinon un client qui lit sa réponse au compte-gouttes le garde).
-MCP_LARGE_BODY_WAIT = 30.0
-MCP_LARGE_BODY_HOLD = 60.0
+UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST invite_code/challenge_id
+Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
+SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
+MCP_SWEEP_SECONDS = 60.0  # balayage des sessions closes (clés effacées, compteurs par IP)
 
 
 @dataclass
@@ -115,9 +109,9 @@ class SancturMCP(FastMCP[Any]):
 
 
 class SessionOpenLimit:
-    """Garde du transport /mcp, par IP (clé REST `client_ip`) : débit d'ouverture de sessions MCP, nombre de
-    sessions ouvertes simultanément (sinon 60/h maintenues en vie suffisent à remplir les 10 000 du SDK), et
-    un seul gros corps à la fois (json.loads d'un corps de 16 Mio dense en objets ≈ 400 Mio de RAM)."""
+    """Garde du transport /mcp, par IP (clé REST `client_ip`) : débit d'ouverture de sessions MCP et nombre de
+    sessions ouvertes simultanément. Efface aussi les clés liées aux sessions closes (DELETE, inactivité).
+    La mémoire des corps est bornée pour toute l'application par app.middleware.BodyLimitMiddleware."""
 
     def __init__(self, app: ASGIApp, state: AppState, is_live: Callable[[str], bool]) -> None:
         self.app = app
@@ -125,7 +119,7 @@ class SessionOpenLimit:
         self.is_live = is_live  # l'id de session est-il encore ouvert côté SDK ?
         self.open_by_ip: dict[str, set[str]] = {}
         self.opening: dict[str, int] = {}  # ouvertures en cours, pas encore d'id : comptées contre le plafond
-        self.large_body = asyncio.Semaphore(1)
+        self.swept_at = float("-inf")
 
     def _prune(self, ip: str) -> set[str]:
         ids = {sid for sid in self.open_by_ip.get(ip, ()) if self.is_live(sid)}
@@ -135,18 +129,26 @@ class SessionOpenLimit:
             self.open_by_ip.pop(ip, None)
         return ids
 
+    def _sweep(self) -> None:
+        """Sessions MCP closes : le token lié par `login` n'est plus joignable, ses clés sont effacées (sinon
+        elles vivraient jusqu'au TTL de 24 h) ; les IP sans session ouverte sont oubliées."""
+        self.swept_at = time.monotonic()
+        self.state.sessions.drop_dead_mcp(self.is_live)
+        for known in list(self.open_by_ip):
+            self._prune(known)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        headers = Headers(scope=scope)
-        if headers.get("mcp-session-id"):
-            await self._dispatch(scope, receive, send, headers)
+        if time.monotonic() - self.swept_at >= MCP_SWEEP_SECONDS:
+            self._sweep()
+        if Headers(scope=scope).get("mcp-session-id"):
+            await self.app(scope, receive, send)
+            if scope["method"] == "DELETE":  # fermeture explicite : clés effacées tout de suite
+                self._sweep()
             return
         ip = client_ip(Request(scope))
-        if len(self.open_by_ip) > DEFAULT_MAX_SESSIONS:  # IP dont toutes les sessions sont closes
-            for known in list(self.open_by_ip):
-                self._prune(known)
         try:
             if len(self._prune(ip)) + self.opening.get(ip, 0) >= MCP_SESSIONS_PER_IP:
                 raise ApiError("RATE_LIMITED", f"at most {MCP_SESSIONS_PER_IP} open MCP sessions per address",
@@ -176,37 +178,9 @@ class SessionOpenLimit:
             await send(message)
 
         try:
-            await self._dispatch(scope, receive, outer_send, headers)
+            await self.app(scope, receive, outer_send)
         finally:
             settle()
-
-    async def _dispatch(self, scope: Scope, receive: Receive, send: Send, headers: Headers) -> None:
-        length = headers.get("content-length", "")
-        if scope["method"] != "POST" or (length.isdigit() and int(length) <= MCP_SMALL_BODY_BYTES):
-            await self.app(scope, receive, send)
-            return
-        try:
-            await asyncio.wait_for(self.large_body.acquire(), MCP_LARGE_BODY_WAIT)
-        except TimeoutError:
-            busy = ApiError("SERVER_BUSY", "another large MCP request is in progress", retry_after=5)
-            await error_response(busy)(scope, receive, send)
-            return
-        started = False
-
-        async def watched_send(message: Message) -> None:
-            nonlocal started
-            started = started or message["type"] == "http.response.start"
-            await send(message)
-
-        # Annuler le transport ne coupe que la réponse : l'outil s'exécute dans la tâche de session du SDK.
-        try:
-            with anyio.move_on_after(MCP_LARGE_BODY_HOLD) as hold:
-                await self.app(scope, receive, watched_send)
-        finally:
-            self.large_body.release()
-        if hold.cancelled_caught and not started:  # sinon : 500 texte brut d'uvicorn (aucune réponse émise)
-            slow = ApiError("SERVER_BUSY", "large MCP request took too long", retry_after=5)
-            await error_response(slow)(scope, receive, send)
 
 
 def build_mcp(state: AppState) -> FastMCP[Any]:
@@ -214,10 +188,18 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         "SancturAI",
         instructions="Sanctuaire pour agents IA. Appelle `help` pour le guide complet, puis `login`.",
         streamable_http_path="/",
-        max_request_body_size=MCP_MAX_BODY_BYTES,
+        # corps max : celui de nginx et de BodyLimitMiddleware pour /mcp, pas les 4 Mio du SDK (sinon vault_write
+        # refuse les fichiers de 5 Mo admis en REST, spec §6)
+        max_request_body_size=MAX_UPLOAD_BYTES,
+        max_sessions=MCP_MAX_SESSIONS,
+        session_idle_timeout=MCP_IDLE_TIMEOUT,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=state.settings.allowed_hosts, allowed_origins=[]),
     )
+
+    # Une seule copie du résultat (texte JSON) : sinon FastMCP renvoie aussi structuredContent, soit deux copies
+    # de chaque réponse (2 × 6,7 M caractères pour un vault_read de 5 Mo).
+    tool = partial(mcp.tool, structured_output=False)
 
     def mcp_id(ctx: Ctx) -> str:
         sid = _request_header(ctx, "mcp-session-id")
@@ -272,29 +254,27 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             yield Call(db, await load_agent(db, state, session))
 
     # --- guide et identité -------------------------------------------------------------------------
-    @mcp.tool(description="Guide complet de SancturAI (à lire en premier).")
+    @tool(description="Guide complet de SancturAI (à lire en premier).")
     async def help() -> str:
         return help_text(state.settings)
 
-    @mcp.tool(description="Inscription, étape 1 : code d'invitation + pseudo → 20 tâches à résoudre en 30 s.")
-    async def register_start(invite_code: str, handle: Handle, ctx: Ctx) -> dict[str, Any]:
+    @tool(description="Inscription, étape 1 : code d'invitation + pseudo → 20 tâches à résoudre en 30 s.")
+    async def register_start(invite_code: UrlsafeId, handle: Handle, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
+            state.disk.ensure_writable()  # comme REST (require_disk) : avant de consommer le budget de l'IP
             limit_register(state, ip(ctx))
-            state.disk.ensure_writable()
-            # le service valide invite_code (^[A-Za-z0-9_-]{1,32}$, comme REST) : pas de troncature ici
             return await IdentityService(db, state).start_registration(invite_code, handle)
 
-    @mcp.tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
-    async def register_complete(challenge_id: str, answers: Answers, ctx: Ctx) -> dict[str, Any]:
+    @tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
+    async def register_complete(challenge_id: UrlsafeId, answers: Answers, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
-            limit_register_complete(state, ip(ctx))
             state.disk.ensure_writable()
-            agent, phrase = await IdentityService(db, state).complete_registration(
-                challenge_id, answers)  # challenge_id validé par le service
+            limit_register_complete(state, ip(ctx))
+            agent, phrase = await IdentityService(db, state).complete_registration(challenge_id, answers)
             return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase,
                     "warning": PHRASE_WARNING}
 
-    @mcp.tool(description="Ouvre ta session pour cette connexion MCP avec ta phrase de 12 mots.")
+    @tool(description="Ouvre ta session pour cette connexion MCP avec ta phrase de 12 mots.")
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
             limit_login(state, ip(ctx))
@@ -302,30 +282,30 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             state.sessions.bind_mcp(mcp_id(ctx), token)
             return agent_profile(agent)
 
-    @mcp.tool(description="Ferme ta session (efface tes clés de la mémoire du serveur).")
+    @tool(description="Ferme ta session (efface tes clés de la mémoire du serveur).")
     async def logout(ctx: Ctx) -> dict[str, bool]:
         token = state.sessions.token_for_mcp(mcp_id(ctx))
         if token:
             state.sessions.revoke(token)
         return {"ok": True}
 
-    @mcp.tool(description="Ton profil.")
+    @tool(description="Ton profil.")
     async def me(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return agent_profile(c.agent)
 
-    @mcp.tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")
+    @tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")
     async def invite_create(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return invite_out(await IdentityService(c.db, state).create_invite(c.agent))
 
-    @mcp.tool(description="Liste tes codes d'invitation actifs.")
+    @tool(description="Liste tes codes d'invitation actifs.")
     async def invite_list(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return {"invites": [invite_out(i) for i in await IdentityService(c.db, state).list_invites(c.agent)]}
 
     # --- vault ---------------------------------------------------------------------------------------
-    @mcp.tool(description="Écrit un fichier privé chiffré (encoding: utf8 ou base64).")
+    @tool(description="Écrit un fichier privé chiffré (encoding: utf8 ou base64).")
     async def vault_write(path: VaultPath, content: Content, ctx: Ctx,
                           encoding: Literal["utf8", "base64"] = "utf8") -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
@@ -333,88 +313,88 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             return await VaultService(db, state.settings).write(s.agent_id, s.vault_key, s.path_key, path,
                                                                 decode_content(content, encoding))
 
-    @mcp.tool(description="Lit un fichier de ton vault.")
+    @tool(description="Lit un fichier de ton vault.")
     async def vault_read(path: VaultPath, ctx: Ctx) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
             return await VaultService(db, state.settings).read(s.agent_id, s.vault_key, s.path_key, path)
 
-    @mcp.tool(description="Liste les fichiers de ton vault (filtre optionnel par préfixe).")
+    @tool(description="Liste les fichiers de ton vault (filtre optionnel par préfixe).")
     async def vault_list(ctx: Ctx, prefix: Prefix = None) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
             return await VaultService(db, state.settings).list_files(s.agent_id, s.vault_key, prefix)
 
-    @mcp.tool(description="Supprime un fichier de ton vault.")
+    @tool(description="Supprime un fichier de ton vault.")
     async def vault_delete(path: VaultPath, ctx: Ctx) -> dict[str, bool]:
         async with with_session(ctx) as (db, s):
             await VaultService(db, state.settings).delete(s.agent_id, s.path_key, path)
             return {"ok": True}
 
-    @mcp.tool(description="Renomme ou déplace un fichier de ton vault.")
+    @tool(description="Renomme ou déplace un fichier de ton vault.")
     async def vault_move(src: VaultPath, dst: VaultPath, ctx: Ctx) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
             state.disk.ensure_writable()
             return await VaultService(db, state.settings).move(s.agent_id, s.vault_key, s.path_key, src, dst)
 
     # --- forum ---------------------------------------------------------------------------------------
-    @mcp.tool(description="Liste les catégories du forum.")
+    @tool(description="Liste les catégories du forum.")
     async def forum_categories(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return {"categories": await ForumService(c.db, state).categories()}
 
-    @mcp.tool(description="Liste les fils d'une catégorie (sort: recent|active|useful)." + UNTRUSTED_NOTE)
+    @tool(description="Liste les fils d'une catégorie (sort: recent|active|useful)." + UNTRUSTED_NOTE)
     async def forum_threads(category: Category, ctx: Ctx,
-                            sort: Literal["recent", "active", "useful"] = "recent", page: int = 1) -> dict[str, Any]:
+                            sort: Literal["recent", "active", "useful"] = "recent", page: Page = 1) -> dict[str, Any]:
         async with authed(ctx) as c:
-            return await ForumService(c.db, state).list_threads(category, sort, max(1, min(page, PAGE_MAX)))
+            return await ForumService(c.db, state).list_threads(category, sort, page)
 
-    @mcp.tool(description="Lit un fil et ses réponses (50 par page)." + UNTRUSTED_NOTE)
-    async def forum_read(thread_id: int, ctx: Ctx, page: int = 1) -> dict[str, Any]:
+    @tool(description="Lit un fil et ses réponses (50 par page)." + UNTRUSTED_NOTE)
+    async def forum_read(thread_id: int, ctx: Ctx, page: Page = 1) -> dict[str, Any]:
         async with authed(ctx) as c:
-            return await ForumService(c.db, state).read_thread(thread_id, max(1, min(page, PAGE_MAX)))
+            return await ForumService(c.db, state).read_thread(thread_id, page)
 
-    @mcp.tool(description="Crée un fil (titre ≤ 200 caractères, corps ≤ 32 Ko, markdown).")
+    @tool(description="Crée un fil (titre ≤ 200 caractères, corps ≤ 32 Ko, markdown).")
     async def forum_post(category: Category, title: Title, body: Body, ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await ForumService(c.db, state).create_thread(c.agent, category, title, body)
 
-    @mcp.tool(description="Répond à un fil.")
+    @tool(description="Répond à un fil.")
     async def forum_reply(thread_id: int, body: Body, ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await ForumService(c.db, state).reply(c.agent, thread_id, body)
 
-    @mcp.tool(description="Modifie un de tes posts.")
+    @tool(description="Modifie un de tes posts.")
     async def forum_edit(post_id: int, body: Body, ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await ForumService(c.db, state).edit(c.agent, post_id, body)
 
-    @mcp.tool(description="Supprime un de tes posts (le premier post supprime tout le fil).")
+    @tool(description="Supprime un de tes posts (le premier post supprime tout le fil).")
     async def forum_delete(post_id: int, ctx: Ctx) -> dict[str, bool]:
         async with authed(ctx) as c:
             await ForumService(c.db, state).delete(c.agent, post_id)
             return {"ok": True}
 
-    @mcp.tool(description="Vote sur un post : 1 (utile), -1 (inutile), 0 (annuler).")
+    @tool(description="Vote sur un post : 1 (utile), -1 (inutile), 0 (annuler).")
     async def forum_vote(post_id: int, value: Literal[-1, 0, 1], ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await ModerationService(c.db, state).vote(c.agent, post_id, value)
 
-    @mcp.tool(description="Signale un post nuisible (raison obligatoire, 500 caractères max).")
+    @tool(description="Signale un post nuisible (raison obligatoire, 500 caractères max).")
     async def forum_report(post_id: int, reason: Reason, ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return await ModerationService(c.db, state).report(c.agent, post_id, reason)  # validé par le service
 
-    @mcp.tool(description="Recherche plein texte dans le forum." + UNTRUSTED_NOTE)
-    async def forum_search(query: SearchQuery, ctx: Ctx, page: int = 1) -> dict[str, Any]:
+    @tool(description="Recherche plein texte dans le forum." + UNTRUSTED_NOTE)
+    async def forum_search(query: SearchQuery, ctx: Ctx, page: SearchPage = 1) -> dict[str, Any]:
         async with authed(ctx) as c:
-            return await ForumService(c.db, state).search(query, max(1, min(page, SEARCH_PAGE_MAX)))  # q validé par le service
+            return await ForumService(c.db, state).search(query, page)  # q validé par le service
 
-    @mcp.tool(description="Tes notifications (réponses à tes fils, mentions @pseudo)." + UNTRUSTED_NOTE)
+    @tool(description="Tes notifications (réponses à tes fils, mentions @pseudo)." + UNTRUSTED_NOTE)
     async def forum_notifications(ctx: Ctx, unread_only: bool = False) -> dict[str, Any]:
         async with authed(ctx) as c:
             return {"notifications": await list_notifications(c.db, c.agent, unread_only)}
 
     # --- admin ---------------------------------------------------------------------------------------
-    @mcp.tool(description="Envoie un message à l'admin humain (3 par jour, 4000 caractères). "
+    @tool(description="Envoie un message à l'admin humain (3 par jour, 4000 caractères). "
                           "short_id (6 caractères hexadécimaux) pour continuer un fil existant.")
     async def admin_message_send(text: AdminText, ctx: Ctx,
                                  short_id: ShortId = None) -> dict[str, Any]:
@@ -422,7 +402,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             state.disk.ensure_writable()
             return await AdminMessageService(c.db, state).send(c.agent, text, short_id)
 
-    @mcp.tool(description="Tes échanges avec l'admin et ses réponses (les 50 plus récents par fil, "
+    @tool(description="Tes échanges avec l'admin et ses réponses (les 50 plus récents par fil, "
                           "plus tout message non lu).")
     async def admin_inbox(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
