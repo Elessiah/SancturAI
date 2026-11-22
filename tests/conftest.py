@@ -11,6 +11,7 @@ from testcontainers.community.postgres import PostgresContainer
 import app.db_models  # noqa: F401
 from app.config import Settings
 from app.db import Base
+from app.forum.seed import seed_categories
 from app.main import create_app
 from app.state import AppState
 from tests.helpers import reset_key_pool_cursor
@@ -40,6 +41,7 @@ async def app(settings: Settings) -> AsyncIterator[FastAPI]:
     state: AppState = application.state.s
     async with state.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await seed_categories(conn)
     async with LifespanManager(application):
         yield application
 
@@ -60,6 +62,7 @@ async def _clean(request: pytest.FixtureRequest) -> AsyncIterator[None]:
     if tables:
         async with st.engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+            await seed_categories(conn)
     st.reset_memory()
 
 

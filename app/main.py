@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.config import Settings, get_settings
 from app.errors import install_error_handlers
+from app.forum.api import router as forum_router
 from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
 from app.middleware import NoStoreMiddleware
@@ -39,5 +40,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(identity_router)
+    app.include_router(forum_router)
     app.include_router(vault_router)
     return app
