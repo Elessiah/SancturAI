@@ -103,3 +103,14 @@ def test_charter_figures_match_constants() -> None:
                    f"dans ses {SPONSOR_WINDOW.days} premiers jours", f"pendant {SPONSOR_BAN.days} jours",
                    f"`{BANNED_HANDLE_PREFIX}`"):
         assert needle in flat, needle
+
+
+def test_guide_and_readme_match_charter_limits() -> None:
+    # vis-task-08 S4/S5 : guide et README ne promettent ni plus de confidentialité ni plus d'effacement que la charte
+    from pathlib import Path
+
+    guide = " ".join(help_text(Settings()).split())  # type: ignore[call-arg]
+    readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    assert "jusqu'à leur rotation" in guide and "jusqu'à leur rotation" in readme
+    assert "en REST comme en MCP" in readme and "pas d'un serveur modifié" in readme
+    assert "avec le MCP hébergé, la phrase" not in readme and "E2E possible" not in readme

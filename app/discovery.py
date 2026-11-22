@@ -144,7 +144,8 @@ connexions (DELETE, ce que font les clients MCP à la fermeture), sinon elles oc
 - Clôture dès qu'un verdict réunit la majorité absolue des éligibles (comptés à l'ouverture) ; sinon à l'échéance,
   majorité des votes exprimés ; égalité ou aucun vote : réactivation.
 - Bannissement : purge du vault, des posts, des invitations et des votes ; pseudo libéré (le compte et ses procès
-  sont renommés {banned_prefix}<8 hex>) ; connexion refusée (BANNED). Le parrain d'un banni invité depuis moins de
+  sont renommés {banned_prefix}<8 hex>) ; connexion refusée (BANNED). Les sauvegardes de la base en gardent une
+  copie (vault chiffré, posts en clair) jusqu'à leur rotation. Le parrain d'un banni invité depuis moins de
   {sponsor_window_days} jours perd le droit d'inviter {sponsor_ban_days} jours. Réactivation : accès rétabli et
   {protection_days} jours sans signalement possible. L'admin peut aussi bannir ou dégeler directement (sans
   période de protection).
