@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false  # aucun git authentifié après le checkout : le jeton ne reste pas dans .git/config
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         if: hashFiles('pyproject.toml') != ''
         with:
           version: "0.11.32"  # = image uv de deploy/Dockerfile et `uv --version` local
