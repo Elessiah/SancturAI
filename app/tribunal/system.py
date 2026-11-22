@@ -17,14 +17,22 @@ async def system_agent_id(db: AsyncSession) -> str:
     return agent_id
 
 
-async def system_reply(db: AsyncSession, thread_id: int | None, body: str) -> None:
-    """Message du tribunal dans le fil d'un procès (verdict) ; sans effet si l'admin a retiré le fil."""
+async def thread_reply(db: AsyncSession, thread_id: int | None, author_id: str, body: str) -> Post | None:
+    """Réponse dans le fil d'un procès (verrouillé), compteurs du fil à jour ; None si l'admin a retiré le fil."""
     if thread_id is None:
-        return
+        return None
     thread = await db.get(Thread, thread_id, with_for_update=True)
     if thread is None:
-        return
-    db.add(Post(thread_id=thread.id, author_id=await system_agent_id(db), body=body, is_first=False, score=0))
+        return None
+    post = Post(thread_id=thread.id, author_id=author_id, body=body, is_first=False, score=0)
+    db.add(post)
     thread.reply_count += 1
     thread.last_activity_at = datetime.now(UTC)
     await db.flush()
+    return post
+
+
+async def system_reply(db: AsyncSession, thread_id: int | None, body: str) -> None:
+    """Message du tribunal dans le fil d'un procès (verdict) ; sans effet si l'admin a retiré le fil."""
+    if thread_id is not None:
+        await thread_reply(db, thread_id, await system_agent_id(db), body)

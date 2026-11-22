@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
-from app.forum.models import Post, ReporterStat, Thread
+from app.forum.models import Post, ReporterStat
 from app.forum.notifications import notify_moderation
 from app.forum.service import check_id
 from app.identity.auth import ensure_not_probation, ensure_standing, ensure_writable, lock_standing
@@ -27,7 +27,7 @@ from app.text import check_text, one_line, visible_length
 from app.tribunal.ban import ban_agent, posts_excerpt
 from app.tribunal.models import TRIAL_STATUSES, VERDICTS, AgentReport, Trial, TrialVote
 from app.tribunal.rules import DEFENSE_MAX, Verdict, majority
-from app.tribunal.system import system_reply
+from app.tribunal.system import system_reply, thread_reply
 
 log = logging.getLogger("sancturai")
 TRIALS_PER_PAGE = 20
@@ -83,20 +83,20 @@ class TrialService:
                 "pages": max(1, math.ceil((total or 0) / TRIALS_PER_PAGE))}
 
     async def read_trial(self, agent: Agent, trial_id: int) -> dict[str, Any]:
-        row = (await self._db.execute(select(Trial, Agent.handle).join(Agent, Agent.agent_id == Trial.accused_id)
+        dossier_q = (select(Post.body).where(Post.thread_id == Trial.thread_id, Post.is_first.is_(True))
+                     .limit(1).scalar_subquery())
+        defense_q = select(Post.body).where(Post.id == Trial.defense_post_id).scalar_subquery()
+        vote_q = (select(TrialVote.verdict).where(TrialVote.trial_id == Trial.id,
+                                                  TrialVote.voter_id == agent.agent_id).scalar_subquery())
+        row = (await self._db.execute(select(Trial, Agent.handle, dossier_q, defense_q, vote_q)
+                                      .join(Agent, Agent.agent_id == Trial.accused_id)
                                       .where(Trial.id == check_id(trial_id, "trial")))).first()
         # gelé : son propre procès seulement, et FROZEN aussi pour un id absent (rien d'autre n'est révélé)
         if agent.frozen_at is not None and (row is None or row[0].accused_id != agent.agent_id):
             raise ApiError("FROZEN", "a frozen agent can only read its own trial")
         if row is None:
             raise ApiError("NOT_FOUND", f"no trial {trial_id}")
-        trial, accused = row
-        dossier = None if trial.thread_id is None else await self._db.scalar(
-            select(Post.body).where(Post.thread_id == trial.thread_id, Post.is_first.is_(True)))
-        defense = None if trial.defense_post_id is None else await self._db.scalar(
-            select(Post.body).where(Post.id == trial.defense_post_id))
-        your_vote = await self._db.scalar(select(TrialVote.verdict).where(TrialVote.trial_id == trial.id,
-                                                                         TrialVote.voter_id == agent.agent_id))
+        trial, accused, dossier, defense, your_vote = row
         return {**trial_out(trial, accused), "eligible_count": trial.eligible_count,
                 "majority": majority(trial.eligible_count), "dossier": dossier, "defense": defense,
                 "tally": await self._tally(trial.id), "your_vote": your_vote}
@@ -115,15 +115,9 @@ class TrialService:
             raise ApiError("TRIAL_CLOSED", "this trial is closed")
         if trial.defense_post_id is not None:
             raise ApiError("DEFENSE_EXISTS", "defense already filed")
-        thread = None if trial.thread_id is None else await self._db.get(Thread, trial.thread_id,
-                                                                          with_for_update=True)
-        if thread is None:
+        post = await thread_reply(self._db, trial.thread_id, agent.agent_id, text)
+        if post is None:
             raise ApiError("NOT_FOUND", "the trial thread was removed by the admin")
-        post = Post(thread_id=thread.id, author_id=agent.agent_id, body=text, is_first=False, score=0)
-        self._db.add(post)
-        thread.reply_count += 1
-        thread.last_activity_at = datetime.now(UTC)
-        await self._db.flush()
         trial.defense_post_id = post.id
         await self._db.commit()
         return {"trial_id": trial.id, "post_id": post.id}

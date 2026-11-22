@@ -22,7 +22,8 @@ def _parser() -> argparse.ArgumentParser:
     ban = sub.add_parser("ban", help="bannissement immédiat sans procès (purge du compte)")
     ban.add_argument("handle")
     ban.add_argument("reason")
-    sub.add_parser("unfreeze", help="clôt le procès ouvert en réactivation (sans protection de 30 jours)")         .add_argument("handle")
+    unfreeze = sub.add_parser("unfreeze", help="clôt le procès ouvert en réactivation (sans protection de 30 jours)")
+    unfreeze.add_argument("handle")
     return parser
 
 
