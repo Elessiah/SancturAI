@@ -22,7 +22,7 @@ MAX_TEXT = {"log": 1800, "agent_message": 4000}
 MAX_PAYLOAD_BYTES = 32_768  # mesuré côté Postgres : une ligne géante n'est jamais chargée sur l'hôte
 AGENT_ID_MAX = 64
 HANDLE_RE = re.compile(r"[a-z0-9_-]{3,32}")
-SHORT_ID_RE = re.compile(r"[0-9a-f]{4}")
+SHORT_ID_RE = re.compile(r"[0-9a-f]{4,6}")
 BATCH_BUDGET = LEASE_SECONDS - 30  # au-delà, on arrête le lot : les bails restants expirent et les lignes sont reprises
 
 # Réservation (bail) : une seule requête courte met next_attempt_at dans le futur, puis chaque
@@ -65,7 +65,7 @@ def _no_format_chars(value: str) -> bool:
 def format_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Corps envoyé au bot : liste blanche stricte de champs typés et bornés (jamais le JSONB brut).
 
-    Reprend le contrat du bot (texte non vide, short_id 4 hex minuscules, handle, agent_id sans caractères
+    Reprend le contrat du bot (texte non vide, short_id 4 à 6 hex minuscules, handle, agent_id sans caractères
     de contrôle/format). Lève ValueError si la ligne ne le respecte pas (le message ne contient aucune donnée).
     """
     if kind not in MAX_TEXT or not isinstance(payload, dict):
@@ -75,7 +75,7 @@ def format_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("empty text")
     out: dict[str, Any] = {"kind": kind, "text": text}
     if kind == "agent_message":
-        short_id = _bounded_str(payload.get("short_id"), 4)
+        short_id = _bounded_str(payload.get("short_id"), 6)
         agent = payload.get("agent")
         if not isinstance(agent, dict) or not SHORT_ID_RE.fullmatch(short_id):
             raise ValueError("invalid agent message")
@@ -131,9 +131,9 @@ def process_batch(conn: psycopg.Connection, http: httpx.Client, bot_url: str, to
             _settle(conn, event_id, kind, text_json, attempts, lease, http, bot_url, token)
         except psycopg.OperationalError:
             raise  # base indisponible : main() reconnecte
-        except Exception:
+        except Exception as exc:
             # filet : aucune ligne ne doit pouvoir tuer la boucle ni laisser son lot sous bail (journal sans donnée de ligne)
-            log.error("event %s failed unexpectedly, backing off", event_id)
+            log.error("event %s failed unexpectedly (%s), backing off", event_id, type(exc).__name__)
             try:
                 conn.execute(MARK_FAILED, (backoff_seconds(attempts), event_id, lease))
             except psycopg.OperationalError:

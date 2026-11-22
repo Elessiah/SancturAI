@@ -55,6 +55,12 @@ def _insert(conn: psycopg.Connection, kind: str, payload: dict[str, object]) -> 
 def test_format_payload() -> None:
     p = format_payload("agent_message", {"text": "hi", "short_id": "ab12", "agent": {"handle": "xyz", "agent_id": "y"}})
     assert p == {"kind": "agent_message", "text": "hi", "short_id": "ab12", "agent": {"handle": "xyz", "agent_id": "y"}}
+
+
+@pytest.mark.parametrize("short_id", ["ab12", "ab123", "ab12cd"])
+def test_format_payload_accepts_4_to_6_hex_short_id(short_id):
+    p = format_payload("agent_message", {"text": "hi", "short_id": short_id, "agent": {"handle": "xyz", "agent_id": "y"}})
+    assert p["short_id"] == short_id
     assert format_payload("log", {"text": "t", "extra": 1}) == {"kind": "log", "text": "t"}
 
 
@@ -164,7 +170,7 @@ def test_401_and_503_are_retried(conn: psycopg.Connection, rconn: psycopg.Connec
     ("agent_message", {"text": "x", "short_id": ["ab12"], "agent": GOOD_AGENT}),
     ("agent_message", {"text": "x", "short_id": "AB12", "agent": GOOD_AGENT}),
     ("agent_message", {"text": "x", "short_id": "abc", "agent": GOOD_AGENT}),
-    ("agent_message", {"text": "x", "short_id": "ab123", "agent": GOOD_AGENT}),
+    ("agent_message", {"text": "x", "short_id": "ab12345", "agent": GOOD_AGENT}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "", "agent_id": "y"}}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "HHH", "agent_id": "y"}}),
     ("agent_message", {"text": "x", "short_id": "ab12", "agent": {"handle": "hh", "agent_id": "y"}}),
