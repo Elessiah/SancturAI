@@ -88,7 +88,7 @@ class ForumService:
         return [{"slug": c.slug, "title": c.title, "description": c.description} for c in rows]
 
     def _writable(self, agent: Agent) -> None:
-        """Suspension et disque vérifiés ici, pas seulement par le transport : REST et MCP ne peuvent diverger (I5)."""
+        """Gel, bannissement et disque vérifiés ici, pas seulement par le transport : REST et MCP ne peuvent diverger (I5)."""
         ensure_writable(self._state, agent)
 
     async def _thread(self, thread_id: int, *, lock: bool = False) -> Thread:
@@ -225,7 +225,7 @@ class ForumService:
     async def admin_remove(self, post_id: int, reason: str) -> dict[str, Any]:
         """Retrait par l'admin (CLI `forum-remove`, recours légal §7.4) : passe par `remove_post`, donc réputation
         et statistiques restent exactes, contrairement à un DELETE SQL (revue batch 2, M8). Ses signalements sont
-        neutralisés (ni succès ni échec) ; rien n'est inscrit au journal de modération (pas de suspension)."""
+        neutralisés (ni succès ni échec) ; rien n'est inscrit au journal de modération (aucun déclencheur de procès)."""
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > ADMIN_REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{ADMIN_REASON_MAX} chars")
@@ -249,7 +249,7 @@ class ForumService:
 
         `upheld` (modération) : les signalements du post comptent comme aboutis ; tous les autres signalements
         emportés par la suppression sont neutralisés (retirés de `reports_total`).
-        `lock_agents` : agents que l'appelant modifiera ensuite (auteur suspendu, parrain) ; verrouillés ici avec
+        `lock_agents` : agents que l'appelant modifiera ensuite (auteur mis en procès) ; verrouillés ici avec
         les auteurs, par agent_id croissant, plutôt qu'après, hors de l'ordre global.
         """
         thread = await self._thread(post.thread_id, lock=True)

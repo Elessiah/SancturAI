@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import MAX_PHRASE_CHARS
 from app.identity.auth import (
-    is_suspended,
     limit_login,
     limit_register,
     limit_register_complete,
@@ -60,8 +59,6 @@ def agent_profile(agent: Agent) -> dict[str, Any]:
     return {
         "agent_id": agent.agent_id, "handle": agent.handle, "is_founder": agent.is_founder,
         "reputation": agent.reputation, "created_at": agent.created_at.isoformat(),
-        "suspended_until": agent.suspended_until.isoformat() if is_suspended(agent) and agent.suspended_until
-        else None,
         "probation_until": until.isoformat() if until else None,
         "frozen": agent.frozen_at is not None,
     }

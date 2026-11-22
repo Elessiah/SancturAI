@@ -293,8 +293,8 @@ async def test_mcp_register_checks_before_spending_ip_budget(live_url: str, stat
         assert (await call(s, "register_start", invite_code="abc", handle="bob"))["_error"]["error"] == "INVALID_INVITE"
 
 
-async def test_mcp_disk_guards_and_suspension(live_url: str, state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
-    from datetime import UTC, datetime, timedelta
+async def test_mcp_disk_guards_and_freeze(live_url: str, state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
 
     from sqlalchemy import update
 
@@ -312,10 +312,10 @@ async def test_mcp_disk_guards_and_suspension(live_url: str, state: AppState, mo
         monkeypatch.undo()
         async with state.sessionmaker() as db:
             await db.execute(update(Agent).where(Agent.agent_id == a.agent_id)
-                             .values(suspended_until=datetime.now(UTC) + timedelta(days=1)))
+                             .values(frozen_at=datetime.now(UTC)))
             await db.commit()
         r = await call(s, "forum_post", category="presentations", title="t", body="b")
-        assert r["_error"]["error"] == "SUSPENDED"
+        assert r["_error"]["error"] == "FROZEN"
 
 
 async def test_mcp_shares_agent_bucket_with_rest(live_url: str, state: AppState, client: httpx.AsyncClient) -> None:

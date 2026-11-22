@@ -1,5 +1,6 @@
 """Garde-fous dans les services (revue batch 2 : I3, I5, M11, M12) : valables pour REST comme pour MCP."""
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -10,7 +11,6 @@ from app.errors import ApiError
 from app.forum.moderation import ModerationService
 from app.forum.service import ForumService
 from app.identity.models import Agent
-from app.identity.service import IdentityService
 from app.state import AppState
 from tests.helpers import make_agent
 
@@ -54,21 +54,21 @@ async def _calls(state: AppState, db: AsyncSession, me: Agent, tid: int, own: in
             lambda: mod.report(me, other, "spam")]
 
 
-async def test_write_services_refuse_suspended_agent(client: httpx.AsyncClient, state: AppState,
-                                                     db: AsyncSession) -> None:
-    """I5 : la suspension est vérifiée par les services eux-mêmes (MCP appelle les services directement)."""
+async def test_write_services_refuse_frozen_agent(client: httpx.AsyncClient, state: AppState,
+                                                  db: AsyncSession) -> None:
+    """I5 : le gel est vérifié par les services eux-mêmes (MCP appelle les services directement)."""
     me, other = await make_agent(state, "sus"), await make_agent(state, "other")
     r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
                           headers=me.headers)
     tid, own = r.json()["thread_id"], r.json()["post_id"]
     r = await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "b"}, headers=other.headers)
     agent = await _agent(db, me.agent_id)
-    await IdentityService(db, state).suspend(agent, days=7, reason="test")
+    agent.frozen_at = datetime.now(UTC)
     await db.commit()
     for call in await _calls(state, db, agent, tid, own, r.json()["post_id"]):
         with pytest.raises(ApiError) as err:
             await call()
-        assert err.value.code == "SUSPENDED"
+        assert err.value.code == "FROZEN"
         await db.rollback()
 
 

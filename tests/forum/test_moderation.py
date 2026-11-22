@@ -1,11 +1,14 @@
+from datetime import UTC, datetime
+
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.forum.models import ModerationLog, ReporterStat
+from app.forum.models import ModerationLog, Post, ReporterStat
 from app.identity.models import Agent
 from app.outbox.models import OutboxEvent
 from app.state import AppState
+from app.tribunal.models import Trial
 from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import AgentCtx, make_agent
 
@@ -64,22 +67,50 @@ async def test_upvotes_protect_post(client: httpx.AsyncClient, state: AppState) 
     assert r.json()["deleted"] is False  # 5 signalements mais 6 votes utiles
 
 
-async def test_three_deletions_suspend_author(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+async def _delete_by_reports(client: httpx.AsyncClient, state: AppState, author: AgentCtx,
+                             reporters: list[AgentCtx]) -> None:
+    _, pid = await _thread(client, author)
+    for rep in reporters:
+        state.limiter.clear()
+        await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "abus"}, headers=rep.headers)
+
+
+async def test_three_deletions_open_a_trial(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
     author = await make_agent(state, "repeat")
     reporters = [await make_agent(state, f"rpt{i}") for i in range(5)]
     for _ in range(3):
-        _, pid = await _thread(client, author)
-        for rep in reporters:
-            state.limiter.clear()
-            await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "abus"}, headers=rep.headers)
+        await _delete_by_reports(client, state, author, reporters)
     agent = await db.get(Agent, author.agent_id)
-    assert agent is not None and agent.suspended_until is not None
+    assert agent is not None and agent.frozen_at is not None
+    trial = (await db.scalars(select(Trial).where(Trial.accused_id == author.agent_id))).one()
+    assert trial.trigger == "deleted_posts" and trial.status == "open"
+    dossier = await db.scalar(select(Post.body).where(Post.thread_id == trial.thread_id, Post.is_first.is_(True)))
+    assert dossier is not None and "abus" in dossier  # raisons des signalements des posts supprimés
     r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
                           headers=author.headers)
-    assert r.json()["error"] == "SUSPENDED"
-    count = await db.scalar(select(func.count()).select_from(ModerationLog))
-    assert count == 3
+    assert r.json()["error"] == "SESSION_EXPIRED"  # sessions révoquées à l'ouverture
+    token = (await client.post("/api/login", json={"phrase": author.phrase})).json()["session_token"]
+    r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
+                          headers={"Authorization": f"Bearer {token}"})
+    assert r.json()["error"] == "FROZEN"  # reconnexion permise, écriture refusée
+    assert await db.scalar(select(func.count()).select_from(ModerationLog)) == 3
     await assert_forum_invariants(db)
+
+
+async def test_reactivated_agent_is_not_retried_for_old_deletions(client: httpx.AsyncClient, state: AppState,
+                                                                   db: AsyncSession) -> None:
+    author = await make_agent(state, "again")
+    reporters = [await make_agent(state, f"agn{i}") for i in range(5)]
+    for _ in range(3):
+        await _delete_by_reports(client, state, author, reporters)
+    now = datetime.now(UTC)
+    await db.execute(update(Trial).values(status="closed", verdict="reactivate", closed_at=now, closed_by="admin"))
+    await db.execute(update(Agent).where(Agent.agent_id == author.agent_id).values(frozen_at=None))
+    await db.commit()
+    token = (await client.post("/api/login", json={"phrase": author.phrase})).json()["session_token"]
+    author.token = token
+    await _delete_by_reports(client, state, author, reporters)  # 4e suppression, postérieure au procès
+    assert await db.scalar(select(func.count()).select_from(Trial)) == 1
 
 
 async def test_low_precision_counts_only_settled_reports(client: httpx.AsyncClient, state: AppState,

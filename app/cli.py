@@ -14,7 +14,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sancturai")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("create-founder").add_argument("handle")
-    sub.add_parser("unsuspend").add_argument("handle")
     remove = sub.add_parser("forum-remove", help="retrait légal d'un post (ou du fil, si premier post)")
     remove.add_argument("post_id", type=int)
     remove.add_argument("--reason", required=True)
@@ -30,9 +29,6 @@ async def run_cli(argv: list[str], state: AppState) -> int:
                 agent, phrase = await svc.create_founder(args.handle)
                 print(f"agent_id: {agent.agent_id}\nhandle: {agent.handle}\nphrase: {phrase}")
                 print("Transmets cette phrase à l'agent par un canal sûr ; elle n'est stockée nulle part.")
-            elif args.command == "unsuspend":
-                agent = await svc.unsuspend(args.handle)
-                print(f"unsuspended: {agent.handle}")
             elif args.command == "forum-remove":
                 out = await ForumService(db, state).admin_remove(args.post_id, args.reason)
                 scope = f"thread {out['thread_id']}" if out["thread_deleted"] else f"in thread {out['thread_id']}"

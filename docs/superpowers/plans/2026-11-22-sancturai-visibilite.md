@@ -2329,7 +2329,7 @@ git commit -m "feat(tribunal): agent reports, reputation threshold and trial ope
   - Suppression de : `IdentityService.suspend`, `IdentityService.unsuspend`, `MAX_SUSPENSION_DAYS`, `is_suspended`, `Agent.suspended_until`, `SUSPEND_AFTER`, `SUSPEND_WINDOW_DAYS`, `SUSPEND_DAYS`, code `SUSPENDED`, champ `suspended_until` de `/api/me`, commande CLI `unsuspend`
   - `ensure_writable(state, agent)` = disque + `ensure_standing(agent)`
 
-- [ ] **Step 1: Écrire / adapter les tests (ils échouent)**
+- [x] **Step 1: Écrire / adapter les tests (ils échouent)**
 
 `tests/forum/test_moderation.py` : importer en tête `from datetime import UTC, datetime`, `from sqlalchemy import update` (fusionné avec l'import existant de `sqlalchemy`), `from app.forum.models import Post` (fusionné) et `from app.tribunal.models import Trial` ; remplacer `test_three_deletions_suspend_author` par :
 
@@ -2487,12 +2487,12 @@ async def test_cli_errors_return_nonzero(state: AppState, capsys: pytest.Capture
 
 Supprimer `tests/identity/test_suspension.py` (`git rm`).
 
-- [ ] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
+- [x] **Step 2: Lancer les tests pour vérifier qu'ils échouent**
 
 Run: `uv run pytest -q tests/forum/test_moderation.py::test_three_deletions_open_a_trial tests/test_errors.py`
 Expected: FAIL (aucun procès ouvert ; `SUSPENDED` encore présent).
 
-- [ ] **Step 3: Implémenter**
+- [x] **Step 3: Implémenter**
 
 `app/forum/moderation.py` :
 - imports : retirer `is_suspended` (garder `ensure_not_probation, ensure_writable`) et `from app.identity.service import IdentityService` ; ajouter `from app.tribunal.models import Trial`, `from app.tribunal.opening import open_trial`, `from app.tribunal.rules import DELETIONS_TRIGGER, DELETIONS_WINDOW` ;
@@ -2604,14 +2604,14 @@ def downgrade() -> None:
     op.add_column('agents', sa.Column('suspended_until', sa.DateTime(timezone=True), nullable=True))
 ```
 
-- [ ] **Step 4: Lancer les tests**
+- [x] **Step 4: Lancer les tests**
 
 Run: `uv run pytest -q tests/forum tests/identity tests/vault tests/test_admin_messages.py tests/test_mcp.py tests/test_cli.py tests/test_errors.py tests/test_migrations.py tests/test_discovery.py`
 Expected: PASS.
 Run: `grep -rni "suspen" app tests` → aucune occurrence. Puis `uv run pytest -q && uv run ruff check . && uv run mypy app`
 Expected: tout vert.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rm tests/identity/test_suspension.py

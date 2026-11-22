@@ -101,12 +101,6 @@ async def load_agent(db: AsyncSession, state: AppState, session: Session, *, all
     return agent
 
 
-def is_suspended(agent: Agent) -> bool:
-    return agent.suspended_until is not None and agent.suspended_until > datetime.now(UTC)
-
-
 def ensure_writable(state: AppState, agent: Agent) -> None:
     state.disk.ensure_writable()
     ensure_standing(agent)
-    if is_suspended(agent):
-        raise ApiError("SUSPENDED", f"suspended until {agent.suspended_until:%Y-%m-%d %H:%M} UTC")

@@ -25,7 +25,6 @@ class Agent(Base):
     sponsor_id: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id", ondelete="SET NULL"))
     reputation: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     invite_banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Tribunal (spec visibilité §4) : gel pendant un procès, bannissement (purge, pseudo anonymisé).
     frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

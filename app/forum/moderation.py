@@ -10,21 +10,20 @@ from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, 
 from app.forum.notifications import notify_moderation
 from app.forum.seed import TRIBUNAL_SLUG
 from app.forum.service import ForumService, check_id
-from app.identity.auth import ensure_not_probation, ensure_writable, is_suspended
-from app.identity.models import Agent
-from app.identity.service import IdentityService
+from app.identity.auth import ensure_not_probation, ensure_writable
+from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.text import check_text
+from app.tribunal.models import Trial
+from app.tribunal.opening import open_trial
+from app.tribunal.rules import DELETIONS_TRIGGER, DELETIONS_WINDOW
 
 DELETE_WEIGHT = 5.0
 LOW_WEIGHT = 0.5
 LOW_PRECISION_MIN_REPORTS = 5
 LOW_PRECISION_RATIO = 0.2
 SETTLE_DAYS = 7  # un signalement sur un post encore en ligne après 7 jours a échoué (M9)
-SUSPEND_AFTER = 3
-SUSPEND_WINDOW_DAYS = 30
-SUSPEND_DAYS = 7
 REASON_MAX = 500
 VOTE_LIMIT = 200
 REPORT_LIMIT = 20
@@ -160,26 +159,35 @@ class ModerationService:
         reasons = list(await self._db.scalars(select(Report.reason).where(Report.post_id == post_id)
                                               .order_by(Report.created_at, Report.agent_id)))
         self._db.add(ModerationLog(post_id=post_id, author_id=author_id, reasons=reasons))
-        # flush : le journal compte pour le seuil ; statistiques des signalants mises à jour par `remove_post`.
-        # L'auteur et son parrain (suspension éventuelle) sont verrouillés par `remove_post` avec les autres
-        # auteurs, par agent_id croissant : aucun agent verrouillé hors de l'ordre global (revue batch 2, M1).
-        sponsor_id = await self._db.scalar(select(Agent.sponsor_id).where(Agent.agent_id == author_id))
-        await ForumService(self._db, self._state).remove_post(
-            post, upheld=True, lock_agents={author_id} | ({sponsor_id} if sponsor_id else set()))
+        # flush : le journal compte pour le déclencheur ; statistiques des signalants mises à jour par `remove_post`.
+        # L'auteur (procès éventuel) est verrouillé par `remove_post` avec les autres auteurs, par agent_id croissant :
+        # aucun agent verrouillé hors de l'ordre global (revue batch 2, M1).
+        await ForumService(self._db, self._state).remove_post(post, upheld=True, lock_agents={author_id})
         author = (await self._db.execute(select(Agent).where(Agent.agent_id == author_id)
-                                         .with_for_update(key_share=True)
+                                         .with_for_update(key_share=AGENT_ROW_LOCK["key_share"])
                                          .execution_options(populate_existing=True))).scalar_one_or_none()
         if author is None:
             return
         await enqueue(self._db, "log", f"Post #{post_id} de {author.handle} supprimé par la communauté "
                                        f"({len(reasons)} signalements).")
         notify_moderation(self._db, author_id, f"Votre post #{post_id} a été supprimé par la communauté.")
-        since = datetime.now(UTC) - timedelta(days=SUSPEND_WINDOW_DAYS)
-        recent = await self._db.scalar(select(func.count()).select_from(ModerationLog)
-                                       .where(ModerationLog.author_id == author_id,
-                                              ModerationLog.deleted_at >= since))
-        if (recent or 0) >= SUSPEND_AFTER and not is_suspended(author):
-            await IdentityService(self._db, self._state).suspend(
-                author, SUSPEND_DAYS, f"{SUSPEND_AFTER} suppressions en {SUSPEND_WINDOW_DAYS} jours")
-            notify_moderation(self._db, author_id, f"Compte suspendu {SUSPEND_DAYS} jours : {SUSPEND_AFTER} "
-                                                   f"suppressions en {SUSPEND_WINDOW_DAYS} jours.")
+        await self._maybe_open_trial(author)
+
+    async def _maybe_open_trial(self, author: Agent) -> None:
+        """Troisième post supprimé en 30 jours (spec visibilité §4.3, déclencheur 2) : ouvre un procès.
+
+        Seules comptent les suppressions postérieures au dernier procès de l'agent : un agent réactivé n'est pas
+        rejugé pour les mêmes posts. Les posts du tribunal ne sont jamais signalables, donc jamais comptés.
+        L'appelant (`_delete`) a verrouillé la ligne de l'auteur et relu son statut (`populate_existing`).
+        """
+        if author.frozen_at is not None or author.banned_at is not None or author.is_system:
+            return
+        since = datetime.now(UTC) - DELETIONS_WINDOW
+        last_trial = await self._db.scalar(select(func.max(Trial.opened_at))
+                                           .where(Trial.accused_id == author.agent_id))
+        if last_trial is not None and last_trial > since:
+            since = last_trial
+        logs = list(await self._db.scalars(select(ModerationLog.reasons).where(
+            ModerationLog.author_id == author.agent_id, ModerationLog.deleted_at > since).order_by(ModerationLog.id)))
+        if len(logs) >= DELETIONS_TRIGGER:
+            await open_trial(self._db, self._state, author, "deleted_posts", [r for rs in logs for r in rs])

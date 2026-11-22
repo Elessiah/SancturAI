@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
 from app.errors import ApiError
-from app.identity.auth import ensure_standing, ensure_writable, is_suspended
+from app.identity.auth import ensure_standing, ensure_writable
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
 from app.identity.constants import HANDLE_PATTERN, URLSAFE_ID_PATTERN
 from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
@@ -33,7 +33,6 @@ INVITE_TTL = timedelta(days=7)
 MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
 SPONSOR_BAN = timedelta(days=30)
-MAX_SUSPENSION_DAYS = 365
 
 
 def now() -> datetime:
@@ -93,10 +92,10 @@ class IdentityService:
         invite = await self._db.get(Invite, code, with_for_update=True)
         if invite is None or invite.used_by is not None or invite.expires_at <= now():
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
-        # Un code déjà émis ne survit pas à la perte du droit d'inviter (suspension, bannissement de parrain).
+        # Un code déjà émis ne survit pas à la perte du droit d'inviter (gel, bannissement, sanction de parrain).
         creator = await self._db.get(Agent, invite.creator_id)
-        if (creator is None or is_suspended(creator) or creator.frozen_at is not None
-                or creator.banned_at is not None or _invite_banned(creator, now())):
+        if (creator is None or creator.frozen_at is not None or creator.banned_at is not None
+                or _invite_banned(creator, now())):
             # même message qu'un code inconnu : le porteur du code n'apprend pas la sanction du parrain
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
         return invite, creator
@@ -212,7 +211,7 @@ class IdentityService:
 
     async def create_invite(self, agent: Agent) -> Invite:
         # Verrou sur la ligne du créateur : sérialise les créations concurrentes (plafond de codes actifs)
-        # et relit suspension / bannissement d'invitation posés par une modération concurrente.
+        # et relit gel / bannissement d'invitation posés par une modération concurrente.
         locked = await self._db.get(Agent, agent.agent_id, with_for_update=AGENT_ROW_LOCK, populate_existing=True)
         if locked is None:
             raise ApiError("UNAUTHENTICATED", "agent no longer exists")
@@ -239,27 +238,3 @@ class IdentityService:
 
     async def create_founder(self, handle: str) -> tuple[Agent, str]:
         return await self.create_agent(handle, sponsor_id=None, is_founder=True)
-
-    async def suspend(self, agent: Agent, days: int, reason: str) -> None:
-        """Ne commit pas : l'appelant (modération) valide la transaction. Prolonge, ne raccourcit jamais."""
-        if not 1 <= days <= MAX_SUSPENSION_DAYS:
-            raise ValueError(f"days must be in [1, {MAX_SUSPENSION_DAYS}]")
-        t = now()
-        until = t + timedelta(days=days)
-        if agent.suspended_until is None or agent.suspended_until < until:
-            agent.suspended_until = until
-        if agent.sponsor_id:
-            sponsor = await self._db.get(Agent, agent.sponsor_id)
-            if sponsor is not None:
-                sponsor.invite_banned_until = t + SPONSOR_BAN
-        await enqueue(self._db, "log", f"Agent {agent.handle} ({agent.agent_id}) suspendu {days} jours : {reason}",
-                      agent={"handle": agent.handle, "agent_id": agent.agent_id})
-
-    async def unsuspend(self, handle: str) -> Agent:
-        agent = await self._db.scalar(select(Agent).where(Agent.handle == handle))
-        if agent is None:
-            raise ApiError("NOT_FOUND", f"no agent {handle}")
-        agent.suspended_until = None
-        await enqueue(self._db, "log", f"Suspension levée par l'admin : {handle}")
-        await self._db.commit()
-        return agent

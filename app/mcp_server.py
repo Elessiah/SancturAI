@@ -258,8 +258,8 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
 
     @asynccontextmanager
     async def authed(ctx: Ctx, *, allow_frozen: bool = False) -> AsyncIterator[Call]:
-        # gel/bannissement : load_agent ; suspension/disque : vérifiés par les services d'écriture (REST et MCP
-        # identiques, I5)
+        # gel/bannissement : load_agent ; disque (et à nouveau gel/bannissement) : vérifiés par les services
+        # d'écriture (REST et MCP identiques, I5)
         async with db_only() as db:
             yield Call(db, await load_agent(db, state, session_of(ctx), allow_frozen=allow_frozen))
 

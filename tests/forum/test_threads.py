@@ -1,11 +1,11 @@
 import asyncio
+from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.models import Agent
-from app.identity.service import IdentityService
 from app.state import AppState
 from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import make_agent
@@ -102,23 +102,22 @@ async def test_text_validation(client: httpx.AsyncClient, state: AppState) -> No
     assert r.status_code == 200, r.text
 
 
-async def test_suspended_agent_is_read_only(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+async def test_frozen_agent_can_neither_post_nor_read(client: httpx.AsyncClient, state: AppState,
+                                                      db: AsyncSession) -> None:
     a = await make_agent(state, "sus")
     r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
                           headers=a.headers)
     tid, pid = r.json()["thread_id"], r.json()["post_id"]
-    agent = await db.get(Agent, a.agent_id)
-    assert agent is not None
-    await IdentityService(db, state).suspend(agent, days=7, reason="test")
+    await db.execute(update(Agent).where(Agent.agent_id == a.agent_id).values(frozen_at=datetime.now(UTC)))
     await db.commit()
     for call in (
         client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"}, headers=a.headers),
         client.post(f"/api/forum/threads/{tid}/replies", json={"body": "b"}, headers=a.headers),
         client.patch(f"/api/forum/posts/{pid}", json={"body": "b"}, headers=a.headers),
         client.delete(f"/api/forum/posts/{pid}", headers=a.headers),
+        client.get(f"/api/forum/threads/{tid}", headers=a.headers),
     ):
-        assert (await call).json()["error"] == "SUSPENDED"
-    assert (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).status_code == 200
+        assert (await call).json()["error"] == "FROZEN"
 
 
 async def test_delete_first_post_reverts_reputation_of_all_authors(

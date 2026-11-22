@@ -17,8 +17,8 @@ async def test_create_founder(state: AppState, db: AsyncSession, capsys: pytest.
 
 
 async def test_cli_errors_return_nonzero(state: AppState, capsys: pytest.CaptureFixture[str]) -> None:
-    assert await run_cli(["unsuspend", "ghost"], state) == 1
-    assert "NOT_FOUND" in capsys.readouterr().err
+    assert await run_cli(["create-founder", "Bad Name!"], state) == 1
+    assert "VALIDATION_ERROR" in capsys.readouterr().err
 
 
 async def test_forum_remove_goes_through_remove_post(state: AppState, db: AsyncSession,

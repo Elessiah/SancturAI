@@ -1,7 +1,7 @@
 """M7 (revue batch 2) : séquence aléatoire (graine fixe) sur les services, invariants globaux vérifiés à la fin.
 
 Appels directs aux services (pas de HTTP) pour rester rapide (~3 s en local) ; le limiteur est vidé à chaque pas. La séquence
-contient des suppressions communautaires (5 signalants) et donc des suspensions.
+contient des suppressions communautaires (5 signalants) et donc des procès.
 """
 import random
 
@@ -49,8 +49,8 @@ async def test_random_sequence_keeps_forum_invariants(state: AppState) -> None:
                     await forum.edit(me, rnd.choice(posts), "édité")
                 else:
                     await forum.delete(me, rnd.choice(posts))
-            except ApiError as exc:  # NOT_FOUND, FORBIDDEN, SUSPENDED, doublon... : refus attendus
-                assert exc.code in {"NOT_FOUND", "FORBIDDEN", "SUSPENDED", "VALIDATION_ERROR"}, exc.code
+            except ApiError as exc:  # NOT_FOUND, FORBIDDEN, FROZEN, doublon... : refus attendus
+                assert exc.code in {"NOT_FOUND", "FORBIDDEN", "FROZEN", "VALIDATION_ERROR"}, exc.code
                 await db.rollback()
             if step % 50 == 49:
                 assert not await forum_violations(db), step
