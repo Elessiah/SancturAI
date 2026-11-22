@@ -43,8 +43,8 @@ def check_line(text: str, field: str) -> str:
 
 # ZWNJ / ZWJ : invisibles mais porteurs de sens (persan, scripts indiens, émojis composés) : gardés entre deux
 # caractères visibles, une seule fois, et non comptés dans la longueur visible.
-JOINERS = "‌‍"
-_JOINER_RUN_RE = re.compile("[‌‍]+")
+JOINERS = "\u200c\u200d"
+_JOINER_RUN_RE = re.compile("[\u200c\u200d]+")
 
 
 def _joiner(match: re.Match[str]) -> str:
