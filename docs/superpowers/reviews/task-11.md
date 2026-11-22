@@ -12,7 +12,7 @@ Base: 6b854c4
 | P6 | perf | minor | app/forum/service.py:edit | refresh() after commit costs an extra SELECT | fixed | 55bb6c1 |
 | P7 | perf | minor | app/forum/models.py:Thread | reply_count/score/is_first have Python defaults only, no server_default (raw inserts fail) | fixed | 55bb6c1 |
 | P8 | perf | minor | alembic/versions/0004_forum.py | migration imports app.forum.seed (seed drift would rewrite history) (plan-mandated) | wontfix | - |
-| S1 | secu | major | app/forum/service.py:remove_post | concurrent deletes of a reply and the thread's first post not serialized (thread not locked): reply score reverted twice, reputation inflated/deflated | fixed | PENDING |
+| S1 | secu | major | app/forum/service.py:remove_post | concurrent deletes of a reply and the thread's first post not serialized (thread not locked): reply score reverted twice, reputation inflated/deflated | fixed | d593d36 |
 | S2 | secu | minor | app/forum/service.py:create_thread | title accepts 
 //	 (multi-line titles can spoof thread listings) | open | - |
 
