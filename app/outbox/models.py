@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 
 OUTBOX_KINDS = ("log", "agent_message")
+RELAY_MAX_ATTEMPTS = 60  # = relay.MAX_ATTEMPTS (le relais est un projet séparé)
 
 
 class OutboxEvent(Base):
