@@ -10,7 +10,7 @@ from app.errors import install_error_handlers
 from app.forum.api import router as forum_router
 from app.identity.api import router as identity_router
 from app.maintenance import maintenance_loop
-from app.middleware import NoStoreMiddleware
+from app.middleware import InternalGuardMiddleware, NoStoreMiddleware
 from app.state import AppState
 from app.vault.api import router as vault_router
 
@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.s = state
     install_error_handlers(app, on_internal=state.errors.record)
     app.add_middleware(NoStoreMiddleware)
+    app.add_middleware(InternalGuardMiddleware, state=state)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

@@ -35,7 +35,8 @@ async def inbox(agent: Agent = Depends(current_agent), db: AsyncSession = Depend
 
 
 def internal_guard(request: Request, state: AppState = Depends(get_state)) -> None:
-    # dépendance : résolue AVANT la validation du body, donc rien n'est révélé sans token valide
+    # défense en profondeur : InternalGuardMiddleware a déjà filtré tout /internal avant le routage
+    # (une dépendance seule laisserait passer 405 et l'erreur de décodage JSON, qui précèdent les dépendances)
     verify_internal(request, state.settings)
 
 

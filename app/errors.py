@@ -76,7 +76,7 @@ class ApiError(Exception):
         return body
 
 
-def _response(err: ApiError) -> JSONResponse:
+def error_response(err: ApiError) -> JSONResponse:
     headers = {"Retry-After": str(err.retry_after)} if err.retry_after is not None else None
     return JSONResponse(err.to_dict(), status_code=err.status, headers=headers)
 
@@ -103,32 +103,32 @@ def conflict_error(exc: DBAPIError) -> ApiError:
 def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> None:
     @app.exception_handler(ApiError)
     async def _api(_: Request, exc: ApiError) -> JSONResponse:
-        return _response(exc)
+        return error_response(exc)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError) -> JSONResponse:
         fields = "; ".join(".".join(str(p) for p in e["loc"]) + ": " + e["msg"] for e in exc.errors())
-        return _response(ApiError("VALIDATION_ERROR", fields[:500]))
+        return error_response(ApiError("VALIDATION_ERROR", fields[:500]))
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = _HTTP_TO_CODE.get(exc.status_code) or ("VALIDATION_ERROR" if 400 <= exc.status_code < 500 else "INTERNAL")
-        return _response(ApiError(code, str(exc.detail)[:200]))
+        return error_response(ApiError(code, str(exc.detail)[:200]))
 
     @app.exception_handler(DBAPIError)
     async def _dbapi(_: Request, exc: DBAPIError) -> JSONResponse:
         if is_data_error(exc):
             # message fixe : jamais la valeur fautive (hide_parameters masque déjà les paramètres liés)
-            return _response(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects "
+            return error_response(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects "
                                                           "(NUL byte or invalid text)"))
         if is_retryable(exc):
-            return _response(conflict_error(exc))
+            return error_response(conflict_error(exc))
         raise exc  # vraie panne : remonte à _CatchAll (journalisation du type, comptage 5xx)
 
     @app.exception_handler(Exception)
     async def _internal(_: Request, exc: Exception) -> JSONResponse:
         # Rendu seul : log et comptage sont faits par _CatchAll, qui stoppe la propagation.
-        return _response(ApiError("INTERNAL"))
+        return error_response(ApiError("INTERNAL"))
 
     build = app.build_middleware_stack
     app.build_middleware_stack = lambda: _CatchAll(build(), on_internal)  # type: ignore[method-assign]
@@ -160,4 +160,4 @@ class _CatchAll:
             log.error("internal error: %s", type(exc).__name__)  # jamais le message : il peut contenir des données
             self.on_internal()
             if not started:
-                await _response(ApiError("INTERNAL"))(scope, receive, send)
+                await error_response(ApiError("INTERNAL"))(scope, receive, send)

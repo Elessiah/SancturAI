@@ -60,6 +60,23 @@ async def test_internal_route_protection(client: httpx.AsyncClient, state: AppSt
     assert r.json()["error"] == "NOT_FOUND"  # short_id inconnu, mais route atteinte
 
 
+async def test_internal_guard_reveals_nothing(client: httpx.AsyncClient) -> None:
+    """Sans token : même réponse qu'une route inexistante, quels que soient méthode, corps ou chemin (revue S1)."""
+    missing = await client.post("/internal/does-not-exist", json={})
+    assert missing.status_code == 404
+    probes = [
+        await client.post("/internal/admin-replies", json={"short_id": "abcd", "text": "x"}),
+        await client.get("/internal/admin-replies"),  # 405 sinon
+        await client.post("/internal/admin-replies", content=b"{bad", headers={"content-type": "application/json"}),
+        await client.post("/internal/admin-replies", json={"short_id": "zz"}),
+        await client.post("/internal/admin-replies", content=b"{bad",
+                          headers={**INTERNAL, "X-Forwarded-For": "1.2.3.4", "content-type": "application/json"}),
+        await client.post("/internal/future-route", json={}, headers={"x-internal-token": "wrong"}),
+    ]
+    for r in probes:
+        assert (r.status_code, r.content) == (missing.status_code, missing.content), r.text
+
+
 async def test_internal_fails_closed_without_configured_token(client: httpx.AsyncClient, state: AppState) -> None:
     body = {"short_id": "abcd", "text": "x"}
     saved = state.settings

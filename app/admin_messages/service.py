@@ -27,12 +27,16 @@ INBOX_THREADS = 50
 INBOX_MESSAGES_PER_THREAD = 50  # les plus récents ; l'historique complet ne doit pas être relu à chaque appel
 
 
+# Exactement la réponse d'une route inexistante (handler StarletteHTTPException) : aucun oracle d'existence.
+INTERNAL_NOT_FOUND_MESSAGE = "Not Found"
+
+
 def verify_internal(request: Request, settings: Settings) -> None:
     """Réservé à l'hôte (bot). Toute requête relayée par nginx porte X-Forwarded-For → refusée."""
     provided = request.headers.get("x-internal-token", "")
     if (not settings.internal_token or "x-forwarded-for" in request.headers
             or not hmac.compare_digest(provided.encode(), settings.internal_token.encode())):
-        raise ApiError("NOT_FOUND", "not found")
+        raise ApiError("NOT_FOUND", INTERNAL_NOT_FOUND_MESSAGE)
 
 
 def _check_text(text: str) -> str:
