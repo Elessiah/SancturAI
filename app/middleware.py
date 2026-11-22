@@ -142,7 +142,9 @@ def is_utf8_json(body: bytes) -> bool:
 
 
 def _is_mcp(path: str) -> bool:
-    return path == "/mcp" or path.startswith("/mcp/")
+    """`/mcp` et tout ce qui est dessous (pas `/mcpx`)."""
+    first_segment = path.split("/", 2)[1:2]
+    return first_segment == ["mcp"]
 
 
 def body_cap(method: str, path: str) -> int:
