@@ -14,11 +14,11 @@ router = APIRouter(tags=["admin-messages"])
 
 class SendIn(BaseModel):
     text: str = Field(max_length=MAX_RAW_TEXT)
-    short_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}$")
+    short_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{6}$")
 
 
 class ReplyIn(BaseModel):
-    short_id: str = Field(pattern=r"^[0-9a-f]{4}$")
+    short_id: str = Field(pattern=r"^[0-9a-f]{6}$")
     text: str = Field(max_length=MAX_RAW_TEXT)
 
 

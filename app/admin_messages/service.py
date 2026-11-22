@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import math
 import secrets
@@ -21,6 +22,7 @@ from app.text import check_text
 MAX_TEXT = OUTBOX_MAX_TEXT["agent_message"]  # le DM Discord ne doit jamais tronquer le message
 MAX_RAW_TEXT = MAX_TEXT + 100  # marge d'espaces avant strip() ; borne le corps côté schéma
 DAILY_LIMIT = 3
+SHORT_ID_BYTES = 3  # 6 hex = 16,7 M fils, jamais recyclés (revue S2, décidé par l'orchestrateur)
 _SHORT_ID_TRIES = 20
 _SHORT_ID_CONSTRAINT = "admin_threads_short_id_key"
 INBOX_THREADS = 50
@@ -29,13 +31,19 @@ INBOX_MESSAGES_PER_THREAD = 50  # les plus récents ; l'historique complet ne do
 
 # Exactement la réponse d'une route inexistante (handler StarletteHTTPException) : aucun oracle d'existence.
 INTERNAL_NOT_FOUND_MESSAGE = "Not Found"
+MIN_INTERNAL_TOKEN = 32  # plus court (ou absent) : /internal fermé
+
+
+def _token_digest(token: str) -> bytes:
+    # empreintes de longueur fixe : compare_digest ne révèle pas la longueur du token configuré
+    return hashlib.sha256(token.encode()).digest()
 
 
 def verify_internal(request: Request, settings: Settings) -> None:
     """Réservé à l'hôte (bot). Toute requête relayée par nginx porte X-Forwarded-For → refusée."""
     provided = request.headers.get("x-internal-token", "")
-    if (not settings.internal_token or "x-forwarded-for" in request.headers
-            or not hmac.compare_digest(provided.encode(), settings.internal_token.encode())):
+    if (len(settings.internal_token) < MIN_INTERNAL_TOKEN or "x-forwarded-for" in request.headers
+            or not hmac.compare_digest(_token_digest(provided), _token_digest(settings.internal_token))):
         raise ApiError("NOT_FOUND", INTERNAL_NOT_FOUND_MESSAGE)
 
 
@@ -58,6 +66,10 @@ class AdminMessageService:
         self._state = state
 
     async def _check_daily_limit(self, agent: Agent) -> None:
+        # verrou par agent jusqu'au commit : deux envois concurrents comptent l'un après l'autre (revue S3).
+        # NO KEY UPDATE ne bloque pas les KEY SHARE des clés étrangères vers cet agent.
+        await self._db.execute(select(Agent.agent_id).where(Agent.agent_id == agent.agent_id)
+                               .with_for_update(key_share=True))
         since = datetime.now(UTC) - timedelta(days=1)
         stamps = (await self._db.scalars(
             select(AdminMessage.created_at).join(AdminThread, AdminThread.id == AdminMessage.thread_id)
@@ -70,7 +82,7 @@ class AdminMessageService:
     async def _create_thread(self, agent: Agent) -> AdminThread:
         # INSERT optimiste (1 requête/essai) : la contrainte UNIQUE tranche, y compris entre requêtes concurrentes
         for _ in range(_SHORT_ID_TRIES):
-            thread = AdminThread(short_id=secrets.token_hex(2), agent_id=agent.agent_id)
+            thread = AdminThread(short_id=secrets.token_hex(SHORT_ID_BYTES), agent_id=agent.agent_id)
             try:
                 async with self._db.begin_nested():
                     self._db.add(thread)
@@ -93,8 +105,6 @@ class AdminMessageService:
             thread.updated_at = datetime.now(UTC)
         else:
             thread = await self._create_thread(agent)
-        # le compteur DB ci-dessus survit aux redémarrages ; le limiteur ferme la course entre requêtes concurrentes
-        self._state.limiter.hit(f"admin-msg:{agent.agent_id}", DAILY_LIMIT, 86_400)
         message = AdminMessage(thread_id=thread.id, sender="agent", text=text, read_by_agent=True)
         self._db.add(message)
         await enqueue(self._db, "agent_message", text, short_id=thread.short_id,

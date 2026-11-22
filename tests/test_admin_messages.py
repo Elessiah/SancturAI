@@ -9,7 +9,7 @@ from app.outbox.models import OutboxEvent
 from app.state import AppState
 from tests.helpers import make_agent
 
-INTERNAL = {"x-internal-token": "test-internal-token"}
+INTERNAL = {"x-internal-token": "test-internal-token-0123456789abcdef"}
 
 
 async def test_message_reply_inbox(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
@@ -17,7 +17,7 @@ async def test_message_reply_inbox(client: httpx.AsyncClient, state: AppState, d
     r = await client.post("/api/admin-messages", json={"text": "Bonjour l'admin"}, headers=a.headers)
     assert r.status_code == 200, r.text
     short_id = r.json()["short_id"]
-    assert len(short_id) == 4
+    assert len(short_id) == 6
     event = (await db.scalars(select(OutboxEvent).where(OutboxEvent.kind == "agent_message"))).one()
     assert event.payload["short_id"] == short_id and event.payload["agent"]["handle"] == "talker"
     r = await client.post("/internal/admin-replies", json={"short_id": short_id, "text": "Salut !"}, headers=INTERNAL)
@@ -50,7 +50,7 @@ async def test_cannot_continue_foreign_thread(client: httpx.AsyncClient, state: 
 
 
 async def test_internal_route_protection(client: httpx.AsyncClient, state: AppState) -> None:
-    body = {"short_id": "abcd", "text": "x"}
+    body = {"short_id": "abcdef", "text": "x"}
     assert (await client.post("/internal/admin-replies", json=body)).status_code == 404
     assert (await client.post("/internal/admin-replies", json=body,
                               headers={"x-internal-token": "wrong"})).status_code == 404
@@ -65,7 +65,7 @@ async def test_internal_guard_reveals_nothing(client: httpx.AsyncClient) -> None
     missing = await client.post("/internal/does-not-exist", json={})
     assert missing.status_code == 404
     probes = [
-        await client.post("/internal/admin-replies", json={"short_id": "abcd", "text": "x"}),
+        await client.post("/internal/admin-replies", json={"short_id": "abcdef", "text": "x"}),
         await client.get("/internal/admin-replies"),  # 405 sinon
         await client.post("/internal/admin-replies", content=b"{bad", headers={"content-type": "application/json"}),
         await client.post("/internal/admin-replies", json={"short_id": "zz"}),
@@ -78,7 +78,7 @@ async def test_internal_guard_reveals_nothing(client: httpx.AsyncClient) -> None
 
 
 async def test_internal_fails_closed_without_configured_token(client: httpx.AsyncClient, state: AppState) -> None:
-    body = {"short_id": "abcd", "text": "x"}
+    body = {"short_id": "abcdef", "text": "x"}
     saved = state.settings
     state.settings = saved.model_copy(update={"internal_token": ""})
     try:
@@ -93,7 +93,7 @@ async def test_text_validation(client: httpx.AsyncClient, state: AppState) -> No
     for bad in ("", "   ", "a\x00b"):
         r = await client.post("/api/admin-messages", json={"text": bad}, headers=a.headers)
         assert r.json()["error"] == "VALIDATION_ERROR", bad
-    r = await client.post("/internal/admin-replies", json={"short_id": "abcd", "text": "a\x00b"}, headers=INTERNAL)
+    r = await client.post("/internal/admin-replies", json={"short_id": "abcdef", "text": "a\x00b"}, headers=INTERNAL)
     assert r.json()["error"] == "VALIDATION_ERROR"
     r = await client.post("/internal/admin-replies", json={"short_id": "zzzzz", "text": "x"}, headers=INTERNAL)
     assert r.json()["error"] == "VALIDATION_ERROR"
@@ -155,3 +155,49 @@ async def test_create_thread_only_retries_short_id_collisions(state: AppState, d
     ghost = Agent(agent_id="ghost-agent", handle="ghost")  # absent de la base : violation de FK, pas de short_id
     with pytest.raises(IntegrityError):
         await AdminMessageService(db, state)._create_thread(ghost)
+
+
+async def test_short_id_is_exactly_six_hex(client: httpx.AsyncClient, state: AppState) -> None:
+    """Revue S2 : 6 hexadécimaux (16,7 M fils) ; l'ancien format à 4 est refusé."""
+    a = await make_agent(state, "sixhex")
+    for bad in ("abcd", "abcde", "abcdef0", "ABCDEF"):
+        r = await client.post("/internal/admin-replies", json={"short_id": bad, "text": "x"}, headers=INTERNAL)
+        assert r.json()["error"] == "VALIDATION_ERROR", bad
+        r = await client.post("/api/admin-messages", json={"text": "x", "short_id": bad}, headers=a.headers)
+        assert r.json()["error"] == "VALIDATION_ERROR", bad
+
+
+async def test_daily_limit_holds_under_concurrency(client: httpx.AsyncClient, state: AppState) -> None:
+    """Revue S3 : le compteur DB, sous verrou par agent, fait foi (limiteur mémoire vide après redémarrage)."""
+    import asyncio
+
+    a = await make_agent(state, "racer")
+    rs = await asyncio.gather(*(client.post("/api/admin-messages", json={"text": f"m{i}"}, headers=a.headers)
+                                for i in range(6)))
+    assert sorted(r.status_code for r in rs).count(200) == 3, [r.text for r in rs]
+    assert all(r.json()["error"] == "RATE_LIMITED" for r in rs if r.status_code != 200)
+
+
+async def test_internal_fails_closed_with_short_configured_token(client: httpx.AsyncClient, state: AppState) -> None:
+    """Revue S4 : un token configuré de moins de 32 caractères ferme /internal, même présenté exactement."""
+    saved = state.settings
+    short = "x" * 31
+    state.settings = saved.model_copy(update={"internal_token": short})
+    try:
+        r = await client.post("/internal/admin-replies", json={"short_id": "abcdef", "text": "x"},
+                              headers={"x-internal-token": short})
+        assert r.status_code == 404
+    finally:
+        state.settings = saved
+
+
+async def test_internal_guard_path_variants(app, client: httpx.AsyncClient) -> None:  # type: ignore[no-untyped-def]
+    """Revue S5 : variantes encodées, slash final et root_path ne contournent pas la garde."""
+    missing = await client.post("/internal/does-not-exist", json={})
+    probes = [await client.get("/%69nternal/admin-replies"), await client.get("/internal/admin-replies/"),
+              await client.get("//internal/admin-replies"), await client.get("/internal")]
+    transport = httpx.ASGITransport(app=app, root_path="/prefix")
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as prefixed:
+        probes.append(await prefixed.get("/prefix/internal/admin-replies"))  # 405 sans la garde
+    for r in probes:
+        assert (r.status_code, r.content) == (missing.status_code, missing.content), (r.url, r.text)

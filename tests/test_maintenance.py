@@ -121,8 +121,11 @@ async def test_prune_failure_is_counted(state: AppState, monkeypatch: pytest.Mon
     assert state.errors.take() == 1
 
 
-async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
+async def test_prune_deletes_use_partial_indexes(state: AppState, db: AsyncSession) -> None:
     """N1 (revue batch 2) : les vrais DELETE de purge sont servis par leurs index partiels."""
+    from tests.helpers import make_agent
+
+    a = await make_agent(state, "planner")
     seen: list[tuple[str, tuple[object, ...]]] = []
 
     def capture(_conn: object, _cur: object, statement: str, parameters: tuple[object, ...], *_a: object) -> None:
@@ -136,7 +139,13 @@ async def test_prune_deletes_use_partial_indexes(db: AsyncSession) -> None:
     finally:
         event.remove(sync_engine, "before_cursor_execute", capture)
     assert len(seen) == 2
+    # Plan déterministe : statistiques fraîches sur une table peuplée (lues et non lues, toutes récentes),
+    # sinon le choix dépend d'un autovacuum aléatoire sur une table tronquée. Tout est annulé par le rollback.
     await db.execute(text("SET LOCAL enable_seqscan = off"))
+    await db.execute(text("INSERT INTO forum_notifications (agent_id, kind, detail, read, created_at) "
+                          "SELECT :a, 'moderation', 'x', g % 2 = 0, now() FROM generate_series(1, 5000) g"),
+                     {"a": a.agent_id})
+    await db.execute(text("ANALYZE forum_notifications"))
     conn = await db.connection()
     plans = []
     for statement, parameters in seen:

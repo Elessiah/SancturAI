@@ -30,6 +30,20 @@ class NoStoreMiddleware:
         await self.app(scope, receive, _send)
 
 
+def _is_internal(path: str) -> bool:
+    return path == "/internal" or path.startswith("/internal/")
+
+
+def _paths(scope: Scope) -> tuple[str, str]:
+    """Chemin brut et chemin vu par le routeur (sans root_path, comme starlette.get_route_path) :
+    un root_path configuré (--root-path) ne doit pas faire contourner la garde."""
+    path: str = scope.get("path", "")
+    root: str = scope.get("root_path", "")
+    if root and path.startswith(root + "/"):
+        return path, path[len(root):]
+    return path, path
+
+
 class InternalGuardMiddleware:
     """Garde de tout /internal (routes actuelles et futures), AVANT le routage : sans token valide ou avec
     X-Forwarded-For, la réponse est celle d'une route inexistante (ni 405, ni 422 de décodage du corps)."""
@@ -39,8 +53,7 @@ class InternalGuardMiddleware:
         self.state = state
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "") if scope["type"] == "http" else ""
-        if path == "/internal" or path.startswith("/internal/"):
+        if scope["type"] == "http" and any(_is_internal(p) for p in _paths(scope)):
             try:
                 verify_internal(Request(scope), self.state.settings)
             except ApiError as err:
