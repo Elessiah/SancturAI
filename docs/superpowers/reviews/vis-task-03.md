@@ -8,7 +8,7 @@ Base: afe9a09
 | P2 | perf | minor | app/identity/service.py:206 | duplicated BANNED error literal instead of ensure_standing in IdentityService.login | fixed | 6ea33e0 |
 | P3 | perf | minor | app/vault/service.py:81 | silent fallback to full quota for a vanished agent (dead branch) in VaultService._quota | fixed | 6ea33e0 |
 | P4 | perf | minor | app/identity/auth.py:110 | standing re-checked after load_agent already checked it in ensure_writable | wontfix | |
-| S1 | secu | minor | app/vault/service.py:73 | freeze/ban committed after the dependency check not re-read under the agent lock in VaultService._lock_agent | fixed | SHA_S1 |
+| S1 | secu | minor | app/vault/service.py:73 | freeze/ban committed after the dependency check not re-read under the agent lock in VaultService._lock_agent | fixed | f7b777e |
 
 - P4 wontfix : contrôle en mémoire (deux attributs), coût nul ; garde-fou en profondeur pour les services d'écriture appelés avec un agent qui ne viendrait pas de `load_agent` (REST et MCP identiques, I5).
 - Perf tour 1 : aucun major. Coût du statut par requête : une lecture par clé primaire de la ligne agent (déjà présente pour les routes à agent) ; vault : `member_session` / `with_session` chargent la ligne, `_quota` la relit dans l'identity map, `_lock_agent` la relit sous verrou (`populate_existing`, nécessaire pour un statut frais). Pas de N+1, pas d'I/O bloquante ajoutée. Tour final : minors corrigés ou wontfix.
