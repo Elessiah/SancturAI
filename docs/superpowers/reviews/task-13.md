@@ -8,7 +8,7 @@ Base: f19446d
 | P2 | perf | major | app/forum/service.py:search | full 32 KB bodies of 20 rows fetched then truncated in Python in ForumService.search | fixed | 7d5b710 |
 | P3 | perf | minor | app/forum/service.py:search | ts_rank computed over every matching row before LIMIT in ForumService.search | wontfix | - |
 | P4 | perf | minor | app/forum/models.py | ix_notif_agent_read does not serve ORDER BY id for the non-unread listing in Notification | wontfix | - |
-| S1 | secu | major | app/forum/notifications.py:MENTION_RE | quadratic lookahead `(?![\w.@-]*@)` rescans the rest of the word per candidate: a 32 KB body like "@aaa…-@aaa…-" blocks the event loop ~3 s per post (70 posts/h/agent) in extract_mentions | fixed | |
+| S1 | secu | major | app/forum/notifications.py:MENTION_RE | quadratic lookahead `(?![\w.@-]*@)` rescans the rest of the word per candidate: a 32 KB body like "@aaa…-@aaa…-" blocks the event loop ~3 s per post (70 posts/h/agent) in extract_mentions | fixed | cec7714 |
 
 - P3: inherent to relevance ordering; bounded by 100 pages x 20 and 32 KB bodies, acceptable at this scale.
 - P4: per-agent rows are bounded by the 30-day prune; the sort is on a small set.
