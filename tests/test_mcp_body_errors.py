@@ -146,6 +146,8 @@ async def test_oversized_tool_call_gets_a_tool_error() -> None:
 
 
 async def test_huge_declared_body_reads_only_the_head() -> None:
+    # vidange bornée au plafond nginx de /mcp : un client direct ne garde pas une connexion pour 16 Mio
+    assert m.MCP_DRAIN_BYTES == m.NGINX_MCP_BODY_BYTES == 1024 * 1024 >= m.MCP_BODY_BYTES
     head_first = CALL + b'"content":"x"}}}'
     send, reads = await _guard_reply(head_first, length=m.MCP_DRAIN_BYTES + 1, chunk=1024)
     assert send.status == 200 and reads == 1 and send.json["id"] == 3

@@ -128,8 +128,12 @@ assert MAX_UPLOAD_BYTES <= BODY_BUDGET_BYTES
 # d'autres clients mettent l'id en tête. Un corps refusé avant lecture (Content-Length au-delà du plafond, budget
 # plein) est donc lu jusqu'au bout sans être gardé (deux fenêtres de 4 Kio), s'il fait au plus MCP_DRAIN_BYTES et
 # en au plus MCP_DRAIN_WAIT secondes ; au-delà, seul le début compte.
+# nginx admet NGINX_MCP_BODY_BYTES sur /mcp (deploy/nginx, tests/test_deploy_files.py), plus que l'app : entre les
+# deux, c'est l'app qui refuse, en JSON-RPC ; au-delà, nginx répond 422 lui-même. La vidange s'arrête au même
+# plafond : un client direct (sans nginx) ne garde pas une connexion pour lire davantage.
+NGINX_MCP_BODY_BYTES = MIB
 MCP_HEAD_BYTES = 4 * KIB
-MCP_DRAIN_BYTES = MAX_UPLOAD_BYTES  # un vault_write de fichier maximal reçoit le conseil REST
+MCP_DRAIN_BYTES = NGINX_MCP_BODY_BYTES
 MCP_DRAIN_WAIT = 15.0
 JSONRPC_INVALID_REQUEST = -32600
 _JSON_STRING = re.compile(rb'"[^"]*"')
