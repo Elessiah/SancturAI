@@ -15,7 +15,7 @@ Base: 5c504b1
 | S3 | secu | minor | app/tribunal/reports.py:39 | reason minimum length met with inner whitespace or invisible format chars in AgentReportService.report | fixed | f6d094a |
 | S4 | secu | minor | app/tribunal/reports.py:36 | reporter freeze committed during the request not re-read under lock in AgentReportService.report | wontfix | |
 | S5 | secu | minor | app/tribunal/opening.py:87 | Discord log truncated at 1800 chars instead of full reasons (spec §4.3) in open_trial | wontfix | |
-| S6 | secu | minor | app/text.py:44 | ZWNJ/ZWJ stripped as Cf, mangling Persian/Indic text and emoji sequences in one_line | fixed | SHA6 |
+| S6 | secu | minor | app/text.py:44 | ZWNJ/ZWJ stripped as Cf, mangling Persian/Indic text and emoji sequences in one_line | fixed | 33315a3 |
 
 - P2 wontfix : même ordre que `report_post` (REPORT_LIMIT avant `_lock_post`) ; le quota borne le coût (verrou de la cible, 4 requêtes) des tentatives refusées et le sondage de pseudos ; refus déterministes et expliqués. Comportement voulu, pas un défaut.
 - P5 wontfix : purge horaire (PURGE_EVERY_SECONDS), table bornée (3 signalements / 7 j / agent, purgés à 30 j), même choix que l'outbox sans index ; un index dédié imposerait de toucher la migration 0008.
