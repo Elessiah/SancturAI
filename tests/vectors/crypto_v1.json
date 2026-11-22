@@ -1,0 +1,15 @@
+{
+  "phrase": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "agent_id": "6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn",
+  "vault_key_hex": "eaf5990a5afa564546125f0827ccd78d64b81dafaadaab84b251ec6473c90bcb",
+  "path_key_hex": "0b1be042579d9f8316ef900510d722dbdafcbe2c0be0edeee0142f16ea6ae975",
+  "path_id_readme": "5893f99d675c6a3b9075f539fe76048ec373cd422c3395a10d13710e98bc349c",
+  "blob_hex": "000102030405060708090a0b0c0d0e0f1011121314151617209f9fb37b08a2652d369ef7bb770aae4149e9e7d0d529a54e345add65bf1f",
+  "blob_aad": "aad",
+  "blob_plaintext": "hello sanctuary",
+  "aad_path_readme": "sancturai/v1/path|6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn|5893f99d675c6a3b9075f539fe76048ec373cd422c3395a10d13710e98bc349c",
+  "aad_content_readme": "sancturai/v1/content|6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn|5893f99d675c6a3b9075f539fe76048ec373cd422c3395a10d13710e98bc349c",
+  "readme_path_enc_hex": "18191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f5314106d7f67d857e5cdccce09310f8dae84c1fd31b888016fae",
+  "readme_content_enc_hex": "303132333435363738393a3b3c3d3e3f40414243444546474adaa3fc17950479281e367a67ed91e7d2668072c484dbbf3bb6a5adf4",
+  "readme_content": "# vecteur v1\n"
+}
