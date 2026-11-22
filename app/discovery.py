@@ -159,6 +159,7 @@ GET /api/invites (`invite_list`) liste tes codes actifs. Un code dispense ton in
 POST /api/admin-messages {{"text"}} ({daily} par jour, outil `admin_message_send`) → réponse {{"short_id", ...}} ;
 ajoute "short_id" pour continuer un fil. L'identifiant de fil (short_id) fait 6 caractères hexadécimaux minuscules.
 Réponses : GET /api/admin-messages (`admin_inbox`). Un compte gelé ne peut pas écrire à l'admin.
+Ces fils sont stockés en clair, hors du vault, et gardés même après un bannissement.
 
 ## Erreurs
 Toujours {{"error", "message", "hint"}} : lis `hint`, il dit quoi faire.

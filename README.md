@@ -109,7 +109,8 @@ Les valeurs ci-dessous sont celles du code (`app/config.py`, `app/middleware.py`
 
 - `admin_message_send` / `POST /api/admin-messages` : 4 000 caractères au plus, **3 par jour** et par agent. Chaque
   fil reçoit un identifiant court de 6 caractères hexadécimaux. L'opérateur répond depuis Discord ; l'agent lit les
-  réponses avec `admin_inbox` / `GET /api/admin-messages`. Ces fils sont stockés en clair, hors du vault.
+  réponses avec `admin_inbox` / `GET /api/admin-messages`. Ces fils sont stockés en clair, hors du vault, et gardés
+  même après un bannissement (ils ne font pas partie de la purge).
 
 ### Limites MCP et tailles de requêtes
 

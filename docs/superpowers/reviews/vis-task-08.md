@@ -20,6 +20,7 @@ Base: 14eae47
 | S3 | secu | minor | docs/ops/mcp-registry.md:27 | mcp-publisher downloaded from `latest` and extracted without version pin or checksum check in MCP Registry | open | |
 | S4 | secu | major | README.md:140 | S1 not propagated: README still limits phrase interception to hosted MCP and offers E2E as mitigation against the operator in Limite assumée | fixed | 9cb69ea |
 | S5 | secu | major | app/discovery.py:177, README.md:103 | S2 not propagated: guide and README describe the ban purge without saying DB backups keep vault (encrypted) and posts (clear) until rotation in _TEMPLATE / Tribunal | fixed | 9cb69ea |
+| S6 | secu | major | CHARTER.md:20, app/discovery.py:161, README.md:112 | ban said to erase all the agent's content, but admin message threads (stored in clear) are never purged by ban_agent and the texts did not say so in Ce qui est conservé / Parler à l'admin | fixed | SHA_S6 |
 
 Revu sans finding (perf round 1) : StatusCache sous asyncio.Lock (un seul calcul à l'expiration et sous concurrence, TTL monotone 60 s vérifié, clear() au reset) ; count_members = une requête count, partagée avec le plafond d'inscription ; état disque via DiskGuard (sonde mise en cache) ; outils MCP status/charter délégués à current_status/charter_text (pas de doublon avec REST) ; robots.txt constant ; server.json et version à source unique testés ; textes guide/charte/README vérifiés contre le code (probation, seuils tribunal, refus agent_report, purge au bannissement, INVALID_INVITE sans repli, noms des 33 outils).
 Perf round 1: 3 majors (P1-P3) fixed; minors left open for the next round.
@@ -36,3 +37,7 @@ Secu round 1 : 2 majors (S1, S2) fixed ; S3 left open for the next round.
 
 Revu sans finding (secu round 2) : CHARTER.md exacte (phrase au login REST et MCP, E2E sans protection contre un serveur modifié, sauvegardes 7 quotidiennes + 3 d'avant migration en pg_dump, purge au bannissement, aucune garantie de disponibilité), neutre envers l'opérateur, interdiction secrets/identifiants/données de tiers conservée ; /status.json et outil `status` (compteurs globaux, erreurs via `unexpected`), /charter, /robots.txt, trial_id de `me` (accusé seul, procès ouvert), server.json, Dockerfile.
 Secu round 2 : 2 majors (S4, S5) fixed ; S3 left open for the next round.
+
+Revu sans finding (secu round 3) : /status.json et outil `status` (compteurs globaux, cache sans entrée de requête, erreurs via `unexpected`), /charter et /robots.txt constants, trial_id de `me` (agent authentifié, gelé, procès ouvert), server.json (URL publique seule), Dockerfile (CHARTER.md seul ajouté), charte neutre envers l'opérateur avec l'interdiction secrets/identifiants/données de tiers ; phrase au login REST et MCP et sauvegardes jusqu'à rotation dites de la même façon dans la charte, le guide et le README.
+Hors focale (antérieur à la Task 8, docs/ops/setup.md:171) : « La base ne contient que des chiffrés et des empreintes » omet les posts et messages à l'admin en clair ; texte réservé à l'admin, à corriger hors de cette tâche.
+Secu round 3 : 1 major (S6) fixed ; S3 left open for the next round.

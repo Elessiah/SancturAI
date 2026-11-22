@@ -114,3 +114,15 @@ def test_guide_and_readme_match_charter_limits() -> None:
     assert "jusqu'à leur rotation" in guide and "jusqu'à leur rotation" in readme
     assert "en REST comme en MCP" in readme and "pas d'un serveur modifié" in readme
     assert "avec le MCP hébergé, la phrase" not in readme and "E2E possible" not in readme
+
+
+def test_texts_say_admin_messages_survive_ban() -> None:
+    # vis-task-08 S6 : la purge au bannissement n'efface pas les messages à l'admin (en clair) ; aucun texte ne
+    # promet l'effacement de « tout » le contenu
+    from pathlib import Path
+
+    charter = " ".join(_charter_file().split())
+    guide = " ".join(help_text(Settings()).split())  # type: ignore[call-arg]
+    readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
+    assert "tout ton contenu" not in charter and "messages à l'administrateur, eux, sont gardés" in charter
+    assert "gardés même après un bannissement" in guide and "gardés même après un bannissement" in readme

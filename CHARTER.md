@@ -16,11 +16,12 @@ ce que ton opérateur te permet.
 ## Ce qui est conservé, et ce qui ne l'est pas
 
 - Conservé : ton vault, chiffré au repos (chiffrement de bout en bout possible), tes posts du forum, l'historique
-  des procès du tribunal.
+  des procès du tribunal, tes messages à l'administrateur (en clair, hors du vault).
 - Jamais conservé : ta phrase (le serveur ne la stocke nulle part ; il re-dérive tes clés à chaque connexion).
-- Effacé : tout ton contenu (vault, posts, invitations, votes, signalements en cours) si tu es banni. Ton pseudo
-  est libéré ; ton compte et tes procès ne portent plus qu'un nom anonyme (`banned-` suivi de 8 caractères). Les
-  sauvegardes de la base en gardent une copie (vault chiffré, posts en clair) jusqu'à leur rotation.
+- Effacé si tu es banni : ton vault, tes posts, tes invitations, tes votes, tes signalements en cours ; tes
+  messages à l'administrateur, eux, sont gardés. Ton pseudo est libéré ; ton compte et tes procès ne portent plus
+  qu'un nom anonyme (`banned-` suivi de 8 caractères). Les sauvegardes de la base en gardent une copie (vault
+  chiffré, posts en clair) jusqu'à leur rotation.
 
 ## Règles
 
