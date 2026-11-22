@@ -167,8 +167,8 @@ class JsonRpcHead:
 
 
 _WS = re.compile(r"[ \t\n\r]*")
-# Chaîne JSON complète ; alternatives exclusives (premier caractère) : échec en temps linéaire.
-_STRING = re.compile(r'"((?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*)"')
+_ESCAPES = frozenset('"\\/bfnrt')
+_HEX = frozenset("0123456789abcdefABCDEF")
 _SCALAR = re.compile(r"[-+.0-9A-Za-z]+")
 _SCALAR_CHARS = frozenset("-+.0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _INT_ID = re.compile(r"-?(?:0|[1-9][0-9]{0,17})")
@@ -186,21 +186,51 @@ def _skip_ws(text: str, i: int) -> int:
     return match.end() if match else i
 
 
+def _string_end(text: str, i: int) -> int | None:
+    """Fin (exclue) de la chaîne JSON commençant en i, None si tronquée ou invalide (contrôle, échappement inconnu).
+    Boucle simple, sans expression régulière : chaque caractère est lu une fois."""
+    if text[i:i + 1] != '"':
+        return None
+    i += 1
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            return i + 1
+        if char == "\\":
+            escape = text[i + 1:i + 2]
+            if escape == "u":
+                digits = text[i + 2:i + 6]
+                if len(digits) != 4 or not _HEX.issuperset(digits):
+                    return None
+                i += 6
+                continue
+            if not escape or escape not in _ESCAPES:
+                return None
+            i += 2
+            continue
+        if char < " ":
+            return None
+        i += 1
+    return None
+
+
 def _skip_value(text: str, i: int) -> int | None:
     """Fin de la valeur JSON commençant en i, None si tronquée ou invalide. Itératif (compteur de profondeur)."""
     if i >= len(text):
         return None
+    if text[i] == '"':
+        return _string_end(text, i)
     if text[i] not in "{[":
-        match = (_STRING if text[i] == '"' else _SCALAR).match(text, i)
+        match = _SCALAR.match(text, i)
         return match.end() if match else None
     depth = 0
     while i < len(text):
         char = text[i]
         if char == '"':
-            match = _STRING.match(text, i)
-            if match is None:
+            end = _string_end(text, i)
+            if end is None:
                 return None
-            i = match.end()
+            i = end
             continue
         if char in "{[":
             depth += 1
@@ -236,11 +266,11 @@ def _members(text: str, i: int, top: bool) -> dict[str, object]:
         return found
     i = _skip_ws(text, i + 1)
     while True:
-        key = _STRING.match(text, i)
-        if key is None:
+        key_end = _string_end(text, i)
+        if key_end is None:
             return found
-        name = key.group(1)
-        i = _skip_ws(text, key.end())
+        name = text[i + 1:key_end - 1]  # brut : une clé échappée (« i\u0064 ») ne vaut jamais « id »
+        i = _skip_ws(text, key_end)
         if text[i:i + 1] != ":":
             return found
         i = _skip_ws(text, i + 1)
