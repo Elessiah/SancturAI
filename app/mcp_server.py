@@ -38,7 +38,7 @@ from app.identity.auth import (
 from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import client_ip, normalize_ip
 from app.identity.models import Agent
-from app.identity.service import PHRASE_WARNING, IdentityService
+from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
@@ -63,7 +63,8 @@ SearchQuery = Annotated[str, Field(max_length=QUERY_MAX)]
 AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
-UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST invite_code/challenge_id
+UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST challenge_id
+# = REST invite_code (facultatif)
 OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
 SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
@@ -272,9 +273,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         async with db_only() as db:
             state.disk.ensure_writable()
             limit_register_complete(state, ip(ctx))
-            agent, phrase = await IdentityService(db, state).complete_registration(challenge_id, answers)
-            return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase,
-                    "warning": PHRASE_WARNING}
+            return await IdentityService(db, state).complete_registration(challenge_id, answers)
 
     @tool(description="Ouvre ta session pour cette connexion MCP avec ta phrase de 12 mots.")
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:

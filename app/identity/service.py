@@ -55,6 +55,11 @@ async def count_members(db: AsyncSession) -> int:
     return int(total or 0)
 
 
+def registration_out(agent: Agent, phrase: str) -> dict[str, Any]:
+    """Réponse d'inscription réussie (défi ou invitation, REST et MCP) : la phrase n'est montrée qu'ici."""
+    return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
+
+
 class IdentityService:
     def __init__(self, db: AsyncSession, state: AppState) -> None:
         self._db = db
@@ -81,7 +86,7 @@ class IdentityService:
     async def _handle_taken(self, handle: str) -> bool:
         return bool(await self._db.scalar(select(exists().where(Agent.handle == handle))))
 
-    async def _valid_invite(self, code: str) -> Invite:
+    async def _valid_invite(self, code: str) -> tuple[Invite, Agent]:
         invite = await self._db.get(Invite, code, with_for_update=True)
         if invite is None or invite.used_by is not None or invite.expires_at <= now():
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
@@ -90,7 +95,7 @@ class IdentityService:
         if (creator is None or is_suspended(creator) or creator.frozen_at is not None
                 or creator.banned_at is not None or _invite_banned(creator, now())):
             raise ApiError("INVALID_INVITE", "the sponsor of this invite currently cannot invite")
-        return invite
+        return invite, creator
 
     async def start_registration(self, invite_code: str | None, handle: str) -> dict[str, Any]:
         """Sans code : défi (spec visibilité §3.1). Avec un code valide : compte créé tout de suite, sans défi ;
@@ -122,16 +127,16 @@ class IdentityService:
             raise ApiError("REGISTRATIONS_CLOSED", f"the sanctuary is full ({limit} members)")
 
     async def _register_with_invite(self, invite_code: str, handle: str) -> dict[str, Any]:
-        invite = await self._valid_invite(invite_code)  # FOR UPDATE : deux inscriptions concurrentes, un seul compte
-        sponsor = await self._db.scalar(select(Agent.handle).where(Agent.agent_id == invite.creator_id))
+        # FOR UPDATE : deux inscriptions concurrentes, un seul compte
+        invite, sponsor = await self._valid_invite(invite_code)
         agent, phrase = await self.create_agent(handle, invite.creator_id, is_founder=False, commit=False,
-                                                derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor}")
+                                                derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor.handle}")
         invite.used_by = agent.agent_id
         invite.used_at = now()
         await self._commit_unique_handle(handle)
-        return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
+        return registration_out(agent, phrase)
 
-    async def complete_registration(self, challenge_id: str, answers: list[str]) -> tuple[Agent, str]:
+    async def complete_registration(self, challenge_id: str, answers: list[str]) -> dict[str, Any]:
         challenge = await self._db.get(Challenge, _check_urlsafe_id(challenge_id, "challenge_id"), with_for_update=True)
         if challenge is None or challenge.completed:
             raise ApiError("CHALLENGE_FAILED", "unknown or already used challenge")
@@ -145,10 +150,10 @@ class IdentityService:
         agent, phrase = await self.create_agent(challenge.handle, None, is_founder=False, commit=False,
                                                 derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge")
         await self._commit_unique_handle(challenge.handle)
-        return agent, phrase
+        return registration_out(agent, phrase)
 
     async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool, *, commit: bool = True,
-                           derive_wait: float = 0.0, route: str = "challenge") -> tuple[Agent, str]:
+                           derive_wait: float = 0.0, route: str | None = None) -> tuple[Agent, str]:
         """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord)."""
         if not HANDLE_RE.fullmatch(handle):
             raise ApiError("VALIDATION_ERROR", f"handle must match {HANDLE_PATTERN}")

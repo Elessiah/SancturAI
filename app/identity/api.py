@@ -17,7 +17,7 @@ from app.identity.deps import (
     writable_agent,
 )
 from app.identity.models import Agent, Invite
-from app.identity.service import PHRASE_WARNING, IdentityService
+from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
 
@@ -68,8 +68,7 @@ async def register_start(body: RegisterStartIn, request: Request, db: AsyncSessi
 async def register_complete(body: RegisterCompleteIn, request: Request, db: AsyncSession = Depends(get_db),
                             state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_register_complete(state, client_ip(request))
-    agent, phrase = await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
-    return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
+    return await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
 
 
 @router.post("/login")
