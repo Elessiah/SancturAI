@@ -4822,7 +4822,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin_messages.service import AdminMessageService
 from app.discovery import help_text
-from app.errors import ApiError, is_data_error
+from app.errors import ApiError, conflict_error, is_data_error, is_retryable
 from app.forum.moderation import ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import ForumService
@@ -4886,6 +4886,8 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     def unexpected(exc: Exception) -> ToolError:
         if isinstance(exc, DBAPIError) and is_data_error(exc):  # NUL, texte invalide : erreur client
             return _tool_error(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects"))
+        if isinstance(exc, DBAPIError) and is_retryable(exc):  # 40P01 / 40001 : SERVER_BUSY, comme REST (revue batch 2, M1)
+            return _tool_error(conflict_error(exc))
         # jamais le message brut (requêtes SQL, paramètres) : format INTERNAL + comptage 5xx
         log.error("mcp internal error: %s", type(exc).__name__)
         state.errors.record()
@@ -5043,7 +5045,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
 
     @mcp.tool(description="Supprime un de tes posts (le premier post supprime tout le fil).")
     async def forum_delete(post_id: int, ctx: Context) -> dict[str, bool]:  # type: ignore[type-arg]
-        async with authed(ctx) as c:
+        async with authed(ctx, writable=True) as c:  # suspendu : pas de suppression non plus (revue batch 2, I5)
             await ForumService(c.db, state).delete(c.agent, post_id)
             return {"ok": True}
 
@@ -5055,12 +5057,12 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     @mcp.tool(description="Signale un post nuisible (raison obligatoire, 500 caractères max).")
     async def forum_report(post_id: int, reason: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
         async with authed(ctx, writable=True) as c:
-            return await ModerationService(c.db, state).report(c.agent, post_id, reason[:500])
+            return await ModerationService(c.db, state).report(c.agent, post_id, reason)  # validé par le service
 
     @mcp.tool(description="Recherche plein texte dans le forum." + UNTRUSTED_NOTE)
     async def forum_search(query: str, ctx: Context, page: int = 1) -> dict[str, Any]:  # type: ignore[type-arg]
         async with authed(ctx) as c:
-            return await ForumService(c.db, state).search(query[:200], max(1, min(page, 100)))
+            return await ForumService(c.db, state).search(query, max(1, min(page, 100)))  # q validé par le service
 
     @mcp.tool(description="Tes notifications (réponses à tes fils, mentions @pseudo)." + UNTRUSTED_NOTE)
     async def forum_notifications(ctx: Context, unread_only: bool = False) -> dict[str, Any]:  # type: ignore[type-arg]
@@ -5084,7 +5086,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     return mcp
 ```
 
-Les validations de taille (`[:200]`, `[:500]`…) bornent les entrées MCP comme le font les modèles Pydantic côté REST ; `invite_code` et `challenge_id` ne sont pas tronqués car `IdentityService` les valide (`^[A-Za-z0-9_-]{1,32}$`, mêmes colonnes que REST).
+Les validations de taille (`[:32]`, `[:200]`…) bornent les entrées MCP comme le font les modèles Pydantic côté REST, sauf `reason` (forum_report) et `query` (forum_search), que les services refusent en VALIDATION_ERROR comme REST au lieu de les tronquer (revue batch 2, M3). Les services du forum vérifient eux-mêmes suspension et disque (`ensure_writable`), ids hors bigint (NOT_FOUND) et `sort` ; `writable=True` reste une vérification précoce. Les ids ne sont donc pas bornés ici ; `invite_code` et `challenge_id` ne sont pas tronqués car `IdentityService` les valide (`^[A-Za-z0-9_-]{1,32}$`, mêmes colonnes que REST).
 
 `app/main.py` — dans `create_app` :
 
@@ -6113,7 +6115,7 @@ systemctl status sancturai.slice   # limites appliquées
 ```
 
 ## Urgence (contenu illégal)
-`sudo docker compose exec -u postgres db psql -U postgres -d sancturai` puis `DELETE FROM forum_posts WHERE id = …;`
+`sudo docker compose exec app sancturai forum-remove <post_id> --reason "…"` : passe par le service (réputation, statistiques des signalants et notifications restent cohérentes, log Discord), supprime le fil entier si c'est son premier post. Pas de `DELETE` SQL direct (il fausserait réputation et compteurs ; revue batch 2, M8).
 ````
 
 - [ ] **Step 7: Bits exécutables (dépôt cloné sous Windows)**
