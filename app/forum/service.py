@@ -20,9 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
-from app.forum.notifications import notify_new_post
+from app.forum.notifications import notify_moderation, notify_new_post
 from app.identity.auth import ensure_writable
 from app.identity.models import AGENT_ROW_LOCK, Agent
+from app.outbox.service import enqueue
 from app.state import AppState
 from app.text import check_line, check_text
 
@@ -32,6 +33,7 @@ TITLE_MAX = 200
 SEARCH_PER_PAGE = 20
 SNIPPET = 300
 QUERY_MAX = 200
+ADMIN_REASON_MAX = 500
 ID_MAX = 2**63 - 1  # bigint : au-delà, asyncpg refuse la valeur avant Postgres (500 sans SQLSTATE)
 Sort = Literal["recent", "active", "useful"]
 _ORDER: dict[str, Any] = {"recent": Thread.created_at.desc(), "active": Thread.last_activity_at.desc(),
@@ -200,6 +202,23 @@ class ForumService:
         self._writable(agent)
         await self.remove_post(await self._own_post(agent, post_id, lock=False))
         await self._db.commit()
+
+    async def admin_remove(self, post_id: int, reason: str) -> dict[str, Any]:
+        """Retrait par l'admin (CLI `forum-remove`, recours légal §7.4) : passe par `remove_post`, donc réputation
+        et statistiques restent exactes, contrairement à un DELETE SQL (revue batch 2, M8). Ses signalements sont
+        neutralisés (ni succès ni échec) ; rien n'est inscrit au journal de modération (pas de suspension)."""
+        reason = check_text(reason, "reason").strip()
+        if not reason or len(reason) > ADMIN_REASON_MAX:
+            raise ApiError("VALIDATION_ERROR", f"reason must be 1..{ADMIN_REASON_MAX} chars")
+        post = await self._post(post_id)
+        thread_id, author_id, is_first = post.thread_id, post.author_id, post.is_first
+        await self.remove_post(post)
+        handle = await self._db.scalar(select(Agent.handle).where(Agent.agent_id == author_id))
+        what = f"fil #{thread_id}" if is_first else f"post #{post_id} (fil #{thread_id})"
+        await enqueue(self._db, "log", f"Post #{post_id} de {handle} retiré par l'admin ({what}) : {reason}")
+        notify_moderation(self._db, author_id, f"Votre post #{post_id} a été retiré par l'admin.")
+        await self._db.commit()
+        return {"post_id": post_id, "thread_id": thread_id, "thread_deleted": is_first}
 
     async def remove_post(self, post: Post, *, upheld: bool = False, lock_agents: Iterable[str] = ()) -> None:
         """Supprime un post (ou le fil entier si c'est le premier) en retirant ses votes de la réputation.

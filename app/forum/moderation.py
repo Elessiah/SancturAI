@@ -20,6 +20,7 @@ DELETE_WEIGHT = 5.0
 LOW_WEIGHT = 0.5
 LOW_PRECISION_MIN_REPORTS = 5
 LOW_PRECISION_RATIO = 0.2
+SETTLE_DAYS = 7  # un signalement sur un post encore en ligne après 7 jours a échoué (M9)
 SUSPEND_AFTER = 3
 SUSPEND_WINDOW_DAYS = 30
 SUSPEND_DAYS = 7
@@ -86,9 +87,20 @@ class ModerationService:
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
     async def reporter_weight(self, agent_id: str) -> float:
+        """Précision = signalements aboutis / signalements tranchés (décidé par l'orchestrateur, revue batch 2 M9).
+
+        Tranché : abouti (post supprimé par la communauté) ou échoué (post toujours en ligne SETTLE_DAYS après le
+        signalement). Un signalement en attente ne compte pas ; un signalement neutralisé (post retiré par son
+        auteur) a déjà quitté `reports_total`.
+        """
         stat = await self._db.get(ReporterStat, agent_id)
-        if stat and stat.reports_total >= LOW_PRECISION_MIN_REPORTS \
-                and stat.reports_successful / stat.reports_total < LOW_PRECISION_RATIO:
+        if stat is None:
+            return 1.0
+        failed = await self._db.scalar(
+            select(func.count()).select_from(Report)
+            .where(Report.agent_id == agent_id, Report.created_at < datetime.now(UTC) - timedelta(days=SETTLE_DAYS)))
+        settled = stat.reports_successful + (failed or 0)
+        if settled >= LOW_PRECISION_MIN_REPORTS and stat.reports_successful / settled < LOW_PRECISION_RATIO:
             return LOW_WEIGHT
         return 1.0
 
