@@ -6,6 +6,7 @@ from app.forum.models import ModerationLog, ReporterStat
 from app.identity.models import Agent
 from app.outbox.models import OutboxEvent
 from app.state import AppState
+from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import AgentCtx, make_agent
 
 
@@ -48,6 +49,7 @@ async def test_reports_delete_post_and_log(client: httpx.AsyncClient, state: App
     assert stat is not None and stat.reports_successful == 1
     texts = [e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all()]
     assert any("supprimé" in t for t in texts) and not any("spam spam" in t for t in texts)
+    await assert_forum_invariants(db)
 
 
 async def test_upvotes_protect_post(client: httpx.AsyncClient, state: AppState) -> None:
@@ -77,14 +79,36 @@ async def test_three_deletions_suspend_author(client: httpx.AsyncClient, state: 
     assert r.json()["error"] == "SUSPENDED"
     count = await db.scalar(select(func.count()).select_from(ModerationLog))
     assert count == 3
+    await assert_forum_invariants(db)
 
 
-async def test_low_precision_reporter_weighs_half(state: AppState, db: AsyncSession) -> None:
+async def test_low_precision_counts_only_settled_reports(client: httpx.AsyncClient, state: AppState,
+                                                         db: AsyncSession) -> None:
+    """M9 (revue batch 2) : précision = aboutis / tranchés ; un signalement en attente (post signalé depuis moins
+    de 7 jours, toujours en ligne) ne compte pas, sinon un nouveau signalant soigneux tomberait à 0,5."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.forum.models import Report
     from app.forum.moderation import ModerationService
-    rep = await make_agent(state, "noisy")
-    db.add(ReporterStat(agent_id=rep.agent_id, reports_total=10, reports_successful=1))
+    from tests.forum.invariants import assert_forum_invariants
+
+    author, rep = await make_agent(state, "target"), await make_agent(state, "careful")
+    for _ in range(9):
+        _, pid = await _thread(client, author)
+        state.limiter.clear()
+        assert (await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"},
+                                  headers=rep.headers)).json()["deleted"] is False
+    await db.execute(update(ReporterStat).where(ReporterStat.agent_id == rep.agent_id)
+                     .values(reports_total=ReporterStat.reports_total + 1, reports_successful=1))
     await db.commit()
-    assert await ModerationService(db, state).reporter_weight(rep.agent_id) == 0.5
+    await assert_forum_invariants(db)
+    mod = ModerationService(db, state)
+    assert await mod.reporter_weight(rep.agent_id) == 1.0  # 1 abouti, 9 en attente : rien de tranché à 20 %
+    await db.execute(update(Report).values(created_at=datetime.now(UTC) - timedelta(days=8)))
+    await db.commit()
+    assert await mod.reporter_weight(rep.agent_id) == 0.5  # 9 posts restés en ligne 7 jours : échecs, 1/10
 
 
 async def test_report_validation_and_concurrent_votes(client: httpx.AsyncClient, state: AppState,
@@ -179,3 +203,26 @@ async def test_withdrawn_upvote_reevaluates(client: httpx.AsyncClient, state: Ap
     await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 0}, headers=fans[0].headers)
     r = await client.post(f"/api/forum/posts/{pid}/vote", json={"value": 1}, headers=fans[1].headers)
     assert r.json()["error"] == "NOT_FOUND"
+
+
+async def test_db_checks_reject_impossible_forum_rows(client: httpx.AsyncClient, state: AppState,
+                                                     db: AsyncSession) -> None:
+    """M4 (revue batch 2) : la base refuse un vote hors ±1, un compteur négatif, une notification incohérente."""
+    import pytest
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    a, b = await make_agent(state, "chk-a"), await make_agent(state, "chk-b")
+    tid, pid = await _thread(client, a)
+    for stmt, params in [
+        ("INSERT INTO forum_votes (post_id, agent_id, value) VALUES (:p, :b, 2)", {"p": pid, "b": b.agent_id}),
+        ("UPDATE forum_threads SET reply_count = -1 WHERE id = :t", {"t": tid}),
+        ("INSERT INTO forum_reporter_stats (agent_id, reports_total, reports_successful) VALUES (:b, 0, -1)",
+         {"b": b.agent_id}),
+        ("INSERT INTO forum_notifications (agent_id, kind, thread_id, post_id) VALUES (:b, 'moderation', :t, :p)",
+         {"b": b.agent_id, "t": tid, "p": pid}),
+        ("INSERT INTO forum_notifications (agent_id, kind, detail) VALUES (:b, 'reply', 'x')", {"b": b.agent_id}),
+    ]:
+        with pytest.raises(IntegrityError):
+            await db.execute(text(stmt), params)
+        await db.rollback()

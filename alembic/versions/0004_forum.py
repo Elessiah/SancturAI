@@ -31,6 +31,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('last_activity_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('reply_count', sa.Integer(), server_default='0', nullable=False),
+    sa.CheckConstraint('reply_count >= 0', name='ck_threads_reply_count_nonneg'),
     sa.Column('score', sa.Integer(), server_default='0', nullable=False),
     sa.ForeignKeyConstraint(['author_id'], ['agents.agent_id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['category_slug'], ['forum_categories.slug']),

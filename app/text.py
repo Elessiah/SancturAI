@@ -13,8 +13,9 @@ from app.errors import ApiError
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 # Idem, mais \r toléré en entrée (fins de ligne CRLF des clients).
 _INPUT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-# Une ligne (titre) : tous les contrôles C0/DEL/C1 et les séparateurs de ligne/paragraphe Unicode.
-_LINE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# Une ligne (titre) : tous les contrôles C0/DEL/C1, les séparateurs de ligne/paragraphe Unicode, et les marques
+# bidi / de format invisibles (LRM, RLM, ALM, LRE..RLO, LRI..PDI) qui renverseraient l'affichage d'une liste.
+_LINE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c]")
 # Un str Python ne contient que des surrogates isolés (JSON "\ud800") : non encodables en UTF-8.
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 

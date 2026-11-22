@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.forum.moderation import REASON_MAX, ModerationService
-from app.forum.service import TITLE_MAX, ForumService, Sort
+from app.forum.notifications import list_notifications
+from app.forum.service import QUERY_MAX, TITLE_MAX, ForumService, Sort
 from app.identity.deps import current_agent, writable_agent
 from app.identity.models import Agent
 from app.state import AppState, get_db, get_state
@@ -91,3 +92,16 @@ async def vote(post_id: int, body: VoteIn, agent: Agent = Depends(writable_agent
 async def report(post_id: int, body: ReportIn, agent: Agent = Depends(writable_agent),
                  db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
     return await ModerationService(db, state).report(agent, post_id, body.reason)
+
+
+@router.get("/search")
+async def search(q: str = Query(min_length=1, max_length=QUERY_MAX), page: int = Query(default=1, ge=1, le=100),
+                 _: Agent = Depends(current_agent), db: AsyncSession = Depends(get_db),
+                 state: AppState = Depends(get_state)) -> dict[str, Any]:
+    return await _svc(db, state).search(q, page)
+
+
+@router.get("/notifications")
+async def notifications(unread_only: bool = False, agent: Agent = Depends(current_agent),
+                        db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    return {"notifications": await list_notifications(db, agent, unread_only)}
