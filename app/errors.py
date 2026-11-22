@@ -47,6 +47,10 @@ HINTS: dict[str, str] = {
 # SQLSTATE d'entrée client uniquement : 22021 (octet invalide / NUL), 22P05 (caractère non traduisible).
 # Toute autre erreur de classe 22 (22012, 22003, 22P02...) est un bug serveur -> INTERNAL.
 _CLIENT_DATA_SQLSTATES = frozenset({"22021", "22P05"})
+# Conflits de verrou (40P01 interblocage, 40001 échec de sérialisation) : la transaction est annulée par
+# Postgres et peut simplement être rejouée → SERVER_BUSY réessayable, pas une panne (revue batch 2, M1).
+_RETRYABLE_SQLSTATES = frozenset({"40P01", "40001"})
+RETRY_AFTER_CONFLICT = 1
 
 _HTTP_TO_CODE = {401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND",
                  405: "NOT_FOUND", 413: "QUOTA_EXCEEDED", 422: "VALIDATION_ERROR", 429: "RATE_LIMITED"}
@@ -77,9 +81,23 @@ def _response(err: ApiError) -> JSONResponse:
     return JSONResponse(err.to_dict(), status_code=err.status, headers=headers)
 
 
-def is_data_error(exc: DBAPIError) -> bool:
+def sqlstate_of(exc: DBAPIError) -> str | None:
     sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-    return isinstance(sqlstate, str) and sqlstate in _CLIENT_DATA_SQLSTATES
+    return sqlstate if isinstance(sqlstate, str) else None
+
+
+def is_data_error(exc: DBAPIError) -> bool:
+    return sqlstate_of(exc) in _CLIENT_DATA_SQLSTATES
+
+
+def is_retryable(exc: DBAPIError) -> bool:
+    return sqlstate_of(exc) in _RETRYABLE_SQLSTATES
+
+
+def conflict_error(exc: DBAPIError) -> ApiError:
+    """SERVER_BUSY pour un conflit de verrou ; journalisé par SQLSTATE seulement (jamais le message)."""
+    log.warning("database lock conflict (sqlstate %s), client asked to retry", sqlstate_of(exc))
+    return ApiError("SERVER_BUSY", "concurrent update conflict, retry the request", retry_after=RETRY_AFTER_CONFLICT)
 
 
 def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> None:
@@ -103,6 +121,8 @@ def install_error_handlers(app: FastAPI, on_internal: Callable[[], None]) -> Non
             # message fixe : jamais la valeur fautive (hide_parameters masque déjà les paramètres liés)
             return _response(ApiError("VALIDATION_ERROR", "a field contains a value the database rejects "
                                                           "(NUL byte or invalid text)"))
+        if is_retryable(exc):
+            return _response(conflict_error(exc))
         raise exc  # vraie panne : remonte à _CatchAll (journalisation du type, comptage 5xx)
 
     @app.exception_handler(Exception)

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from app.forum.notifications import prune_read_notifications
 from app.outbox.service import enqueue
 from app.state import AppState
 
@@ -10,12 +11,18 @@ log = logging.getLogger("sancturai")
 async def run_maintenance_once(state: AppState) -> None:
     alert = state.disk.should_alert()  # ne lève pas (sonde fail-closed) : calculée avant take()
     errors = state.errors.take()
+    try:
+        async with state.sessionmaker() as db:
+            await prune_read_notifications(db)
+    except Exception:
+        log.exception("notification prune failed")  # n'empêche pas le flush des erreurs ci-dessous
+        state.errors.record()  # échec persistant visible par l'admin (compté au tick suivant)
     if not errors and not alert:
         return
     try:
         async with state.sessionmaker() as db:
             if errors:
-                await enqueue(db, "log", f"{errors} erreur(s) 5xx sur la dernière minute.")
+                await enqueue(db, "log", f"{errors} erreur(s) serveur ou de maintenance sur la dernière minute.")
             if alert:
                 await enqueue(db, "log", f"Alerte disque : volume de données au-delà de {state.disk.ratio * 100:.0f} % (ou sonde en échec), écritures refusées.")
             await db.commit()

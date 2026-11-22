@@ -81,3 +81,42 @@ async def test_unexpected_exception_is_contained(caplog: pytest.LogCaptureFixtur
 
 def test_engine_hides_bound_parameters() -> None:
     assert make_engine("postgresql+asyncpg://u:p@h/db").sync_engine.hide_parameters is True
+
+
+class _PgError(Exception):
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__("deadlock detected: secret-bound-param")
+        self.sqlstate = sqlstate
+
+
+@pytest.mark.parametrize("sqlstate", ["40P01", "40001"])
+async def test_lock_conflicts_are_retryable_not_internal(sqlstate: str, caplog: pytest.LogCaptureFixture) -> None:
+    """M1 (revue batch 2) : interblocage / échec de sérialisation → SERVER_BUSY réessayable, jamais compté 5xx."""
+    from sqlalchemy.exc import DBAPIError
+
+    from app.errors import is_retryable
+
+    count = 0
+
+    def record() -> None:
+        nonlocal count
+        count += 1
+
+    app = FastAPI()
+    install_error_handlers(app, record)
+    exc = DBAPIError("SELECT 1", {}, _PgError(sqlstate))
+    assert is_retryable(exc)
+    assert not is_retryable(DBAPIError("SELECT 1", {}, _PgError("23505")))
+
+    @app.get("/conflict")
+    async def conflict() -> None:
+        raise exc
+
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level(logging.DEBUG):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get("/conflict")
+    assert (r.status_code, r.json()["error"], r.json()["retry_after"]) == (503, "SERVER_BUSY", 1)
+    assert r.headers["retry-after"] == "1"
+    assert count == 0
+    assert sqlstate in caplog.text and "secret-bound-param" not in caplog.text
