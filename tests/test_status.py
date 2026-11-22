@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 import httpx
@@ -48,3 +49,24 @@ async def test_status_full_and_degraded(client: httpx.AsyncClient, state: AppSta
     monkeypatch.setattr(state.disk, "is_busy", lambda: True)
     body = (await client.get("/status.json")).json()
     assert (body["free_slots"], body["accepting_registrations"], body["status"]) == (0, False, "degraded")
+
+
+async def test_failed_compute_is_shared_by_waiters() -> None:
+    cache = StatusCache()
+    calls = 0
+    gate = asyncio.Event()
+
+    async def failing() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        raise RuntimeError("db down")
+
+    tasks = [asyncio.create_task(cache.get(failing)) for _ in range(5)]
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert calls == 1 and all(isinstance(r, RuntimeError) for r in results)  # une requête count, pas cinq
+    with pytest.raises(RuntimeError):
+        await cache.get(failing)  # requête suivante : nouvel essai
+    assert calls == 2

@@ -3,6 +3,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import MAX_PHRASE_CHARS
@@ -26,6 +27,7 @@ from app.identity.models import Agent, Invite
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
+from app.tribunal.models import Trial
 
 router = APIRouter(prefix="/api", tags=["identity"])
 
@@ -95,9 +97,18 @@ async def logout(_: Session = Depends(uncounted_session), token: str | None = De
     return {"ok": True}
 
 
+async def me_out(db: AsyncSession, agent: Agent) -> dict[str, Any]:
+    """Profil de `me` (REST et MCP) : trial_id = procès ouvert de l'accusé, sans quoi un gelé ne peut pas se défendre
+    (notifications et trial_list lui renvoient FROZEN, spec visibilité §4.4)."""
+    trial_id = None
+    if agent.frozen_at is not None:  # l'ouverture d'un procès gèle l'accusé : sans gel, aucun procès ouvert
+        trial_id = await db.scalar(select(Trial.id).where(Trial.accused_id == agent.agent_id, Trial.status == "open"))
+    return {**agent_profile(agent), "trial_id": trial_id}
+
+
 @router.get("/me")
-async def me(agent: Agent = Depends(any_agent)) -> dict[str, Any]:
-    return agent_profile(agent)
+async def me(agent: Agent = Depends(any_agent), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    return await me_out(db, agent)
 
 
 def invite_out(invite: Invite) -> dict[str, Any]:

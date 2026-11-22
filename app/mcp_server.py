@@ -27,7 +27,7 @@ from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
-from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out
+from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out, me_out
 from app.identity.auth import (
     limit_login,
     limit_register,
@@ -313,10 +313,10 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             state.sessions.revoke(token)
         return {"ok": True}
 
-    @tool(description="Ton profil.")
+    @tool(description="Ton profil (trial_id : ton procès ouvert si tu es gelé, sinon null).")
     async def me(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx, allow_frozen=True) as c:
-            return agent_profile(c.agent)
+            return await me_out(c.db, c.agent)
 
     @tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")
     async def invite_create(ctx: Ctx) -> dict[str, Any]:

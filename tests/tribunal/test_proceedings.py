@@ -31,6 +31,9 @@ async def test_defense_is_single_bounded_and_frozen_access(client: httpx.AsyncCl
     await make_agent(state, "other-acc")
     other_tid = await open_trial_against(state, "other-acc")
     h = await relogin(client, accused)
+    me = (await client.get("/api/me", headers=h)).json()
+    assert (me["frozen"], me["trial_id"]) == (True, tid)  # seule façon pour l'accusé d'apprendre l'id (§4.4)
+    assert (await client.get("/api/me", headers=jurors[0].headers)).json()["trial_id"] is None
     r = await client.get(f"/api/trials/{tid}", headers=h)  # son propre procès : permis
     assert r.status_code == 200, r.text
     body = r.json()
@@ -111,6 +114,7 @@ async def test_majority_reactivation_restores_access_and_protects(client: httpx.
     assert agent is not None and agent.frozen_at is None
     h = await relogin(client, innocent)
     assert (await client.get("/api/forum/categories", headers=h)).status_code == 200  # accès rétabli
+    assert (await client.get("/api/me", headers=h)).json()["trial_id"] is None  # procès clos
     r = await client.post(f"/api/trials/{tid}/defense", json={"text": "trop tard"}, headers=h)
     assert (r.status_code, r.json()["error"]) == (409, "TRIAL_CLOSED")
     stat = await db.get(ReporterStat, reporters[0].agent_id)

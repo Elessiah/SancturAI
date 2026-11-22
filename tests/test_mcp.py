@@ -53,7 +53,6 @@ async def test_tools_listed(live_url: str) -> None:
         assert re.search(rf"\b{name}\b", guide), name
 
 
-
 async def test_mcp_status_and_charter_without_login(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         st = await call(s, "status")
@@ -385,6 +384,8 @@ async def test_mcp_trial_tools(live_url: str, state: AppState) -> None:
         assert r["tally"]["reactivate"] == 1 and r["status"] == "open"
     async with mcp_session(live_url) as a:
         await call(a, "login", phrase=accused.phrase)
+        me = await call(a, "me")
+        assert (me["frozen"], me["trial_id"]) == (True, tid)
         read = await call(a, "trial_read", trial_id=tid)
         assert read["accused"] == "mcp-acc" and read["untrusted"] is True
         assert (await call(a, "trial_defense", trial_id=tid, text="Je conteste."))["trial_id"] == tid
