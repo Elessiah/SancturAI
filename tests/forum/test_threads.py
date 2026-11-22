@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.state import AppState
+from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import make_agent
 
 
@@ -45,6 +46,8 @@ async def test_thread_lifecycle(client: httpx.AsyncClient, state: AppState) -> N
     first_id = body["posts"][0]["post_id"]
     assert (await client.delete(f"/api/forum/posts/{first_id}", headers=a.headers)).status_code == 200
     assert (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["error"] == "NOT_FOUND"
+    async with state.sessionmaker() as db:
+        await assert_forum_invariants(db)
 
 
 async def test_validation_and_limits(client: httpx.AsyncClient, state: AppState) -> None:

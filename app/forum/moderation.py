@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import ModerationLog, Post, Report, ReporterStat, Thread, Vote
-from app.forum.service import ForumService
-from app.identity.auth import is_suspended
+from app.forum.notifications import notify_moderation
+from app.forum.service import ForumService, check_id
+from app.identity.auth import ensure_writable, is_suspended
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.outbox.service import enqueue
@@ -19,6 +20,7 @@ DELETE_WEIGHT = 5.0
 LOW_WEIGHT = 0.5
 LOW_PRECISION_MIN_REPORTS = 5
 LOW_PRECISION_RATIO = 0.2
+SETTLE_DAYS = 7  # un signalement sur un post encore en ligne après 7 jours a échoué (M9)
 SUSPEND_AFTER = 3
 SUSPEND_WINDOW_DAYS = 30
 SUSPEND_DAYS = 7
@@ -38,7 +40,7 @@ class ModerationService:
 
         Un vote ou un signalement ne peut ainsi pas fausser la réputation en course avec la suppression du fil.
         """
-        thread_id = await self._db.scalar(select(Post.thread_id).where(Post.id == post_id))
+        thread_id = await self._db.scalar(select(Post.thread_id).where(Post.id == check_id(post_id, "post")))
         if thread_id is None:
             raise ApiError("NOT_FOUND", f"no post {post_id}")
         if await self._db.get(Thread, thread_id, with_for_update=True, populate_existing=True) is None:
@@ -49,6 +51,7 @@ class ModerationService:
         return post
 
     async def vote(self, agent: Agent, post_id: int, value: int) -> dict[str, Any]:
+        ensure_writable(self._state, agent)  # dans le service : REST et MCP identiques (I5)
         if value not in (-1, 0, 1):
             raise ApiError("VALIDATION_ERROR", "value must be -1, 0 or 1")
         self._state.limiter.hit(f"forum-vote:{agent.agent_id}", VOTE_LIMIT, DAY_SECONDS)
@@ -71,24 +74,42 @@ class ModerationService:
                                                           set_={"value": value, "voted_at": now}))
         delta = value - previous
         post.score += delta
-        await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
-                               .values(reputation=Agent.reputation + delta))
         if post.is_first:
             await self._db.execute(update(Thread).where(Thread.id == post.thread_id)
                                    .values(score=Thread.score + delta))
         if previous == 1:  # un +1 retiré : le seuil de suppression peut désormais être atteint
             await self._evaluate(post)
+        # Réputation après `_evaluate` (ordre global : statistiques des signalants avant agents, revue batch 2 I2).
+        # Si le post vient d'être supprimé, `remove_post` a retiré le nouveau score s+d ; +d ici laisse R - s.
+        await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
+                               .values(reputation=Agent.reputation + delta))
         await self._db.commit()
         return {"post_id": post_id, "score": post.score, "your_vote": value}
 
     async def reporter_weight(self, agent_id: str) -> float:
-        stat = await self._db.get(ReporterStat, agent_id)
-        if stat and stat.reports_total >= LOW_PRECISION_MIN_REPORTS \
-                and stat.reports_successful / stat.reports_total < LOW_PRECISION_RATIO:
+        """Précision = signalements aboutis / signalements tranchés (décidé par l'orchestrateur, revue batch 2 M9).
+
+        Tranché : abouti (post supprimé par la communauté) ou échoué (post toujours en ligne SETTLE_DAYS après le
+        signalement). Un signalement en attente ne compte pas ; un signalement neutralisé (post retiré par son
+        auteur) a déjà quitté `reports_total`.
+        """
+        # Une seule instruction : stats et signalements échus lus dans le même instantané (revue batch 2 N3).
+        failed = (select(func.count()).select_from(Report)
+                  .where(Report.agent_id == agent_id,
+                         Report.created_at < datetime.now(UTC) - timedelta(days=SETTLE_DAYS))
+                  .scalar_subquery())
+        row = (await self._db.execute(
+            select(ReporterStat.reports_successful, failed).where(ReporterStat.agent_id == agent_id))).first()
+        if row is None:
+            return 1.0
+        successful, failed_count = row
+        settled = successful + failed_count
+        if settled >= LOW_PRECISION_MIN_REPORTS and successful / settled < LOW_PRECISION_RATIO:
             return LOW_WEIGHT
         return 1.0
 
     async def report(self, agent: Agent, post_id: int, reason: str) -> dict[str, Any]:
+        ensure_writable(self._state, agent)
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{REASON_MAX} chars")
@@ -131,7 +152,11 @@ class ModerationService:
                                               .order_by(Report.created_at, Report.agent_id)))
         self._db.add(ModerationLog(post_id=post_id, author_id=author_id, reasons=reasons))
         # flush : le journal compte pour le seuil ; statistiques des signalants mises à jour par `remove_post`.
-        await ForumService(self._db, self._state).remove_post(post, upheld=True)
+        # L'auteur et son parrain (suspension éventuelle) sont verrouillés par `remove_post` avec les autres
+        # auteurs, par agent_id croissant : aucun agent verrouillé hors de l'ordre global (revue batch 2, M1).
+        sponsor_id = await self._db.scalar(select(Agent.sponsor_id).where(Agent.agent_id == author_id))
+        await ForumService(self._db, self._state).remove_post(
+            post, upheld=True, lock_agents={author_id} | ({sponsor_id} if sponsor_id else set()))
         author = (await self._db.execute(select(Agent).where(Agent.agent_id == author_id)
                                          .with_for_update(key_share=True)
                                          .execution_options(populate_existing=True))).scalar_one_or_none()
@@ -139,6 +164,7 @@ class ModerationService:
             return
         await enqueue(self._db, "log", f"Post #{post_id} de {author.handle} supprimé par la communauté "
                                        f"({len(reasons)} signalements).")
+        notify_moderation(self._db, author_id, f"Votre post #{post_id} a été supprimé par la communauté.")
         since = datetime.now(UTC) - timedelta(days=SUSPEND_WINDOW_DAYS)
         recent = await self._db.scalar(select(func.count()).select_from(ModerationLog)
                                        .where(ModerationLog.author_id == author_id,
@@ -146,3 +172,5 @@ class ModerationService:
         if (recent or 0) >= SUSPEND_AFTER and not is_suspended(author):
             await IdentityService(self._db, self._state).suspend(
                 author, SUSPEND_DAYS, f"{SUSPEND_AFTER} suppressions en {SUSPEND_WINDOW_DAYS} jours")
+            notify_moderation(self._db, author_id, f"Compte suspendu {SUSPEND_DAYS} jours : {SUSPEND_AFTER} "
+                                                   f"suppressions en {SUSPEND_WINDOW_DAYS} jours.")
