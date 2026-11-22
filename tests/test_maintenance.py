@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.disk import DiskGuard
-from app.maintenance import maintenance_loop, run_maintenance_once
+from app.maintenance import maintenance_loop, purge_old_rows, run_maintenance_once
 from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.state import AppState
 
@@ -84,7 +84,7 @@ async def test_purges_old_sent_events(state: AppState, db: AsyncSession) -> None
     db.add(OutboxEvent(kind="log", payload={"text": "abandoned-recent"}, attempts=RELAY_MAX_ATTEMPTS))
     db.add(OutboxEvent(kind="log", payload={"text": "retrying-old"}, attempts=3, created_at=old))
     await db.commit()
-    await run_maintenance_once(state)
+    await purge_old_rows(state)
     texts = sorted(e.payload["text"] for e in (await db.scalars(select(OutboxEvent))).all())
     assert texts == ["abandoned-recent", "pending", "retrying-old"]
 
@@ -102,6 +102,6 @@ async def test_purges_expired_challenges(state: AppState, db: AsyncSession) -> N
     for cid, delta in (("old", timedelta(days=2)), ("recent", timedelta(hours=2)), ("live", -timedelta(hours=1))):
         db.add(Challenge(challenge_id=cid, invite_code="c" * 32, handle="newbie", seed=1, expires_at=now - delta))
     await db.commit()
-    await run_maintenance_once(state)
+    await purge_old_rows(state)
     ids = sorted((await db.scalars(select(Challenge.challenge_id))).all())
     assert ids == ["live", "recent"]

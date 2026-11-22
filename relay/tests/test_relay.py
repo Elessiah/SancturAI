@@ -46,10 +46,27 @@ def test_success_and_failure(conn: psycopg.Connection) -> None:
         return httpx.Response(500 if body["text"] == "fail" else 200, json={})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        assert process_batch(conn, http, "http://bot/notify", "tok") == 1
+        assert process_batch(conn, http, "http://bot/notify", "tok") == 2
         assert process_batch(conn, http, "http://bot/notify", "tok") == 0  # backoff : rien d'éligible
     rows = conn.execute("SELECT payload->>'text', sent_at IS NOT NULL, attempts FROM outbox ORDER BY id").fetchall()
     assert rows == [("ok", True, 0), ("fail", False, 1)]
+
+
+def test_no_row_lock_held_during_http_call(conn: psycopg.Connection) -> None:
+    conn.execute("TRUNCATE outbox")
+    _insert(conn, "log", {"text": "slow"})
+    seen: list[tuple[object, ...]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with psycopg.connect(conn.info.dsn, password=conn.info.password, autocommit=True) as other:
+            other.execute("SET lock_timeout = '500ms'")
+            other.execute("UPDATE outbox SET attempts = attempts")  # bloquerait si la ligne était verrouillée
+            seen.append(tuple(other.execute("SELECT next_attempt_at > now() FROM outbox").fetchone() or ()))
+        return httpx.Response(200)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        assert process_batch(conn, http, "http://bot/notify", "tok") == 1
+    assert seen == [(True,)]  # bail posé pendant l'appel : un second relais ne reprendrait pas l'événement
 
 
 def test_gives_up_after_max_attempts(conn: psycopg.Connection) -> None:
@@ -72,7 +89,7 @@ def test_failure_schedules_next_attempt_with_backoff(conn: psycopg.Connection) -
     _insert(conn, "log", {"text": "fail"})
     conn.execute("UPDATE outbox SET attempts = 20")
     with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503))) as http:
-        assert process_batch(conn, http, "http://bot/notify", "tok") == 0
+        assert process_batch(conn, http, "http://bot/notify", "tok") == 1
     delay = conn.execute("SELECT extract(epoch FROM next_attempt_at - now()) FROM outbox").fetchone()
     assert delay is not None and 3500 < float(delay[0]) <= 3600
 
@@ -89,7 +106,7 @@ def test_400_is_permanent_and_not_retried(conn: psycopg.Connection, caplog: pyte
 
     with caplog.at_level("WARNING", logger="sancturai-relay"):
         with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-            assert process_batch(conn, http, "http://bot/notify", "tok") == 0
+            assert process_batch(conn, http, "http://bot/notify", "tok") == 1
             conn.execute("UPDATE outbox SET next_attempt_at = now()")
             assert process_batch(conn, http, "http://bot/notify", "tok") == 0
     assert calls == 1

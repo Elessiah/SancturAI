@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from sqlalchemy import delete, func, text
 
@@ -24,7 +25,6 @@ async def purge_old_rows(state: AppState) -> None:
 
 
 async def run_maintenance_once(state: AppState) -> None:
-    await purge_old_rows(state)
     alert = state.disk.should_alert()  # ne lève pas (sonde fail-closed) : calculée avant take()
     errors = state.errors.take()
     if not errors and not alert:
@@ -43,10 +43,20 @@ async def run_maintenance_once(state: AppState) -> None:
         raise
 
 
+PURGE_EVERY_SECONDS = 3600.0  # outbox sans index sur sent_at/created_at : pas de balayage chaque minute
+
+
 async def maintenance_loop(state: AppState, interval: float = 60.0) -> None:
+    last_purge = float("-inf")
     while True:
         await asyncio.sleep(interval)
         try:
             await run_maintenance_once(state)
         except Exception:  # la boucle ne doit jamais mourir
             log.exception("maintenance failed")
+        if time.monotonic() - last_purge >= PURGE_EVERY_SECONDS:
+            last_purge = time.monotonic()  # en cas d'échec, nouvel essai à l'heure suivante
+            try:
+                await purge_old_rows(state)
+            except Exception:  # indépendante du flush des erreurs/alertes
+                log.exception("purge failed")
