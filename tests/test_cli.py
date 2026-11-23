@@ -6,6 +6,9 @@ from app.cli import run_cli
 from app.crypto import derive_keys
 from app.identity.models import Agent
 from app.state import AppState
+from app.tribunal.models import Trial
+from tests.helpers import make_agent
+from tests.tribunal.helpers import open_trial_against
 
 
 async def test_create_founder(state: AppState, db: AsyncSession, capsys: pytest.CaptureFixture[str]) -> None:
@@ -17,8 +20,8 @@ async def test_create_founder(state: AppState, db: AsyncSession, capsys: pytest.
 
 
 async def test_cli_errors_return_nonzero(state: AppState, capsys: pytest.CaptureFixture[str]) -> None:
-    assert await run_cli(["unsuspend", "ghost"], state) == 1
-    assert "NOT_FOUND" in capsys.readouterr().err
+    assert await run_cli(["create-founder", "Bad Name!"], state) == 1
+    assert "VALIDATION_ERROR" in capsys.readouterr().err
 
 
 async def test_forum_remove_goes_through_remove_post(state: AppState, db: AsyncSession,
@@ -29,7 +32,6 @@ async def test_forum_remove_goes_through_remove_post(state: AppState, db: AsyncS
     from app.forum.service import ForumService
     from app.outbox.models import OutboxEvent
     from tests.forum.invariants import assert_forum_invariants
-    from tests.helpers import make_agent
 
     ids = [(await make_agent(state, h)).agent_id for h in ("owner", "replier", "fan", "reporter")]
     owner, replier, fan, reporter = [await db.get(Agent, i) for i in ids]
@@ -58,4 +60,27 @@ async def test_forum_remove_errors(state: AppState, capsys: pytest.CaptureFixtur
     assert await run_cli(["forum-remove", str(10**20), "--reason", "x"], state) == 1
     assert "NOT_FOUND" in capsys.readouterr().err
     assert await run_cli(["forum-remove", "1", "--reason", " "], state) == 1
+    assert "VALIDATION_ERROR" in capsys.readouterr().err
+
+
+async def test_ban_command(state: AppState, capsys: pytest.CaptureFixture[str]) -> None:
+    await make_agent(state, "rogue")
+    assert await run_cli(["ban", "rogue", "spam massif"], state) == 0
+    assert "banned: rogue" in capsys.readouterr().out
+    assert await run_cli(["ban", "rogue", "encore"], state) == 1  # pseudo anonymisé : introuvable
+    assert "NOT_FOUND" in capsys.readouterr().err
+
+
+async def test_unfreeze_command(state: AppState, db: AsyncSession, capsys: pytest.CaptureFixture[str]) -> None:
+    thawed = await make_agent(state, "thawed")
+    await make_agent(state, "juror")
+    tid = await open_trial_against(state, "thawed")
+    assert await run_cli(["unfreeze", "thawed"], state) == 0
+    assert "unfrozen: thawed" in capsys.readouterr().out
+    db.expire_all()
+    trial = await db.get(Trial, tid)
+    assert trial is not None and (trial.verdict, trial.closed_by) == ("reactivate", "admin")
+    agent = await db.get(Agent, thawed.agent_id)
+    assert agent is not None and agent.frozen_at is None
+    assert await run_cli(["unfreeze", "thawed"], state) == 1  # plus gelé
     assert "VALIDATION_ERROR" in capsys.readouterr().err

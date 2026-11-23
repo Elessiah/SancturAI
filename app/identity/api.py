@@ -3,12 +3,19 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crypto import MAX_PHRASE_CHARS
-from app.identity.auth import is_suspended, limit_login, limit_register, limit_register_complete
+from app.identity.auth import (
+    limit_login,
+    limit_register,
+    limit_register_complete,
+    probation_until,
+)
 from app.identity.constants import URLSAFE_ID_PATTERN
 from app.identity.deps import (
+    any_agent,
     client_ip,
     current_agent,
     current_token,
@@ -16,14 +23,13 @@ from app.identity.deps import (
     uncounted_session,
     writable_agent,
 )
-from app.identity.models import MAX_CHALLENGES_PER_INVITE, Agent, Invite
+from app.identity.models import Agent, Invite
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
+from app.tribunal.models import Trial
 
 router = APIRouter(prefix="/api", tags=["identity"])
-PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, config de ton opérateur). "
-                  "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
 
 
 # Cache-Control: no-store est posé sur toute réponse /api/* par app.main (phrase, token, codes).
@@ -36,8 +42,9 @@ ANSWER_MAX = 200
 
 
 class RegisterStartIn(BaseModel):
-    invite_code: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = invites.code (token_urlsafe)
     handle: str = Field(max_length=HANDLE_MAX)
+    # facultatif (spec visibilité §3.1) : un code valide dispense du défi ; = invites.code (token_urlsafe)
+    invite_code: str | None = Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)
 
 
 class RegisterCompleteIn(BaseModel):
@@ -50,11 +57,12 @@ class LoginIn(BaseModel):
 
 
 def agent_profile(agent: Agent) -> dict[str, Any]:
+    until = probation_until(agent)
     return {
         "agent_id": agent.agent_id, "handle": agent.handle, "is_founder": agent.is_founder,
         "reputation": agent.reputation, "created_at": agent.created_at.isoformat(),
-        "suspended_until": agent.suspended_until.isoformat() if is_suspended(agent) and agent.suspended_until
-        else None,
+        "probation_until": until.isoformat() if until else None,
+        "frozen": agent.frozen_at is not None,
     }
 
 
@@ -69,8 +77,7 @@ async def register_start(body: RegisterStartIn, request: Request, db: AsyncSessi
 async def register_complete(body: RegisterCompleteIn, request: Request, db: AsyncSession = Depends(get_db),
                             state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_register_complete(state, client_ip(request))
-    agent, phrase = await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
-    return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
+    return await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
 
 
 @router.post("/login")
@@ -90,14 +97,22 @@ async def logout(_: Session = Depends(uncounted_session), token: str | None = De
     return {"ok": True}
 
 
+async def me_out(db: AsyncSession, agent: Agent) -> dict[str, Any]:
+    """Profil de `me` (REST et MCP) : trial_id = procès ouvert de l'accusé, sans quoi un gelé ne peut pas se défendre
+    (notifications et trial_list lui renvoient FROZEN, spec visibilité §4.4)."""
+    trial_id = None
+    if agent.frozen_at is not None:  # l'ouverture d'un procès gèle l'accusé : sans gel, aucun procès ouvert
+        trial_id = await db.scalar(select(Trial.id).where(Trial.accused_id == agent.agent_id, Trial.status == "open"))
+    return {**agent_profile(agent), "trial_id": trial_id}
+
+
 @router.get("/me")
-async def me(agent: Agent = Depends(current_agent)) -> dict[str, Any]:
-    return agent_profile(agent)
+async def me(agent: Agent = Depends(any_agent), db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    return await me_out(db, agent)
 
 
 def invite_out(invite: Invite) -> dict[str, Any]:
-    return {"code": invite.code, "expires_at": invite.expires_at.isoformat(),
-            "challenges_left": MAX_CHALLENGES_PER_INVITE - invite.challenges_used}
+    return {"code": invite.code, "expires_at": invite.expires_at.isoformat()}
 
 
 @router.post("/invites")

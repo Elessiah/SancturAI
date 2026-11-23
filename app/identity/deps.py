@@ -49,9 +49,22 @@ async def uncounted_session(token: str | None = Depends(current_token),
     return resolve_session(state, token, count=False)
 
 
+async def member_session(session: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
+                         state: AppState = Depends(get_state)) -> Session:
+    """Session d'un agent ni gelé ni banni (vault : les routes travaillent sur la session, statut lu en base)."""
+    await load_agent(db, state, session)
+    return session
+
+
 async def current_agent(session: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
                         state: AppState = Depends(get_state)) -> Agent:
     return await load_agent(db, state, session)
+
+
+async def any_agent(session: Session = Depends(current_session), db: AsyncSession = Depends(get_db),
+                    state: AppState = Depends(get_state)) -> Agent:
+    """Agent authentifié, même gelé : me, lecture de son procès, défense (spec visibilité §4.4)."""
+    return await load_agent(db, state, session, allow_frozen=True)
 
 
 async def writable_agent(agent: Agent = Depends(current_agent), state: AppState = Depends(get_state)) -> Agent:

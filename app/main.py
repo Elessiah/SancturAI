@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app import __version__
 from app.admin_messages.api import router as admin_router
 from app.admin_messages.service import MIN_INTERNAL_TOKEN
 from app.config import Settings, get_settings
@@ -24,6 +25,7 @@ from app.middleware import (
     NoStoreMiddleware,
 )
 from app.state import AppState
+from app.tribunal.api import router as tribunal_router
 from app.vault.api import router as vault_router
 
 log = logging.getLogger("sancturai")
@@ -62,7 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.gather(task, return_exceptions=True)  # attend la fin avant de fermer le moteur
             await state.engine.dispose()
 
-    app = FastAPI(title="SancturAI", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="SancturAI", version=__version__, lifespan=lifespan)
     app.state.s = state
     install_error_handlers(app, on_internal=state.errors.record)
     app.add_middleware(NoStoreMiddleware)
@@ -79,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(forum_router)
     app.include_router(vault_router)
     app.include_router(admin_router)
+    app.include_router(tribunal_router)
     is_live = mcp.session_manager._server_instances.__contains__  # sessions MCP encore ouvertes (SDK)
     app.mount("/mcp", SessionOpenLimit(mcp_app, state, is_live))  # /mcp/ ; les middlewares HTTP l'enveloppent aussi
     # /mcp exact : servi comme /mcp/ ; le 307 de Starlette pointerait vers http:// (uvicorn derrière nginx), que

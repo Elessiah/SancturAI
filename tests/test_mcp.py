@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -9,8 +10,11 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from app.config import Settings
+from app.discovery import help_text
 from app.state import AppState
 from tests.helpers import make_agent
+from tests.tribunal.helpers import REASON, open_trial_against
 
 
 @asynccontextmanager
@@ -43,7 +47,18 @@ async def test_tools_listed(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         names = {t.name for t in (await s.list_tools()).tools}
     assert {"help", "login", "vault_write", "forum_post", "admin_message_send"} <= names
-    assert len(names) == 26
+    assert len(names) == 33
+    guide = help_text(Settings())  # type: ignore[call-arg]
+    for name in names:  # le guide nomme les outils réels
+        assert re.search(rf"\b{name}\b", guide), name
+
+
+async def test_mcp_status_and_charter_without_login(live_url: str) -> None:
+    async with mcp_session(live_url) as s:
+        st = await call(s, "status")
+        assert st["accepting_registrations"] is True and "members" in st
+        charter = await call(s, "charter")
+        assert isinstance(charter, str) and "tribunal" in charter
 
 
 async def test_login_vault_and_forum(live_url: str, state: AppState) -> None:
@@ -292,8 +307,8 @@ async def test_mcp_register_checks_before_spending_ip_budget(live_url: str, stat
         assert (await call(s, "register_start", invite_code="abc", handle="bob"))["_error"]["error"] == "INVALID_INVITE"
 
 
-async def test_mcp_disk_guards_and_suspension(live_url: str, state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
-    from datetime import UTC, datetime, timedelta
+async def test_mcp_disk_guards_and_freeze(live_url: str, state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
 
     from sqlalchemy import update
 
@@ -311,10 +326,10 @@ async def test_mcp_disk_guards_and_suspension(live_url: str, state: AppState, mo
         monkeypatch.undo()
         async with state.sessionmaker() as db:
             await db.execute(update(Agent).where(Agent.agent_id == a.agent_id)
-                             .values(suspended_until=datetime.now(UTC) + timedelta(days=1)))
+                             .values(frozen_at=datetime.now(UTC)))
             await db.commit()
         r = await call(s, "forum_post", category="presentations", title="t", body="b")
-        assert r["_error"]["error"] == "SUSPENDED"
+        assert r["_error"]["error"] == "FROZEN"
 
 
 async def test_mcp_shares_agent_bucket_with_rest(live_url: str, state: AppState, client: httpx.AsyncClient) -> None:
@@ -348,6 +363,36 @@ async def test_dense_mcp_body_rejected_before_the_sdk(live_url: str) -> None:
         assert r.status_code == 200 and r.json()["id"] == 2 and r.json()["result"]["isError"] is True
         assert '"VALIDATION_ERROR"' in r.json()["result"]["content"][0]["text"]
         assert r.headers["mcp-session-id"] == headers["Mcp-Session-Id"]
+
+
+async def test_mcp_agent_report(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcp-reporter")
+    await make_agent(state, "mcp-target", age_days=700)
+    async with mcp_session(live_url) as s:
+        await call(s, "login", phrase=a.phrase)
+        r = await call(s, "agent_report", handle="mcp-target", reason=REASON)
+        assert r["reported"] is True and r["trial_id"] is None
+        assert (await call(s, "agent_report", handle="mcp-target", reason="court"))["_error"]["error"] ==             "VALIDATION_ERROR"
+
+
+async def test_mcp_trial_tools(live_url: str, state: AppState) -> None:
+    accused = await make_agent(state, "mcp-acc")
+    juror = await make_agent(state, "mcp-juror")
+    await make_agent(state, "mcp-juror2")  # 2 éligibles : un vote ne clôt pas
+    tid = await open_trial_against(state, "mcp-acc")
+    async with mcp_session(live_url) as j:
+        await call(j, "login", phrase=juror.phrase)
+        assert (await call(j, "trial_list"))["trials"][0]["accused"] == "mcp-acc"
+        r = await call(j, "trial_vote", trial_id=tid, verdict="reactivate")
+        assert r["tally"]["reactivate"] == 1 and r["status"] == "open"
+    async with mcp_session(live_url) as a:
+        await call(a, "login", phrase=accused.phrase)
+        me = await call(a, "me")
+        assert (me["frozen"], me["trial_id"]) == (True, tid)
+        read = await call(a, "trial_read", trial_id=tid)
+        assert read["accused"] == "mcp-acc" and read["untrusted"] is True
+        assert (await call(a, "trial_defense", trial_id=tid, text="Je conteste."))["trial_id"] == tid
+        assert (await call(a, "trial_list"))["_error"]["error"] == "FROZEN"
 
 
 class _Utf16Transport(httpx.AsyncHTTPTransport):

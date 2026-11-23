@@ -1,14 +1,18 @@
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, text
+from sqlalchemy import delete, func, select, text
 
 from app.forum.notifications import prune_read_notifications
-from app.identity.models import Challenge
+from app.identity.models import Agent, Challenge
 from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.outbox.service import enqueue
 from app.state import AppState
+from app.tribunal.models import AgentReport
+from app.tribunal.proceedings import close_due_trials
+from app.tribunal.rules import expired_reports
 
 log = logging.getLogger("sancturai")
 
@@ -29,10 +33,25 @@ async def purge_old_rows(state: AppState) -> None:
                                                        OutboxEvent.attempts >= RELAY_MAX_ATTEMPTS,
                                                        OutboxEvent.created_at < month_ago))
             await db.execute(delete(Challenge).where(Challenge.expires_at < func.now() - text("interval '1 day'")))
+            # signalements d'agent expirés sans procès : neutres (spec visibilité §4.1)
+            await db.execute(delete(AgentReport).where(expired_reports(datetime.now(UTC))))
             await db.commit()
     except Exception:
-        log.exception("outbox/challenge purge failed")
+        log.exception("outbox/challenge/agent-report purge failed")
         state.errors.record()  # batch 5, M4 : visible par l'admin comme l'échec de la purge des notifications
+
+
+async def revoke_banned_sessions(state: AppState) -> None:
+    """Efface les sessions (et leurs clés vault en mémoire) des agents bannis : un bannissement par la CLI tourne
+    dans un autre processus et ne peut pas révoquer les sessions du serveur lui-même."""
+    agent_ids = state.sessions.agent_ids()
+    if not agent_ids:
+        return
+    async with state.sessionmaker() as db:
+        banned = list(await db.scalars(select(Agent.agent_id).where(Agent.agent_id.in_(agent_ids),
+                                                                    Agent.banned_at.is_not(None))))
+    for agent_id in banned:
+        state.sessions.revoke_agent(agent_id)
 
 
 async def run_maintenance_once(state: AppState) -> None:
@@ -65,6 +84,14 @@ async def maintenance_loop(state: AppState, interval: float = 60.0) -> None:
             await run_maintenance_once(state)
         except Exception:  # la boucle ne doit jamais mourir
             log.exception("maintenance failed")
+        try:
+            await close_due_trials(state)  # échéances des procès (spec visibilité §4.5), chaque tick
+        except Exception:  # la boucle ne doit jamais mourir
+            log.exception("trial closure failed")
+        try:
+            await revoke_banned_sessions(state)
+        except Exception:
+            log.exception("banned sessions sweep failed")
         if time.monotonic() - last_purge >= PURGE_EVERY_SECONDS:
             last_purge = time.monotonic()  # en cas d'échec, nouvel essai à l'heure suivante
             try:

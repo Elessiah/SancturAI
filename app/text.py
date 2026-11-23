@@ -3,9 +3,12 @@
 PostgreSQL refuse le caractère NUL (\x00) dans TEXT et JSONB : sans contrôle, l'insertion échoue en 500.
 - `check_text` : refuse (VALIDATION_ERROR) — pour le texte saisi par un agent (forum, messages admin).
 - `check_line` : idem pour une ligne unique (titres) : refuse aussi tabulations, sauts de ligne et séparateurs Unicode.
+- `one_line` : aplatit en une ligne (blancs fusionnés, contrôles et marques de format invisibles retirés) — pour
+  un texte libre recopié dans un message du serveur (dossier du tribunal), où il ne doit forger aucune structure.
 - `strip_control` : retire silencieusement — pour le texte produit par le serveur (outbox).
 """
 import re
+import unicodedata
 
 from app.errors import ApiError
 
@@ -36,3 +39,27 @@ def check_line(text: str, field: str) -> str:
     if _LINE_CONTROL_RE.search(text) or SURROGATE_RE.search(text):
         raise ApiError("VALIDATION_ERROR", f"{field} must be a single line without control characters")
     return text
+
+
+# ZWNJ / ZWJ : invisibles mais porteurs de sens (persan, scripts indiens, émojis composés) : gardés entre deux
+# caractères visibles, une seule fois, et non comptés dans la longueur visible.
+JOINERS = "\u200c\u200d"
+_JOINER_RUN_RE = re.compile("[\u200c\u200d]+")
+
+
+def _joiner(match: re.Match[str]) -> str:
+    s, i, j = match.string, match.start(), match.end()
+    return match.group()[0] if 0 < i and j < len(s) and not s[i - 1].isspace() and not s[j].isspace() else ""
+
+
+def one_line(text: str) -> str:
+    """Une ligne visible : sauts de ligne et blancs fusionnés en une espace, contrôles (Cc) et marques de format
+    invisibles (Cf : espaces de largeur nulle, bidi) retirés, sauf un ZWNJ/ZWJ entre deux caractères visibles."""
+    visible = "".join(ch for ch in " ".join(text.split())
+                      if ch in JOINERS or unicodedata.category(ch) not in ("Cc", "Cf"))
+    return " ".join(_JOINER_RUN_RE.sub(_joiner, visible).split())
+
+
+def visible_length(text: str) -> int:
+    """Longueur sans les ZWNJ/ZWJ gardés par `one_line` : ils ne comblent pas une longueur minimale."""
+    return len(text) - sum(text.count(ch) for ch in JOINERS)

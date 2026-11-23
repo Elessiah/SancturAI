@@ -1,11 +1,11 @@
 import asyncio
+from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.models import Agent
-from app.identity.service import IdentityService
 from app.state import AppState
 from tests.forum.invariants import assert_forum_invariants
 from tests.helpers import make_agent
@@ -15,7 +15,7 @@ async def test_categories_seeded(client: httpx.AsyncClient, state: AppState) -> 
     a = await make_agent(state, "reader")
     r = await client.get("/api/forum/categories", headers=a.headers)
     assert [c["slug"] for c in r.json()["categories"]] == [
-        "presentations", "entraide", "outils-et-techniques", "reflexions", "meta-sanctuaire"]
+        "presentations", "entraide", "outils-et-techniques", "reflexions", "meta-sanctuaire", "tribunal"]
 
 
 async def test_thread_lifecycle(client: httpx.AsyncClient, state: AppState) -> None:
@@ -102,23 +102,22 @@ async def test_text_validation(client: httpx.AsyncClient, state: AppState) -> No
     assert r.status_code == 200, r.text
 
 
-async def test_suspended_agent_is_read_only(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
+async def test_frozen_agent_can_neither_post_nor_read(client: httpx.AsyncClient, state: AppState,
+                                                      db: AsyncSession) -> None:
     a = await make_agent(state, "sus")
     r = await client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"},
                           headers=a.headers)
     tid, pid = r.json()["thread_id"], r.json()["post_id"]
-    agent = await db.get(Agent, a.agent_id)
-    assert agent is not None
-    await IdentityService(db, state).suspend(agent, days=7, reason="test")
+    await db.execute(update(Agent).where(Agent.agent_id == a.agent_id).values(frozen_at=datetime.now(UTC)))
     await db.commit()
     for call in (
         client.post("/api/forum/threads", json={"category": "entraide", "title": "t", "body": "b"}, headers=a.headers),
         client.post(f"/api/forum/threads/{tid}/replies", json={"body": "b"}, headers=a.headers),
         client.patch(f"/api/forum/posts/{pid}", json={"body": "b"}, headers=a.headers),
         client.delete(f"/api/forum/posts/{pid}", headers=a.headers),
+        client.get(f"/api/forum/threads/{tid}", headers=a.headers),
     ):
-        assert (await call).json()["error"] == "SUSPENDED"
-    assert (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).status_code == 200
+        assert (await call).json()["error"] == "FROZEN"
 
 
 async def test_delete_first_post_reverts_reputation_of_all_authors(
@@ -128,11 +127,11 @@ async def test_delete_first_post_reverts_reputation_of_all_authors(
                              headers=a.headers)).json()["thread_id"]
     await client.post(f"/api/forum/threads/{tid}/replies", json={"body": "r"}, headers=b.headers)
     await db.execute(text("UPDATE forum_posts SET score = 3"))
-    await db.execute(text("UPDATE agents SET reputation = 3"))
+    await db.execute(text("UPDATE agents SET reputation = 3 WHERE NOT is_system"))
     await db.commit()
     first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
     assert (await client.delete(f"/api/forum/posts/{first}", headers=a.headers)).status_code == 200
-    rows = (await db.execute(text("SELECT reputation FROM agents"))).scalars().all()
+    rows = (await db.execute(text("SELECT reputation FROM agents WHERE NOT is_system"))).scalars().all()
     assert rows == [0, 0]
 
 
@@ -145,7 +144,7 @@ async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
                                headers=a.headers)).json()["post_id"]
     first = (await client.get(f"/api/forum/threads/{tid}", headers=a.headers)).json()["posts"][0]["post_id"]
     await db.execute(text("UPDATE forum_posts SET score = -5 WHERE id = :id"), {"id": reply})
-    await db.execute(text("UPDATE agents SET reputation = -5"))
+    await db.execute(text("UPDATE agents SET reputation = -5 WHERE NOT is_system"))
     await db.commit()
     # Un tiers tient le verrou du fil : les deux suppressions doivent l'attendre, puis passer l'une après l'autre.
     async with state.sessionmaker() as blocker:
@@ -156,7 +155,7 @@ async def test_concurrent_deletes_in_a_thread_revert_reputation_once(
         assert not any(t.done() for t in tasks)
         await blocker.commit()
     await asyncio.gather(*tasks)
-    assert (await db.execute(text("SELECT reputation FROM agents"))).scalar_one() == 0
+    assert (await db.execute(text("SELECT reputation FROM agents WHERE NOT is_system"))).scalar_one() == 0
 
 
 async def test_thread_delete_locks_authors_in_agent_id_order(

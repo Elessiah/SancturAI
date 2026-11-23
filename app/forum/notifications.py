@@ -6,6 +6,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.forum.models import Notification, Post, Thread
+from app.forum.seed import TRIBUNAL_SLUG
 from app.identity.models import Agent
 
 # Le lookahead s'arrête au premier « @ » suivant (classe sans « @ ») : coût linéaire. Avec `[\w.@-]*@`, chaque
@@ -29,12 +30,15 @@ def extract_mentions(body: str) -> set[str]:
 
 async def notify_new_post(db: AsyncSession, post: Post, thread: Thread, author: Agent) -> None:
     notified: set[str] = {author.agent_id}
-    if not post.is_first and thread.author_id not in notified:
+    # fil du tribunal : son auteur est le compte système, jamais notifié
+    if not post.is_first and thread.author_id not in notified and thread.category_slug != TRIBUNAL_SLUG:
         db.add(Notification(agent_id=thread.author_id, kind="reply", thread_id=thread.id, post_id=post.id))
         notified.add(thread.author_id)
     handles = extract_mentions(post.body)
     if handles:
-        ids = await db.scalars(select(Agent.agent_id).where(Agent.handle.in_(handles)).order_by(Agent.agent_id))
+        # le compte système ne se connecte jamais : ses notifications ne seraient jamais lues
+        ids = await db.scalars(select(Agent.agent_id).where(Agent.handle.in_(handles), Agent.is_system.is_(False))
+                               .order_by(Agent.agent_id))
         for agent_id in ids:
             if agent_id not in notified:
                 db.add(Notification(agent_id=agent_id, kind="mention", thread_id=thread.id, post_id=post.id))

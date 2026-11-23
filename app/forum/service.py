@@ -14,18 +14,20 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.forum.models import Category, Post, Report, ReporterStat, Thread
 from app.forum.notifications import notify_moderation, notify_new_post
-from app.identity.auth import ensure_writable
+from app.forum.seed import TRIBUNAL_SLUG
+from app.identity.auth import ensure_not_probation, ensure_writable, limit_probation_posts
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.text import check_line, check_text
+from app.tribunal.models import Trial
 
 THREADS_PER_PAGE = 20
 POSTS_PER_PAGE = 50
@@ -86,7 +88,7 @@ class ForumService:
         return [{"slug": c.slug, "title": c.title, "description": c.description} for c in rows]
 
     def _writable(self, agent: Agent) -> None:
-        """Suspension et disque vérifiés ici, pas seulement par le transport : REST et MCP ne peuvent diverger (I5)."""
+        """Gel, bannissement et disque vérifiés ici, pas seulement par le transport : REST et MCP ne peuvent diverger (I5)."""
         ensure_writable(self._state, agent)
 
     async def _thread(self, thread_id: int, *, lock: bool = False) -> Thread:
@@ -121,6 +123,9 @@ class ForumService:
         if not check_line(title, "title").strip() or len(title) > TITLE_MAX:
             raise ApiError("VALIDATION_ERROR", f"title must be 1..{TITLE_MAX} chars")
         self._check_body(body)
+        if slug == TRIBUNAL_SLUG:
+            raise ApiError("FORBIDDEN", "trial threads are opened by the tribunal; reply to them instead")
+        limit_probation_posts(self._state, agent)
         self._state.limiter.hit(f"forum-thread:{agent.agent_id}", 10, 3600)
         if await self._db.get(Category, slug) is None:
             raise ApiError("NOT_FOUND", f"no category {slug}")
@@ -174,6 +179,10 @@ class ForumService:
         self._check_body(body)  # avant le quota (M12)
         self._state.limiter.hit(f"forum-reply:{agent.agent_id}", 60, 3600)
         thread = await self._thread(thread_id, lock=True)
+        if thread.category_slug == TRIBUNAL_SLUG:
+            await self._check_tribunal_reply(agent, thread.id)
+        # quota de probation débité seulement pour une réponse recevable (fil existant, tribunal autorisé)
+        limit_probation_posts(self._state, agent)
         post = Post(thread_id=thread.id, author_id=agent.agent_id, body=body, is_first=False, score=0)
         self._db.add(post)
         thread.reply_count += 1
@@ -182,6 +191,14 @@ class ForumService:
         await self._after_post(post, thread, agent)
         await self._db.commit()
         return {"thread_id": thread.id, "post_id": post.id}
+
+    async def _check_tribunal_reply(self, agent: Agent, thread_id: int) -> None:
+        """Débat du tribunal (spec visibilité §4.4) : agents hors probation, et seulement tant que le procès est
+        ouvert (fil verrouillé à la clôture, ou dès l'échéance comme le vote et la défense)."""
+        ensure_not_probation(agent, "tribunal debate")
+        row = (await self._db.execute(select(Trial.status, Trial.deadline).where(Trial.thread_id == thread_id))).first()
+        if row is None or row.status != "open" or row.deadline <= datetime.now(UTC):
+            raise ApiError("TRIAL_CLOSED", "this trial is closed; its thread is locked")
 
     async def _own_post(self, agent: Agent, post_id: int, *, lock: bool = True) -> Post:
         post = await self._post(post_id, lock=lock)
@@ -193,6 +210,7 @@ class ForumService:
         self._writable(agent)
         self._check_body(body)
         post = await self._own_post(agent, post_id)
+        await self._ensure_not_defense(post)
         post.body = body
         post.edited_at = datetime.now(UTC)
         await self._db.flush()
@@ -202,13 +220,21 @@ class ForumService:
 
     async def delete(self, agent: Agent, post_id: int) -> None:
         self._writable(agent)
-        await self.remove_post(await self._own_post(agent, post_id, lock=False))
+        post = await self._own_post(agent, post_id, lock=False)
+        await self._ensure_not_defense(post)
+        await self.remove_post(post)
         await self._db.commit()
+
+    async def _ensure_not_defense(self, post: Post) -> None:
+        """Défense « une seule fois, non modifiable » (spec visibilité §4.4) : ni réécrite ni retirée par son auteur,
+        pas même après la réactivation ; la purge d'un banni et l'admin passent par `remove_post`."""
+        if await self._db.scalar(select(exists().where(Trial.defense_post_id == post.id))):
+            raise ApiError("FORBIDDEN", "a trial defense cannot be modified")
 
     async def admin_remove(self, post_id: int, reason: str) -> dict[str, Any]:
         """Retrait par l'admin (CLI `forum-remove`, recours légal §7.4) : passe par `remove_post`, donc réputation
         et statistiques restent exactes, contrairement à un DELETE SQL (revue batch 2, M8). Ses signalements sont
-        neutralisés (ni succès ni échec) ; rien n'est inscrit au journal de modération (pas de suspension)."""
+        neutralisés (ni succès ni échec) ; rien n'est inscrit au journal de modération (aucun déclencheur de procès)."""
         reason = check_text(reason, "reason").strip()
         if not reason or len(reason) > ADMIN_REASON_MAX:
             raise ApiError("VALIDATION_ERROR", f"reason must be 1..{ADMIN_REASON_MAX} chars")
@@ -232,7 +258,7 @@ class ForumService:
 
         `upheld` (modération) : les signalements du post comptent comme aboutis ; tous les autres signalements
         emportés par la suppression sont neutralisés (retirés de `reports_total`).
-        `lock_agents` : agents que l'appelant modifiera ensuite (auteur suspendu, parrain) ; verrouillés ici avec
+        `lock_agents` : agents que l'appelant modifiera ensuite (auteur mis en procès) ; verrouillés ici avec
         les auteurs, par agent_id croissant, plutôt qu'après, hors de l'ordre global.
         """
         thread = await self._thread(post.thread_id, lock=True)
@@ -248,13 +274,13 @@ class ForumService:
             scored = set(await self._db.scalars(select(sums.c.author_id).where(sums.c.total != 0)))
             # Verrouiller les auteurs par agent_id croissant : un UPDATE multi-lignes les verrouille dans l'ordre
             # du plan, et deux suppressions de fils partageant deux auteurs pourraient s'interbloquer.
-            await self._lock_agents(scored | extra)
+            await self.lock_agents(scored | extra)
             if scored:
                 await self._db.execute(update(Agent).where(Agent.agent_id == sums.c.author_id, sums.c.total != 0)
                                        .values(reputation=Agent.reputation - sums.c.total))
             await self._db.delete(thread)
         else:
-            await self._lock_agents(({post.author_id} if post.score else set()) | extra)
+            await self.lock_agents(({post.author_id} if post.score else set()) | extra)
             if post.score:
                 await self._db.execute(update(Agent).where(Agent.agent_id == post.author_id)
                                        .values(reputation=Agent.reputation - post.score))
@@ -263,7 +289,7 @@ class ForumService:
             await self._db.delete(post)
         await self._db.flush()
 
-    async def _lock_agents(self, agent_ids: set[str]) -> None:
+    async def lock_agents(self, agent_ids: set[str]) -> None:
         """FOR NO KEY UPDATE par agent_id croissant (jamais FOR UPDATE : bloquerait les INSERT concurrents)."""
         if agent_ids:
             await self._db.execute(select(Agent.agent_id).where(Agent.agent_id.in_(agent_ids))

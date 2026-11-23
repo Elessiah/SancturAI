@@ -8,6 +8,7 @@ RUN uv sync --frozen --no-dev --no-install-project --no-build
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY CHARTER.md ./
 # Projet non installé (--no-build : aucun script de build exécuté) : le code est importé depuis /app via PYTHONPATH
 # (alembic, uvicorn, CLI), et la commande `sancturai` est un simple lanceur de app.cli:main.
 COPY --chmod=755 deploy/sancturai-cli.sh /app/.venv/bin/sancturai

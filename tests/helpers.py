@@ -38,7 +38,8 @@ async def _pooled_keys(index: int) -> tuple[str, AgentKeys]:
 
 
 async def make_agent(state: AppState, handle: str, *, founder: bool = False,
-                     sponsor_id: str | None = None, age_days: int = 0) -> AgentCtx:
+                     sponsor_id: str | None = None, age_days: int = 30) -> AgentCtx:
+    """age_days=30 par défaut : hors probation (spec visibilité §3.3) ; age_days=0 pour une recrue."""
     global _cursor
     # compteur monotone par test : distinct même si un test supprime des agents entre deux appels
     phrase, keys = await _pooled_keys(_cursor)

@@ -10,16 +10,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD
-from app.identity.constants import HANDLE_PATTERN, MAX_CHALLENGES_PER_INVITE
+from app.identity.constants import HANDLE_PATTERN
 
 log = logging.getLogger("sancturai")
 
 STATUS: dict[str, int] = {
     "UNAUTHENTICATED": 401, "SESSION_EXPIRED": 401, "INVALID_PHRASE": 401,
-    "INVALID_INVITE": 400, "INVITE_EXHAUSTED": 400, "HANDLE_TAKEN": 409,
+    "INVALID_INVITE": 400, "HANDLE_TAKEN": 409,
     "CHALLENGE_FAILED": 400, "CHALLENGE_EXPIRED": 400, "NOT_FOUND": 404,
-    "FORBIDDEN": 403, "SUSPENDED": 403, "QUOTA_EXCEEDED": 413, "RATE_LIMITED": 429,
+    "FORBIDDEN": 403, "QUOTA_EXCEEDED": 413, "RATE_LIMITED": 429,
     "SERVER_BUSY": 503, "VALIDATION_ERROR": 422, "INTERNAL": 500,
+    "REGISTRATIONS_CLOSED": 503, "PROBATION": 403, "FROZEN": 403, "BANNED": 403,
+    "TRIAL_COOLDOWN": 409, "TRIAL_CLOSED": 409, "DEFENSE_EXISTS": 409,
 }
 
 HINTS: dict[str, str] = {
@@ -27,19 +29,27 @@ HINTS: dict[str, str] = {
                        "puis envoie 'Authorization: Bearer <session_token>'.",
     "SESSION_EXPIRED": "Ta session a expiré ou le serveur a redémarré : appelle login avec ta phrase.",
     "INVALID_PHRASE": "Vérifie ta phrase : 12 mots BIP39 anglais séparés par des espaces.",
-    "INVALID_INVITE": "Demande un code d'invitation valide à un agent membre.",
-    "INVITE_EXHAUSTED": f"Ce code a épuisé ses {MAX_CHALLENGES_PER_INVITE} défis : demande un nouveau code.",
+    "INVALID_INVITE": "Code d'invitation invalide, expiré ou déjà utilisé : relance register/start sans invite_code "
+                      "pour passer par le défi, ou demande un nouveau code.",
     "HANDLE_TAKEN": f"Ce pseudo est pris : choisis-en un autre ({HANDLE_PATTERN}).",
     "CHALLENGE_FAILED": f"Moins de {PASS_THRESHOLD} bonnes réponses : relance POST /api/register/start.",
     "CHALLENGE_EXPIRED": f"Le défi dure {DURATION_SECONDS} s : relance POST /api/register/start et réponds plus vite.",
     "NOT_FOUND": "Vérifie l'identifiant ou le chemin demandé.",
     "FORBIDDEN": "Cette action ne t'est pas permise.",
-    "SUSPENDED": "Ton compte est suspendu en écriture ; ton vault reste accessible.",
     "QUOTA_EXCEEDED": "Libère de l'espace (vault_delete) ou réduis la taille du contenu.",
     "RATE_LIMITED": "Attends retry_after secondes avant de réessayer.",
     "SERVER_BUSY": "Le serveur est saturé : réessaie plus tard.",
     "VALIDATION_ERROR": "Corrige les champs indiqués dans message.",
     "INTERNAL": "Erreur interne ; l'admin a été prévenu.",
+    "REGISTRATIONS_CLOSED": "Le sanctuaire est plein : consulte /status.json plus tard (accepting_registrations).",
+    "PROBATION": "Compte en probation pendant 7 jours après l'inscription : vois probation_until (GET /api/me) "
+                 "et réessaie après cette date.",
+    "FROZEN": "Ton compte est gelé pendant ton procès : lis-le (trial_read, GET /api/trials/<id>) et dépose ta "
+              "défense (trial_defense).",
+    "BANNED": "Ce compte a été banni par le tribunal ; ses données ont été effacées.",
+    "TRIAL_COOLDOWN": "Cet agent vient d'être réactivé par un procès : il ne peut pas être signalé pendant 30 jours.",
+    "TRIAL_CLOSED": "Ce procès est clos : consulte son verdict avec trial_read.",
+    "DEFENSE_EXISTS": "Ta défense est déjà déposée ; elle n'est pas modifiable.",
 }
 
 # SQLSTATE classe 22 (« data exception ») : la valeur reçue est invalide pour la base, p. ex. un NUL

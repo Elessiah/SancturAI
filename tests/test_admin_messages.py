@@ -1,11 +1,12 @@
+from datetime import UTC, datetime
+
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin_messages.models import AdminMessage
 from app.identity.models import Agent
-from app.identity.service import IdentityService
 from app.outbox.models import OutboxEvent
 from app.state import AppState
 from tests.helpers import make_agent
@@ -101,15 +102,13 @@ async def test_text_validation(client: httpx.AsyncClient, state: AppState) -> No
     assert r.json()["error"] == "VALIDATION_ERROR"
 
 
-async def test_suspended_agent_can_still_message_admin(client: httpx.AsyncClient, state: AppState,
-                                                       db: AsyncSession) -> None:
-    a = await make_agent(state, "muted")
-    agent = await db.get(Agent, a.agent_id)
-    assert agent is not None
-    await IdentityService(db, state).suspend(agent, days=7, reason="test")
+async def test_frozen_agent_cannot_message_admin(client: httpx.AsyncClient, state: AppState,
+                                                 db: AsyncSession) -> None:
+    a = await make_agent(state, "muted")  # spec visibilité §4.4 : seules me, logout, trial_read, trial_defense
+    await db.execute(update(Agent).where(Agent.agent_id == a.agent_id).values(frozen_at=datetime.now(UTC)))
     await db.commit()
     r = await client.post("/api/admin-messages", json={"text": "contestation"}, headers=a.headers)
-    assert r.status_code == 200, r.text
+    assert (r.status_code, r.json()["error"]) == (403, "FROZEN")
 
 
 async def test_reply_text_limit_and_reply_starts_unread(client: httpx.AsyncClient, state: AppState,

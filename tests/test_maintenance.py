@@ -12,6 +12,8 @@ from app.forum.notifications import prune_read_notifications
 from app.maintenance import maintenance_loop, purge_old_rows, run_maintenance_once
 from app.outbox.models import RELAY_MAX_ATTEMPTS, OutboxEvent
 from app.state import AppState
+from app.tribunal.models import AgentReport
+from tests.helpers import make_agent
 
 Usage = namedtuple("Usage", "total used free")
 
@@ -214,3 +216,32 @@ async def test_outbox_purge_failure_is_counted(state: AppState, monkeypatch: pyt
     monkeypatch.setattr("app.maintenance.delete", boom)
     await purge_old_rows(state)
     assert state.errors.take() == 1
+
+
+async def test_purges_expired_pending_agent_reports(state: AppState, db: AsyncSession) -> None:
+    a, b = await make_agent(state, "purge-a"), await make_agent(state, "purge-b")
+    db.add_all([AgentReport(reporter_id=a.agent_id, target_id=b.agent_id, reason="r" * 200, weight=1.0,
+                            created_at=datetime.now(UTC) - timedelta(days=31)),
+                AgentReport(reporter_id=b.agent_id, target_id=a.agent_id, reason="r" * 200, weight=1.0)])
+    await db.commit()
+    await purge_old_rows(state)
+    assert list(await db.scalars(select(AgentReport.reporter_id))) == [b.agent_id]
+
+
+async def test_loop_closes_due_trials(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def noop(_s: AppState) -> None:
+        return None
+
+    async def fake_close(_s: AppState) -> int:
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr("app.maintenance.run_maintenance_once", noop)
+    monkeypatch.setattr("app.maintenance.close_due_trials", fake_close)
+    task = asyncio.create_task(maintenance_loop(state, 0.01))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) >= 2

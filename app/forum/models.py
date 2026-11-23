@@ -100,11 +100,16 @@ class ReporterStat(Base):
     # avant la détection du conflit, et `_settle_reports` y passe des deltas négatifs de `reports_total` ;
     # « successful <= total » n'est vrai qu'en fin de transaction (CHECK non différable). Test d'invariants :
     # tests/forum/invariants.py.
-    __table_args__ = (CheckConstraint("reports_successful >= 0", name="ck_reporter_stats_nonneg"),)
+    __table_args__ = (CheckConstraint("reports_successful >= 0", name="ck_reporter_stats_nonneg"),
+                      # signalements d'agent réglés à la clôture d'un procès (spec visibilité §4.6)
+                      CheckConstraint("agent_reports_successful BETWEEN 0 AND agent_reports_total",
+                                      name="ck_reporter_stats_agent_range"))
 
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id", ondelete="CASCADE"), primary_key=True)
     reports_total: Mapped[int] = mapped_column(Integer, default=0)
     reports_successful: Mapped[int] = mapped_column(Integer, default=0)
+    agent_reports_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    agent_reports_successful: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class ModerationLog(Base):

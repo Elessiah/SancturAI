@@ -17,6 +17,7 @@ from app.db import Base
 from app.forum.seed import seed_categories
 from app.main import create_app
 from app.state import AppState
+from app.tribunal.seed import seed_tribunal
 from tests.helpers import reset_key_pool_cursor
 
 
@@ -45,6 +46,7 @@ async def app(settings: Settings) -> AsyncIterator[FastAPI]:
     async with state.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await seed_categories(conn)
+        await seed_tribunal(conn)
     async with LifespanManager(application):
         yield application
 
@@ -66,6 +68,7 @@ async def _clean(request: pytest.FixtureRequest) -> AsyncIterator[None]:
         async with st.engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
             await seed_categories(conn)
+            await seed_tribunal(conn)
     st.reset_memory()
 
 

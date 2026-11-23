@@ -256,6 +256,7 @@ def test_dockerfile_matches_compose_and_ci() -> None:
     assert cmd is not None
     assert yaml.safe_load(cmd.group(1)) == compose()["services"]["app"]["command"]
     assert "USER 10001:33" in df and "--no-dev" in df
+    assert "COPY CHARTER.md ./" in df  # servie par GET /charter
     uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)", df)
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert uv is not None and f'version: "{uv.group(1)}"' in ci

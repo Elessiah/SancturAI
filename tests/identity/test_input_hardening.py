@@ -8,7 +8,7 @@ from sqlalchemy import text
 from app.errors import HINTS, ApiError, install_error_handlers
 from app.identity.auth import REGISTER_COMPLETE_RATE
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD
-from app.identity.constants import HANDLE_PATTERN, MAX_CHALLENGES_PER_INVITE
+from app.identity.constants import HANDLE_PATTERN
 from app.identity.models import HANDLE_CHECK
 from app.identity.service import HANDLE_RE, INSTRUCTIONS, IdentityService
 from app.state import AppState
@@ -126,7 +126,6 @@ async def test_derive_busy_gives_retry_after_and_registration_waits(state: AppSt
 def test_constants_have_a_single_source() -> None:
     assert HANDLE_RE.pattern == HANDLE_PATTERN and HANDLE_PATTERN in HANDLE_CHECK
     assert HANDLE_PATTERN in HINTS["HANDLE_TAKEN"]
-    assert f"{MAX_CHALLENGES_PER_INVITE} défis" in HINTS["INVITE_EXHAUSTED"]
     assert f"{PASS_THRESHOLD} bonnes" in HINTS["CHALLENGE_FAILED"] and f"{PASS_THRESHOLD} bonnes" in INSTRUCTIONS
     assert f"{DURATION_SECONDS} s" in HINTS["CHALLENGE_EXPIRED"] and f"{DURATION_SECONDS} secondes" in INSTRUCTIONS
 

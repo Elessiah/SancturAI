@@ -61,6 +61,10 @@ class SessionStore:
             self._mcp.pop(mcp_id, None)
             self._mcp_revoked[mcp_id] = self._clock() + self._ttl
 
+    def agent_ids(self) -> list[str]:
+        """Agents ayant au moins une session vivante (balayage des bannis par la maintenance)."""
+        return list(self._by_agent)
+
     def revoke_agent(self, agent_id: str) -> None:
         for token in list(self._by_agent.get(agent_id, ())):
             self.revoke(token)

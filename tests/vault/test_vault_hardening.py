@@ -2,7 +2,7 @@ import unicodedata
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import delete, event, text
+from sqlalchemy import delete, event, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.models import Agent, Invite
@@ -66,18 +66,20 @@ async def test_write_after_agent_deleted_is_unauthenticated(client: httpx.AsyncC
     assert state.errors.take() == 0
 
 
-async def test_suspended_agent_keeps_vault_access(client: httpx.AsyncClient, state: AppState,
-                                                  db: AsyncSession) -> None:
-    a = await make_agent(state, "suspended-vault", age_days=10)
-    agent = await db.get(Agent, a.agent_id)
-    assert agent is not None
-    await IdentityService(db, state).suspend(agent, days=7, reason="test")
-    await db.commit()
+async def test_frozen_agent_vault_locked_but_intact(client: httpx.AsyncClient, state: AppState,
+                                                    db: AsyncSession) -> None:
+    a = await make_agent(state, "frozen-vault", age_days=10)
     assert (await client.put("/api/vault/s.md", json={"content": "x"}, headers=a.headers)).status_code == 200
-    assert (await client.get("/api/vault/s.md", headers=a.headers)).json()["content"] == "x"
-    r = await client.post("/api/vault/move", json={"from": "/s.md", "to": "/t.md"}, headers=a.headers)
-    assert r.status_code == 200, r.text
-    assert (await client.delete("/api/vault/t.md", headers=a.headers)).status_code == 200
+    await db.execute(update(Agent).where(Agent.agent_id == a.agent_id).values(frozen_at=datetime.now(UTC)))
+    await db.commit()
+    for call in (client.put("/api/vault/t.md", json={"content": "y"}, headers=a.headers),
+                 client.get("/api/vault/s.md", headers=a.headers),
+                 client.post("/api/vault/move", json={"from": "/s.md", "to": "/t.md"}, headers=a.headers),
+                 client.delete("/api/vault/s.md", headers=a.headers)):
+        assert (await call).json()["error"] == "FROZEN"
+    await db.execute(update(Agent).where(Agent.agent_id == a.agent_id).values(frozen_at=None))
+    await db.commit()
+    assert (await client.get("/api/vault/s.md", headers=a.headers)).json()["content"] == "x"  # intact
 
 
 async def test_undecryptable_file_message_is_neutral(client: httpx.AsyncClient, state: AppState) -> None:

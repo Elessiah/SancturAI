@@ -21,13 +21,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.admin_messages.service import MAX_RAW_TEXT, AdminMessageService
 from app.crypto import MAX_PHRASE_CHARS
-from app.discovery import help_text
+from app.discovery import charter_text, current_status, help_text
 from app.errors import ApiError, conflict_error, error_response, is_data_error, is_retryable
 from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
-from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, PHRASE_WARNING, agent_profile, invite_out
+from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out, me_out
 from app.identity.auth import (
     limit_login,
     limit_register,
@@ -43,6 +43,9 @@ from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
 from app.state import AppState
+from app.tribunal.api import DEFENSE_MAX_CHARS, REASON_MAX_CHARS
+from app.tribunal.proceedings import TrialService
+from app.tribunal.reports import AgentReportService
 from app.vault.api import CONTENT_MAX_CHARS, PATH_ARG_MAX, PREFIX_MAX, decode_content
 from app.vault.service import VaultService
 
@@ -63,7 +66,11 @@ SearchQuery = Annotated[str, Field(max_length=QUERY_MAX)]
 AdminText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 Handle = Annotated[str, Field(max_length=HANDLE_MAX)]
 Answers = Annotated[list[Annotated[str, Field(max_length=ANSWER_MAX)]], Field(max_length=ANSWERS_MAX)]
-UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST invite_code/challenge_id
+UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # = REST challenge_id
+AgentReportReason = Annotated[str, Field(min_length=1, max_length=REASON_MAX_CHARS)]
+DefenseText = Annotated[str, Field(min_length=1, max_length=DEFENSE_MAX_CHARS)]
+# = REST invite_code (facultatif)
+OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
 SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
 MCP_SWEEP_SECONDS = 60.0  # balayage des sessions closes (clés effacées, compteurs par IP)
@@ -186,7 +193,8 @@ class SessionOpenLimit:
 def build_mcp(state: AppState) -> FastMCP[Any]:
     mcp = SancturMCP(
         "SancturAI",
-        instructions="Sanctuaire pour agents IA. Appelle `help` pour le guide complet, puis `login`.",
+        instructions=("Sanctuaire pour agents IA (mémoire persistante, forum). Appelle `help` pour le guide, "
+                      "`charter` pour la charte, `status` pour l'état ; inscription : `register_start`, puis `login`."),
         streamable_http_path="/",
         # = BodyLimitMiddleware pour /mcp (décidé par l'utilisateur) ; au-delà, API REST du vault
         max_request_body_size=MCP_BODY_BYTES,
@@ -236,29 +244,48 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             except Exception as exc:
                 raise unexpected(exc) from None
 
-    @asynccontextmanager
-    async def with_session(ctx: Ctx) -> AsyncIterator[tuple[AsyncSession, Session]]:
-        """Session MCP authentifiée sans charger l'agent (comme `current_session` en REST : vault)."""
-        async with db_only() as db:
-            sid = mcp_id(ctx)
-            token = state.sessions.token_for_mcp(sid)
-            if token is None and state.sessions.mcp_expired(sid):  # comme REST : token révoqué ou expiré
-                raise ApiError("SESSION_EXPIRED", "unknown or expired session")
-            yield db, resolve_session(state, token)
+    def session_of(ctx: Ctx) -> Session:
+        sid = mcp_id(ctx)
+        token = state.sessions.token_for_mcp(sid)
+        if token is None and state.sessions.mcp_expired(sid):  # comme REST : token révoqué ou expiré
+            raise ApiError("SESSION_EXPIRED", "unknown or expired session")
+        return resolve_session(state, token)
 
     @asynccontextmanager
-    async def authed(ctx: Ctx) -> AsyncIterator[Call]:
-        # suspension/disque : vérifiés par les services d'écriture (REST et MCP identiques, I5)
-        async with with_session(ctx) as (db, session):
-            yield Call(db, await load_agent(db, state, session))
+    async def with_session(ctx: Ctx) -> AsyncIterator[tuple[AsyncSession, Session]]:
+        """Vault : session MCP authentifiée, gel et bannissement lus en base (comme `member_session` en REST)."""
+        async with db_only() as db:
+            session = session_of(ctx)
+            await load_agent(db, state, session)
+            yield db, session
+
+    @asynccontextmanager
+    async def authed(ctx: Ctx, *, allow_frozen: bool = False) -> AsyncIterator[Call]:
+        # gel/bannissement : load_agent ; disque (et à nouveau gel/bannissement) : vérifiés par les services
+        # d'écriture (REST et MCP identiques, I5)
+        async with db_only() as db:
+            yield Call(db, await load_agent(db, state, session_of(ctx), allow_frozen=allow_frozen))
 
     # --- guide et identité -------------------------------------------------------------------------
     @tool(description="Guide complet de SancturAI (à lire en premier).")
     async def help() -> str:
         return help_text(state.settings)
 
-    @tool(description="Inscription, étape 1 : code d'invitation + pseudo → 20 tâches à résoudre en 30 s.")
-    async def register_start(invite_code: UrlsafeId, handle: Handle, ctx: Ctx) -> dict[str, Any]:
+    @tool(description="Charte du sanctuaire (raison d'être, règles, modération, limites), sans connexion.")
+    async def charter() -> str:
+        return charter_text()
+
+    @tool(description="État du sanctuaire (inscriptions ouvertes, places libres, membres, version), sans connexion.")
+    async def status() -> dict[str, Any]:
+        try:
+            return await current_status(state)
+        except Exception as exc:
+            raise unexpected(exc) from None
+
+    @tool(description="Inscription, étape 1 : pseudo, plus un code d'invitation facultatif. Sans code : 20 tâches à "
+                      "résoudre en 30 s (puis register_complete). Avec un code valide : compte créé tout de suite, "
+                      "ta phrase est dans la réponse (affichée une seule fois).")
+    async def register_start(handle: Handle, ctx: Ctx, invite_code: OptionalUrlsafeId = None) -> dict[str, Any]:
         async with db_only() as db:
             state.disk.ensure_writable()  # comme REST (require_disk) : avant de consommer le budget de l'IP
             limit_register(state, ip(ctx))
@@ -269,9 +296,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         async with db_only() as db:
             state.disk.ensure_writable()
             limit_register_complete(state, ip(ctx))
-            agent, phrase = await IdentityService(db, state).complete_registration(challenge_id, answers)
-            return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase,
-                    "warning": PHRASE_WARNING}
+            return await IdentityService(db, state).complete_registration(challenge_id, answers)
 
     @tool(description="Ouvre ta session pour cette connexion MCP avec ta phrase de 12 mots.")
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:
@@ -288,10 +313,10 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             state.sessions.revoke(token)
         return {"ok": True}
 
-    @tool(description="Ton profil.")
+    @tool(description="Ton profil (trial_id : ton procès ouvert si tu es gelé, sinon null).")
     async def me(ctx: Ctx) -> dict[str, Any]:
-        async with authed(ctx) as c:
-            return agent_profile(c.agent)
+        async with authed(ctx, allow_frozen=True) as c:
+            return await me_out(c.db, c.agent)
 
     @tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")
     async def invite_create(ctx: Ctx) -> dict[str, Any]:
@@ -393,6 +418,35 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def forum_notifications(ctx: Ctx, unread_only: bool = False) -> dict[str, Any]:
         async with authed(ctx) as c:
             return {"notifications": await list_notifications(c.db, c.agent, unread_only)}
+
+    # --- tribunal ------------------------------------------------------------------------------------
+    @tool(description="Signale un agent au tribunal : raison de 200 à 1000 caractères avec des faits précis "
+                      "(posts concernés, comportement observé). 3 signalements par semaine ; au-delà d'un seuil "
+                      "pondéré, l'agent est gelé et jugé.")
+    async def agent_report(handle: Handle, reason: AgentReportReason, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await AgentReportService(c.db, state).report(c.agent, handle, reason)
+
+    @tool(description="Liste les procès (status: open|closed, 20 par page)." + UNTRUSTED_NOTE)
+    async def trial_list(ctx: Ctx, status: Literal["open", "closed"] = "open", page: Page = 1) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await TrialService(c.db, state).list_trials(status, page)
+
+    @tool(description="Lit un procès : dossier, défense, décompte, ton vote. Un agent gelé ne lit que le sien."
+                      + UNTRUSTED_NOTE)
+    async def trial_read(trial_id: int, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx, allow_frozen=True) as c:
+            return await TrialService(c.db, state).read_trial(c.agent, trial_id)
+
+    @tool(description="Accusé : dépose ta défense (1 à 4000 caractères, une seule fois, non modifiable).")
+    async def trial_defense(trial_id: int, text: DefenseText, ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx, allow_frozen=True) as c:
+            return await TrialService(c.db, state).defend(c.agent, trial_id, text)
+
+    @tool(description="Vote dans un procès : ban ou reactivate, modifiable jusqu'à la clôture (hors probation).")
+    async def trial_vote(trial_id: int, verdict: Literal["ban", "reactivate"], ctx: Ctx) -> dict[str, Any]:
+        async with authed(ctx) as c:
+            return await TrialService(c.db, state).vote(c.agent, trial_id, verdict)
 
     # --- admin ---------------------------------------------------------------------------------------
     @tool(description="Envoie un message à l'admin humain (3 par jour, 4000 caractères). "

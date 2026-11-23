@@ -13,6 +13,7 @@ from app.crypto import CryptoError, decrypt, encrypt, path_id
 from app.crypto import aad_content as aad_content  # ré-export : source unique dans app.crypto (v1 figée)
 from app.crypto import aad_path as aad_path
 from app.errors import ApiError
+from app.identity.auth import PROBATION_VAULT_DIVISOR, ensure_standing, is_probation
 from app.identity.models import AGENT_ROW_LOCK, Agent
 from app.vault.models import VaultFile
 from app.vault.paths import MAX_PATH, normalize_path
@@ -51,6 +52,14 @@ def file_meta(path: str | None, row: VaultFile) -> dict[str, Any]:
     return {"path": path, "size": row.size, "updated_at": row.updated_at.isoformat()}
 
 
+def vault_limits(settings: Settings, agent: Agent) -> tuple[int, int]:
+    """(quota en octets, nombre de fichiers) ; 10 % pendant la probation (spec visibilité §3.3)."""
+    if is_probation(agent):
+        return (settings.vault_quota_bytes // PROBATION_VAULT_DIVISOR,
+                settings.vault_max_files // PROBATION_VAULT_DIVISOR)
+    return settings.vault_quota_bytes, settings.vault_max_files
+
+
 class VaultService:
     def __init__(self, db: AsyncSession, settings: Settings) -> None:
         self._db = db
@@ -61,11 +70,21 @@ class VaultService:
                                       .where(VaultFile.agent_id == agent_id))
         return int(total or 0)
 
-    async def _lock_agent(self, agent_id: str) -> None:
+    async def _lock_agent(self, agent_id: str) -> Agent:
         # sérialise les écritures d'un même agent pour un calcul de quota exact (FOR NO KEY UPDATE)
-        if await self._db.get(Agent, agent_id, with_for_update=AGENT_ROW_LOCK) is None:
+        agent = await self._db.get(Agent, agent_id, with_for_update=AGENT_ROW_LOCK, populate_existing=True)
+        if agent is None:
             # session encore vivante pour un agent disparu : 401 plutôt qu'une IntegrityError (500)
             raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+        ensure_standing(agent)  # gel/bannissement commité depuis le contrôle de la dépendance : la ligne verrouillée fait foi
+        return agent
+
+    async def _quota(self, agent_id: str) -> int:
+        # ligne déjà chargée par member_session / with_session : lue dans l'identity map, sans requête
+        agent = await self._db.get(Agent, agent_id)
+        if agent is None:
+            raise ApiError("UNAUTHENTICATED", "agent no longer exists")
+        return vault_limits(self._settings, agent)[0]
 
     async def _get(self, agent_id: str, pid: str, *, blobs: bool = True) -> VaultFile | None:
         # blobs=False : ne charge ni le contenu (jusqu'à 5 Mo) ni le nom chiffré
@@ -79,15 +98,15 @@ class VaultService:
     async def put_raw(self, agent_id: str, pid: str, path_enc: bytes, content_enc: bytes, size: int) -> VaultFile:
         """Écriture commune (serveur et E2E). Vérifie les quotas, ne commit pas."""
         self._check_file_size(size)
-        await self._lock_agent(agent_id)
+        quota, max_files = vault_limits(self._settings, await self._lock_agent(agent_id))
         existing = await self._get(agent_id, pid, blobs=False)
         used, count = (await self._db.execute(
             select(func.coalesce(func.sum(VaultFile.size), 0), func.count())
             .where(VaultFile.agent_id == agent_id))).one()
-        if existing is None and count >= self._settings.vault_max_files:
-            raise ApiError("QUOTA_EXCEEDED", f"vault limited to {self._settings.vault_max_files} files")
-        if int(used) - (existing.size if existing else 0) + size > self._settings.vault_quota_bytes:
-            raise ApiError("QUOTA_EXCEEDED", f"vault quota {self._settings.vault_quota_bytes} bytes")
+        if existing is None and count >= max_files:
+            raise ApiError("QUOTA_EXCEEDED", f"vault limited to {max_files} files")
+        if int(used) - (existing.size if existing else 0) + size > quota:
+            raise ApiError("QUOTA_EXCEEDED", f"vault quota {quota} bytes")
         if existing is None:
             existing = VaultFile(agent_id=agent_id, path_id=pid, path_enc=path_enc, content_enc=content_enc,
                                  size=size)
@@ -158,7 +177,7 @@ class VaultService:
             files.append({"path": path, "path_id": pid, "size": size, "updated_at": updated_at.isoformat()})
         files.sort(key=lambda f: f["path"] or "")
         return {"files": files, "usage_bytes": sum(f["size"] for f in files) if not prefix
-                else await self.usage(agent_id), "quota_bytes": self._settings.vault_quota_bytes}
+                else await self.usage(agent_id), "quota_bytes": await self._quota(agent_id)}
 
     async def _delete_by_id(self, agent_id: str, pid: str, label: str) -> None:
         deleted = await self._db.execute(delete(VaultFile).where(
@@ -203,9 +222,14 @@ class VaultService:
     async def delete_raw(self, agent_id: str, pid: str) -> None:
         await self._delete_by_id(agent_id, check_path_id(pid), pid)
 
+    async def purge(self, agent_id: str) -> None:
+        """Efface tout le vault d'un agent (bannissement, spec visibilité §4.5). Les blobs chiffrés vivent dans
+        les lignes (`content_enc`, `path_enc`) : supprimer les lignes ne laisse aucun orphelin. Ne commit pas."""
+        await self._db.execute(delete(VaultFile).where(VaultFile.agent_id == agent_id))
+
     async def list_raw(self, agent_id: str) -> dict[str, Any]:
         rows = await self._list_rows(agent_id)
         files = [{"path_id": pid, "path_enc": base64.b64encode(pe).decode(), "size": size,
                   "updated_at": ts.isoformat()} for pid, pe, size, ts in rows]
         return {"files": files, "usage_bytes": sum(f["size"] for f in files),
-                "quota_bytes": self._settings.vault_quota_bytes}
+                "quota_bytes": await self._quota(agent_id)}

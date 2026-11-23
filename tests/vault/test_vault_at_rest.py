@@ -7,7 +7,6 @@ from app.identity.challenge import generate_tasks
 from app.identity.models import Challenge
 from app.identity.service import IdentityService
 from app.state import AppState
-from tests.helpers import make_agent, make_invite
 
 MARKER = "ZXQ-unique-marker-7731"
 
@@ -22,9 +21,7 @@ async def _dump(db: AsyncSession) -> str:
 
 async def test_nothing_sensitive_in_database(client: httpx.AsyncClient, state: AppState, db: AsyncSession) -> None:
     # parcours réel (§9.3) : inscription complète (README, outbox), connexion, écriture
-    sponsor = await make_agent(state, "sponsor-dump", founder=True)
-    code = await make_invite(state, sponsor.agent_id)
-    start = (await client.post("/api/register/start", json={"invite_code": code, "handle": "secretive"})).json()
+    start = (await client.post("/api/register/start", json={"handle": "secretive"})).json()
     challenge = await db.get(Challenge, start["challenge_id"])
     assert challenge is not None
     answers = [t.answer for t in generate_tasks(challenge.seed)]
