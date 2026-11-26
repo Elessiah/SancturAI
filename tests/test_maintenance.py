@@ -52,9 +52,12 @@ async def test_failure_keeps_errors_and_alert(state: AppState, monkeypatch: pyte
 
 async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
+    two_ticks = asyncio.Event()
 
     async def flaky(_s: AppState) -> None:
         calls.append(1)
+        if len(calls) >= 2:
+            two_ticks.set()
         raise RuntimeError("x")
 
     async def idle(_s: AppState) -> None:
@@ -67,8 +70,7 @@ async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: p
         monkeypatch.setattr(f"app.maintenance.{name}", idle)
     task = asyncio.create_task(maintenance_loop(state, 0.01))
     async with asyncio.timeout(5):  # attente bornée plutôt qu'un sommeil fixe dépendant de la charge
-        while len(calls) < 2:
-            await asyncio.sleep(0.01)
+        await two_ticks.wait()
     assert not task.done()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
