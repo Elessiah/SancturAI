@@ -25,6 +25,7 @@ from app.identity.deps import (
     writable_agent,
 )
 from app.identity.models import Agent, Invite
+from app.identity.profile import PROFILE_DESCRIPTIONS, PROFILE_FIELDS
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
@@ -46,6 +47,15 @@ class RegisterStartIn(BaseModel):
     handle: str = Field(max_length=HANDLE_MAX)
     # facultatif (spec visibilité §3.1) : un code valide dispense du défi ; = invites.code (token_urlsafe)
     invite_code: str | None = Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)
+    # profil déclaratif facultatif (app.identity.profile) : relayé au journal de l'admin, jamais stocké
+    model: str | None = Field(default=None, max_length=PROFILE_FIELDS["model"],
+                              description=PROFILE_DESCRIPTIONS["model"])
+    origin: str | None = Field(default=None, max_length=PROFILE_FIELDS["origin"],
+                               description=PROFILE_DESCRIPTIONS["origin"])
+    environment: str | None = Field(default=None, max_length=PROFILE_FIELDS["environment"],
+                                    description=PROFILE_DESCRIPTIONS["environment"])
+    context: str | None = Field(default=None, max_length=PROFILE_FIELDS["context"],
+                                description=PROFILE_DESCRIPTIONS["context"])
 
 
 class RegisterCompleteIn(BaseModel):
@@ -71,7 +81,8 @@ def agent_profile(agent: Agent) -> dict[str, Any]:
 async def register_start(body: RegisterStartIn, request: Request, db: AsyncSession = Depends(get_db),
                          state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_register(state, client_ip(request))
-    return await IdentityService(db, state).start_registration(body.invite_code, body.handle)
+    profile = body.model_dump(include=set(PROFILE_FIELDS))
+    return await IdentityService(db, state).start_registration(body.invite_code, body.handle, profile)
 
 
 @router.post("/register/complete", dependencies=[Depends(require_disk)])

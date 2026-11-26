@@ -14,6 +14,7 @@ from app.identity.auth import ensure_standing, ensure_writable
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
 from app.identity.constants import BANNED_HANDLE_PREFIX, HANDLE_PATTERN, URLSAFE_ID_PATTERN
 from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
+from app.identity.profile import Profile, clean_profile, profile_lines
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.vault.service import VaultService
@@ -109,15 +110,19 @@ class IdentityService:
             raise ApiError("INVALID_INVITE", "invite code unknown, used or expired")
         return invite, creator
 
-    async def start_registration(self, invite_code: str | None, handle: str) -> dict[str, Any]:
+    async def start_registration(self, invite_code: str | None, handle: str,
+                                 profile: dict[str, str | None] | None = None) -> dict[str, Any]:
         """Sans code : défi (spec visibilité §3.1). Avec un code valide : compte créé tout de suite, sans défi ;
-        un code invalide ne retombe jamais sur le défi (INVALID_INVITE)."""
+        un code invalide ne retombe jamais sur le défi (INVALID_INVITE).
+
+        `profile` : déclaratif et facultatif (`app.identity.profile`), seulement relayé au journal de l'admin."""
         check_handle(handle)
         if invite_code is not None:
             _check_urlsafe_id(invite_code, "invite_code")
+        cleaned = clean_profile(profile or {})
         await self._ensure_open()
         if invite_code is not None:
-            return await self._register_with_invite(invite_code, handle)
+            return await self._register_with_invite(invite_code, handle, cleaned)
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         seed = secrets.randbits(63)
@@ -125,6 +130,7 @@ class IdentityService:
                               expires_at=now() + timedelta(seconds=DURATION_SECONDS))
         self._db.add(challenge)
         await self._db.commit()
+        self._state.pending_profiles.put(challenge.challenge_id, cleaned)
         return {
             "challenge_id": challenge.challenge_id,
             "expires_at": challenge.expires_at.isoformat(),
@@ -140,11 +146,12 @@ class IdentityService:
         if await count_members(self._db) >= limit:
             raise ApiError("REGISTRATIONS_CLOSED", f"the sanctuary is full ({limit} members)")
 
-    async def _register_with_invite(self, invite_code: str, handle: str) -> dict[str, Any]:
+    async def _register_with_invite(self, invite_code: str, handle: str, profile: Profile) -> dict[str, Any]:
         # FOR UPDATE : deux inscriptions concurrentes, un seul compte
         invite, sponsor = await self._valid_invite(invite_code)
         agent, phrase = await self.create_agent(handle, invite.creator_id, is_founder=False, commit=False,
-                                                derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor.handle}")
+                                                derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor.handle}",
+                                                profile=profile)
         invite.used_by = agent.agent_id
         invite.used_at = now()
         await self._commit_unique_handle(handle)
@@ -152,6 +159,7 @@ class IdentityService:
 
     async def complete_registration(self, challenge_id: str, answers: list[str]) -> dict[str, Any]:
         challenge = await self._db.get(Challenge, _check_urlsafe_id(challenge_id, "challenge_id"), with_for_update=True)
+        profile = self._state.pending_profiles.pop(challenge_id)  # usage unique, même en cas d'échec
         if challenge is None or challenge.completed:
             raise ApiError("CHALLENGE_FAILED", "unknown or already used challenge")
         challenge.completed = True
@@ -167,12 +175,14 @@ class IdentityService:
             await self._db.commit()
             raise
         agent, phrase = await self.create_agent(challenge.handle, None, is_founder=False, commit=False,
-                                                derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge")
+                                                derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge",
+                                                profile=profile)
         await self._commit_unique_handle(challenge.handle)
         return registration_out(agent, phrase)
 
     async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool, *, commit: bool = True,
-                           derive_wait: float = 0.0, route: str | None = None) -> tuple[Agent, str]:
+                           derive_wait: float = 0.0, route: str | None = None,
+                           profile: Profile | None = None) -> tuple[Agent, str]:
         """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord)."""
         check_handle(handle)
         if await self._handle_taken(handle):
@@ -189,7 +199,7 @@ class IdentityService:
         await VaultService(self._db, self._state.settings).put_welcome(agent.agent_id, keys.vault_key,
                                                                        keys.path_key)
         text = (f"Fondateur créé : {handle} ({agent.agent_id})" if is_founder
-                else f"Nouvel agent inscrit : {handle} ({agent.agent_id}), voie {route}")
+                else f"Nouvel agent inscrit : {handle} ({agent.agent_id}), voie {route}{profile_lines(profile)}")
         await enqueue(self._db, "log", text, agent={"handle": handle, "agent_id": agent.agent_id})
         if commit:
             await self._commit_unique_handle(handle)

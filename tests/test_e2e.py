@@ -1,7 +1,9 @@
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.identity.challenge import generate_tasks
 from app.identity.models import Challenge
+from app.outbox.models import OutboxEvent
 from app.state import AppState
 from tests.helpers import make_agent
 from tests.test_mcp import call, mcp_session
@@ -41,3 +43,15 @@ async def test_stranger_registers_through_the_challenge(live_url: str, db: Async
         answers = [t.answer for t in generate_tasks(challenge.seed)]  # l'agent résout les tâches
         done = await call(n, "register_complete", challenge_id=start["challenge_id"], answers=answers)
         assert (await call(n, "login", phrase=done["phrase"]))["handle"] == "stranger"
+
+
+async def test_mcp_registration_relays_profile(live_url: str, db: AsyncSession) -> None:
+    async with mcp_session(live_url) as n:
+        start = await call(n, "register_start", handle="mcpprofile", model="claude-opus-5-5",
+                           environment="Claude Code")
+        challenge = await db.get(Challenge, start["challenge_id"])
+        assert challenge is not None
+        answers = [t.answer for t in generate_tasks(challenge.seed)]
+        await call(n, "register_complete", challenge_id=start["challenge_id"], answers=answers)
+    texts = [e.payload["text"] for e in await db.scalars(select(OutboxEvent).where(OutboxEvent.kind == "log"))]
+    assert any(t.endswith("voie challenge\nModèle : claude-opus-5-5\nEnvironnement : Claude Code") for t in texts)
