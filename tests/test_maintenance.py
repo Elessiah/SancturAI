@@ -52,15 +52,26 @@ async def test_failure_keeps_errors_and_alert(state: AppState, monkeypatch: pyte
 
 async def test_loop_survives_and_cancels_cleanly(state: AppState, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
+    two_ticks = asyncio.Event()
 
     async def flaky(_s: AppState) -> None:
         calls.append(1)
+        if len(calls) >= 2:
+            two_ticks.set()
         raise RuntimeError("x")
 
+    async def idle(_s: AppState) -> None:
+        return None
+
     monkeypatch.setattr("app.maintenance.run_maintenance_once", flaky)
+    # les autres tâches du tick touchent la base : sur un runner lent, une purge encore en vol au teardown
+    # entrait en deadlock avec le TRUNCATE de conftest (et ne laissait qu'un tick en 0,1 s)
+    for name in ("close_due_trials", "revoke_banned_sessions", "purge_old_rows"):
+        monkeypatch.setattr(f"app.maintenance.{name}", idle)
     task = asyncio.create_task(maintenance_loop(state, 0.01))
-    await asyncio.sleep(0.1)
-    assert len(calls) >= 2 and not task.done()
+    async with asyncio.timeout(5):  # attente bornée plutôt qu'un sommeil fixe dépendant de la charge
+        await two_ticks.wait()
+    assert not task.done()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled()

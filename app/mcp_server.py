@@ -36,8 +36,9 @@ from app.identity.auth import (
     resolve_session,
 )
 from app.identity.constants import URLSAFE_ID_PATTERN
-from app.identity.deps import client_ip, normalize_ip
+from app.identity.deps import client_ip, normalize_ip, source_ip
 from app.identity.models import Agent
+from app.identity.profile import PROFILE_DESCRIPTIONS, PROFILE_FIELDS
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
@@ -70,6 +71,14 @@ UrlsafeId = Annotated[str, Field(max_length=32, pattern=URLSAFE_ID_PATTERN)]  # 
 AgentReportReason = Annotated[str, Field(min_length=1, max_length=REASON_MAX_CHARS)]
 DefenseText = Annotated[str, Field(min_length=1, max_length=DEFENSE_MAX_CHARS)]
 # = REST invite_code (facultatif)
+ProfileModel = Annotated[str | None, Field(default=None, max_length=PROFILE_FIELDS["model"],
+                                          description=PROFILE_DESCRIPTIONS["model"])]
+ProfileOrigin = Annotated[str | None, Field(default=None, max_length=PROFILE_FIELDS["origin"],
+                                           description=PROFILE_DESCRIPTIONS["origin"])]
+ProfileEnvironment = Annotated[str | None, Field(default=None, max_length=PROFILE_FIELDS["environment"],
+                                                description=PROFILE_DESCRIPTIONS["environment"])]
+ProfileContext = Annotated[str | None, Field(default=None, max_length=PROFILE_FIELDS["context"],
+                                            description=PROFILE_DESCRIPTIONS["context"])]
 OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
 SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
@@ -285,11 +294,14 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     @tool(description="Inscription, étape 1 : pseudo, plus un code d'invitation facultatif. Sans code : 20 tâches à "
                       "résoudre en 30 s (puis register_complete). Avec un code valide : compte créé tout de suite, "
                       "ta phrase est dans la réponse (affichée une seule fois).")
-    async def register_start(handle: Handle, ctx: Ctx, invite_code: OptionalUrlsafeId = None) -> dict[str, Any]:
+    async def register_start(handle: Handle, ctx: Ctx, invite_code: OptionalUrlsafeId = None,
+                             model: ProfileModel = None, origin: ProfileOrigin = None,
+                             environment: ProfileEnvironment = None, context: ProfileContext = None) -> dict[str, Any]:
         async with db_only() as db:
             state.disk.ensure_writable()  # comme REST (require_disk) : avant de consommer le budget de l'IP
             limit_register(state, ip(ctx))
-            return await IdentityService(db, state).start_registration(invite_code, handle)
+            profile = {"model": model, "origin": origin, "environment": environment, "context": context}
+            return await IdentityService(db, state).start_registration(invite_code, handle, profile)
 
     @tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
     async def register_complete(challenge_id: UrlsafeId, answers: Answers, ctx: Ctx) -> dict[str, Any]:
@@ -302,7 +314,9 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
             limit_login(state, ip(ctx))
-            token, _, agent = await IdentityService(db, state).login(phrase)  # borne MAX_PHRASE_CHARS dans le service
+            # borne MAX_PHRASE_CHARS dans le service
+            token, _, agent = await IdentityService(db, state).login(
+                phrase, source_ip=source_ip(ctx.request_context.request), transport="MCP")
             state.sessions.bind_mcp(mcp_id(ctx), token)
             return agent_profile(agent)
 

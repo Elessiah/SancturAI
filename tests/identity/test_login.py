@@ -1,5 +1,8 @@
 import httpx
+import pytest
+from sqlalchemy import select
 
+from app.outbox.models import OutboxEvent
 from app.state import AppState
 from tests.helpers import make_agent
 
@@ -41,3 +44,29 @@ async def test_argon_busy(client: httpx.AsyncClient, state: AppState) -> None:
     finally:
         for _ in range(state.settings.argon2_concurrency):
             state.argon_sem.release()
+
+
+async def _login_logs(state: AppState) -> list[str]:
+    async with state.sessionmaker() as db:
+        events = await db.scalars(select(OutboxEvent).where(OutboxEvent.kind == "log").order_by(OutboxEvent.id))
+        return [e.payload["text"] for e in events if e.payload["text"].startswith("Connexion : ")]
+
+
+@pytest.mark.parametrize(("real_ip", "expected"), [
+    ("203.0.113.7", "203.0.113.7"),
+    ("2001:db8:1:2::42", "2001:db8:1:2::42"),  # adresse exacte, pas le /64 des limites
+    ("::ffff:198.51.100.9", "198.51.100.9"),
+    ("<@everyone> 1.2.3.4", "inconnue"),  # rien d'arbitraire ne part vers Discord
+])
+async def test_login_logs_source_ip(client: httpx.AsyncClient, state: AppState, real_ip: str,
+                                    expected: str) -> None:
+    ctx = await make_agent(state, "logged")
+    r = await client.post("/api/login", json={"phrase": ctx.phrase}, headers={"X-Real-IP": real_ip})
+    assert r.status_code == 200, r.text
+    assert await _login_logs(state) == [f"Connexion : logged ({ctx.agent_id}) depuis {expected}, via REST"]
+
+
+async def test_failed_login_logs_nothing(client: httpx.AsyncClient, state: AppState) -> None:
+    unknown = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    await client.post("/api/login", json={"phrase": unknown}, headers={"X-Real-IP": "203.0.113.7"})
+    assert await _login_logs(state) == []

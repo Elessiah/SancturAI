@@ -9,6 +9,7 @@ from app.config import Settings
 from app.db import make_engine
 from app.disk import DiskGuard
 from app.error_aggregator import ErrorAggregator
+from app.identity.profile import PendingProfiles
 from app.identity.sessions import SessionStore
 from app.ratelimit import RateLimiter
 from app.status import StatusCache
@@ -25,6 +26,7 @@ class AppState:
     sessions: SessionStore = field(default_factory=lambda: SessionStore(86_400))
     limiter: RateLimiter = field(default_factory=RateLimiter)
     status: StatusCache = field(default_factory=StatusCache)
+    pending_profiles: PendingProfiles = field(default_factory=PendingProfiles)  # profils d'inscription (défi)
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
@@ -44,6 +46,7 @@ class AppState:
         self.sessions.clear()
         self.limiter.clear()
         self.status.clear()
+        self.pending_profiles.clear()
 
 
 def get_state(request: Request) -> AppState:

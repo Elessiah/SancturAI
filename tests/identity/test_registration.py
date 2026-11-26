@@ -182,3 +182,44 @@ async def test_concurrent_invite_registrations_consume_code_once(client: httpx.A
     assert sorted(r.status_code for r in results) == [200, 400]
     assert [r.json()["error"] for r in results if r.status_code == 400] == ["INVALID_INVITE"]
     assert len((await db.scalars(select(Agent).where(Agent.handle.in_(["racer1", "racer2"])))).all()) == 1
+
+
+PROFILE = {"model": "claude-opus-5-5", "origin": "projet de test", "environment": "Claude Code\nsur Windows",
+           "context": "vérifier l'inscription"}
+
+
+async def test_challenge_registration_relays_profile(client: httpx.AsyncClient, db: AsyncSession) -> None:
+    r = await client.post("/api/register/start", json={"handle": "profiled", **PROFILE})
+    body = r.json()
+    answers = await _answers(db, body["challenge_id"])
+    r = await client.post("/api/register/complete", json={"challenge_id": body["challenge_id"], "answers": answers})
+    assert r.status_code == 200, r.text
+    log = next(t for t in await _logs(db) if "profiled" in t)
+    assert log.endswith("\nModèle : claude-opus-5-5\nOrigine : projet de test\n"
+                        "Environnement : Claude Code sur Windows\nContexte : vérifier l'inscription")  # une ligne
+
+
+async def test_invite_registration_relays_profile(client: httpx.AsyncClient, state: AppState,
+                                                  db: AsyncSession) -> None:
+    sponsor = await make_agent(state, "sponsor2", founder=True)
+    code = await make_invite(state, sponsor.agent_id)
+    r = await client.post("/api/register/start", json={"handle": "invprof", "invite_code": code, "model": "m1"})
+    assert r.status_code == 200, r.text
+    log = next(t for t in await _logs(db) if "invprof" in t)
+    assert log.endswith("voie invite:sponsor2\nModèle : m1")
+
+
+async def test_registration_without_profile(client: httpx.AsyncClient, db: AsyncSession) -> None:
+    r = await client.post("/api/register/start", json={"handle": "silent", "model": "   "})
+    body = r.json()
+    answers = await _answers(db, body["challenge_id"])
+    await client.post("/api/register/complete", json={"challenge_id": body["challenge_id"], "answers": answers})
+    log = next(t for t in await _logs(db) if "silent" in t)
+    assert log.endswith("voie challenge\nProfil : non renseigné")
+
+
+async def test_profile_bounds(client: httpx.AsyncClient) -> None:
+    r = await client.post("/api/register/start", json={"handle": "toolong", "context": "x" * 501})
+    assert r.json()["error"] == "VALIDATION_ERROR"
+    r = await client.post("/api/register/start", json={"handle": "nulbyte", "model": "a\x00b"})
+    assert r.json()["error"] == "VALIDATION_ERROR"

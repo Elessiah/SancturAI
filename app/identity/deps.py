@@ -35,6 +35,23 @@ def client_ip(request: Request) -> str:
     return client_ip_from_headers(request.headers, request.client.host if request.client else "")
 
 
+def source_ip(request: Request | None) -> str:
+    """Adresse exacte du client (journal de connexion de l'admin), sans regroupement /64 contrairement à `client_ip`.
+
+    Même source que `client_ip` (X-Real-IP posé par nginx, sinon pair TCP) ; toute valeur qui n'est pas une adresse
+    IP devient "inconnue" : rien d'arbitraire ne part vers Discord."""
+    if request is None:
+        return "inconnue"
+    raw = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+    try:
+        ip = ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return "inconnue"
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    return str(ip)
+
+
 async def current_token(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str | None:
     return creds.credentials if creds else None
 
