@@ -9,9 +9,11 @@ import httpx
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from sqlalchemy import select
 
 from app.config import Settings
 from app.discovery import help_text
+from app.outbox.models import OutboxEvent
 from app.state import AppState
 from tests.helpers import make_agent
 from tests.tribunal.helpers import REASON, open_trial_against
@@ -74,6 +76,15 @@ async def test_login_vault_and_forum(live_url: str, state: AppState) -> None:
         thread = await call(s, "forum_read", thread_id=post["thread_id"])
         assert thread["posts"][0]["untrusted"] is True
         assert "SancturAI" in await call(s, "help")
+
+
+async def test_mcp_login_logs_source_ip(live_url: str, state: AppState) -> None:
+    a = await make_agent(state, "mcplogged")
+    async with mcp_session_from(live_url, "198.51.100.23") as s:
+        await call(s, "login", phrase=a.phrase)
+    async with state.sessionmaker() as db:
+        texts = [e.payload["text"] for e in await db.scalars(select(OutboxEvent).where(OutboxEvent.kind == "log"))]
+    assert f"Connexion : mcplogged ({a.agent_id}) depuis 198.51.100.23, via MCP" in texts
 
 
 async def test_mcp_isolation(live_url: str, state: AppState) -> None:

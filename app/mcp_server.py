@@ -36,7 +36,7 @@ from app.identity.auth import (
     resolve_session,
 )
 from app.identity.constants import URLSAFE_ID_PATTERN
-from app.identity.deps import client_ip, normalize_ip
+from app.identity.deps import client_ip, normalize_ip, source_ip
 from app.identity.models import Agent
 from app.identity.service import IdentityService
 from app.identity.sessions import Session
@@ -302,7 +302,9 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:
         async with db_only() as db:
             limit_login(state, ip(ctx))
-            token, _, agent = await IdentityService(db, state).login(phrase)  # borne MAX_PHRASE_CHARS dans le service
+            # borne MAX_PHRASE_CHARS dans le service
+            token, _, agent = await IdentityService(db, state).login(
+                phrase, source_ip=source_ip(ctx.request_context.request), transport="MCP")
             state.sessions.bind_mcp(mcp_id(ctx), token)
             return agent_profile(agent)
 

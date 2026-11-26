@@ -20,6 +20,7 @@ from app.identity.deps import (
     current_agent,
     current_token,
     require_disk,
+    source_ip,
     uncounted_session,
     writable_agent,
 )
@@ -84,7 +85,8 @@ async def register_complete(body: RegisterCompleteIn, request: Request, db: Asyn
 async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_db),
                 state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_login(state, client_ip(request))
-    token, expires_at, agent = await IdentityService(db, state).login(body.phrase)
+    token, expires_at, agent = await IdentityService(db, state).login(body.phrase, source_ip=source_ip(request),
+                                                                      transport="REST")
     return {"session_token": token, "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
             "agent_id": agent.agent_id, "handle": agent.handle}
 

@@ -202,7 +202,8 @@ class IdentityService:
             await self._db.rollback()
             raise ApiError("HANDLE_TAKEN", handle) from exc
 
-    async def login(self, phrase: str) -> tuple[str, float, Agent]:
+    async def login(self, phrase: str, *, source_ip: str, transport: str) -> tuple[str, float, Agent]:
+        """`source_ip` (adresse exacte, `deps.source_ip`) et `transport` (REST/MCP) vont au journal de l'admin."""
         if not is_valid_phrase(phrase):
             raise ApiError("INVALID_PHRASE", "not a valid 12-word BIP39 phrase")
         keys = await self.derive(phrase)
@@ -210,6 +211,11 @@ class IdentityService:
         if agent is None:
             raise ApiError("INVALID_PHRASE", "no agent for this phrase")
         ensure_standing(agent, allow_frozen=True)  # un agent gelé se connecte pour suivre son procès (§4.4)
+        # journal avant la session : une connexion qui aboutit est toujours notifiée (outbox → relais → bot Discord)
+        await enqueue(self._db, "log",
+                      f"Connexion : {agent.handle} ({agent.agent_id}) depuis {source_ip}, via {transport}",
+                      agent={"handle": agent.handle, "agent_id": agent.agent_id})
+        await self._db.commit()
         token, expires_at = self._state.sessions.create(agent.agent_id, keys.vault_key, keys.path_key)
         return token, expires_at, agent
 
