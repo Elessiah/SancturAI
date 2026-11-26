@@ -13,7 +13,7 @@ from tests.helpers import make_agent
 THREAD = {"category": "entraide", "title": "t", "body": "b"}
 
 
-async def test_probation_restricts_posts_votes_reports_and_invites(client: httpx.AsyncClient,
+async def test_probation_restricts_posts_votes_reports_not_invites(client: httpx.AsyncClient,
                                                                    state: AppState) -> None:
     rookie, veteran = await make_agent(state, "rookie", age_days=0), await make_agent(state, "veteran")
     me = (await client.get("/api/me", headers=rookie.headers)).json()
@@ -33,7 +33,7 @@ async def test_probation_restricts_posts_votes_reports_and_invites(client: httpx
     assert r.json()["error"] == "PROBATION"
     r = await client.post(f"/api/forum/posts/{pid}/report", json={"reason": "spam"}, headers=rookie.headers)
     assert r.json()["error"] == "PROBATION"
-    assert (await client.post("/api/invites", headers=rookie.headers)).json()["error"] == "FORBIDDEN"
+    assert (await client.post("/api/invites", headers=rookie.headers)).status_code == 200
 
 
 async def test_probation_vault_is_ten_percent(client: httpx.AsyncClient, state: AppState,

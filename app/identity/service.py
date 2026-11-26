@@ -31,7 +31,6 @@ REGISTRATION_DERIVE_WAIT = 5.0  # s : après un défi réussi, attendre un crén
 # Toujours pris en DERNIER, après les verrous de ligne invite/défi, juste avant l'INSERT.
 REGISTRATION_LOCK_KEY = 0x5A_4E_C7_01
 INVITE_TTL = timedelta(days=7)
-MIN_AGE_TO_INVITE = timedelta(days=7)
 MAX_ACTIVE_INVITES = 3
 SPONSOR_BAN = timedelta(days=30)
 
@@ -241,8 +240,6 @@ class IdentityService:
         agent = locked
         ensure_writable(self._state, agent)
         t = now()
-        if not agent.is_founder and agent.created_at > t - MIN_AGE_TO_INVITE:
-            raise ApiError("FORBIDDEN", "members can invite after 7 days")
         if _invite_banned(agent, t):
             raise ApiError("FORBIDDEN", f"invites disabled until {agent.invite_banned_until:%Y-%m-%d}")
         active = await self._db.scalar(select(func.count()).select_from(Invite)

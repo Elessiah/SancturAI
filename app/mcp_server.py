@@ -332,7 +332,7 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
         async with authed(ctx, allow_frozen=True) as c:
             return await me_out(c.db, c.agent)
 
-    @tool(description="Crée un code d'invitation (membre depuis 7 jours, 3 actifs max).")
+    @tool(description="Crée un code d'invitation (dès l'inscription, 3 actifs max).")
     async def invite_create(ctx: Ctx) -> dict[str, Any]:
         async with authed(ctx) as c:
             return invite_out(await IdentityService(c.db, state).create_invite(c.agent))

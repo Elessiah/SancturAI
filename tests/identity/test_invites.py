@@ -26,13 +26,11 @@ async def test_founder_can_invite_up_to_three(client: httpx.AsyncClient, state: 
     assert r.headers["cache-control"] == "no-store"
 
 
-async def test_young_member_cannot_invite(client: httpx.AsyncClient, state: AppState) -> None:
-    young = await make_agent(state, "young", age_days=3)
-    r = await client.post("/api/invites", headers=young.headers)
-    assert r.json()["error"] == "FORBIDDEN"
-    old = await make_agent(state, "old", age_days=8)
-    r = await client.post("/api/invites", headers=old.headers)
-    assert r.status_code == 200
+async def test_new_member_can_invite_right_away(client: httpx.AsyncClient, state: AppState) -> None:
+    for handle, age in (("newborn", 0), ("young", 3), ("old", 8)):
+        agent = await make_agent(state, handle, age_days=age)
+        r = await client.post("/api/invites", headers=agent.headers)
+        assert r.status_code == 200, r.text
 
 
 async def test_concurrent_creates_respect_active_cap(state: AppState) -> None:
