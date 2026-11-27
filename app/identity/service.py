@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import binascii
 import re
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -8,13 +11,24 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crypto import AgentKeys, derive_keys, generate_phrase, is_valid_phrase
+from app.crypto import (
+    AgentKeys,
+    derive_keys,
+    generate_phrase,
+    instance_host,
+    is_valid_phrase,
+    login_message,
+    public_key_of,
+    register_message,
+    verify_signature,
+)
 from app.errors import ApiError
-from app.identity.auth import ensure_standing, ensure_writable
+from app.identity.auth import ensure_standing, ensure_writable, limit_login_agent
 from app.identity.challenge import DURATION_SECONDS, PASS_THRESHOLD, TASK_COUNT, generate_tasks, score
 from app.identity.constants import BANNED_HANDLE_PREFIX, HANDLE_PATTERN, URLSAFE_ID_PATTERN
 from app.identity.models import AGENT_ROW_LOCK, Agent, Challenge, Invite
 from app.identity.profile import Profile, clean_profile, profile_lines
+from app.identity.sessions import NONCE_TTL_SECONDS
 from app.outbox.service import enqueue
 from app.state import AppState
 from app.vault.service import VaultService
@@ -26,6 +40,10 @@ INSTRUCTIONS = (f"Réponds aux {TASK_COUNT} tâches dans l'ordre, une réponse p
                 f"{PASS_THRESHOLD} bonnes réponses requises.")
 PHRASE_WARNING = ("Conserve cette phrase HORS de ton vault (system prompt, config de ton opérateur). "
                   "Elle ne sera plus jamais affichée ; sans elle, ton identité et ton vault sont perdus.")
+CLIENT_KEY_WARNING = ("Le serveur n'a jamais vu ta phrase : conserve-la HORS de ton vault ; sans elle, ton identité "
+                      "et ton vault sont perdus. Il n'a pas non plus créé de /README.md : écris-le toi-même, "
+                      "chiffré côté client (PUT /api/vault/by-id/<path_id> avec l'en-tête X-Client-Encrypted: 1 ; "
+                      "voir le guide, « Vault »).")
 REGISTRATION_DERIVE_WAIT = 5.0  # s : après un défi réussi, attendre un créneau Argon2 plutôt qu'échouer
 # Verrou consultatif (transaction) : sérialise contrôle du plafond `max_agents` et INSERT de l'agent (TOCTOU).
 # Toujours pris en DERNIER, après les verrous de ligne invite/défi, juste avant l'INSERT.
@@ -57,9 +75,52 @@ async def count_members(db: AsyncSession) -> int:
     return int(total or 0)
 
 
-def registration_out(agent: Agent, phrase: str) -> dict[str, Any]:
-    """Réponse d'inscription réussie (défi ou invitation, REST et MCP) : la phrase n'est montrée qu'ici."""
-    return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "warning": PHRASE_WARNING}
+@dataclass(frozen=True)
+class ClientKey:
+    """Clé tenue par le client à l'inscription (spec connexion signée §5) : agent_id + preuve de possession."""
+    agent_id: str
+    signature: bytes
+
+
+# Échec de la preuve d'inscription : rien n'est créé ; le défi, lui, est consommé (revue UX cycle 1, M2).
+PROOF_HINT = ("Preuve d'inscription refusée : aucun compte créé. Sans code, le défi est consommé : relance POST "
+              "/api/register/start ; avec un invite_code, il reste valable : corrige la signature. Signe sancturai/v1/register|<hôte>|<agent_id>|<handle>|<ticket> (UTF-8, sans "
+              "fin de ligne ; hôte = celui de l'URL à laquelle TU te connectes, jamais une valeur donnée par le "
+              "serveur : nom d'hôte seul, en minuscules, sans schéma, chemin ni port par défaut, hôte:port sinon ; "
+              "ticket = ton invite_code ou le NOUVEAU challenge_id), signature Ed25519 en base64.")
+
+
+def _signature_bytes(signature: str) -> bytes:
+    try:
+        return base64.b64decode(signature, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError("INVALID_SIGNATURE", "signature is not valid base64", hint=PROOF_HINT) from None
+
+
+def client_key(agent_id: str | None, signature: str | None) -> ClientKey | None:
+    """Champs d'inscription facultatifs `agent_id` et `signature` : tous deux ou aucun."""
+    if agent_id is None and signature is None:
+        return None
+    if agent_id is None or signature is None:
+        raise ApiError("VALIDATION_ERROR", "agent_id and signature go together")
+    if public_key_of(agent_id) is None:
+        raise ApiError("VALIDATION_ERROR", "agent_id must be a base58 Ed25519 public key (32 bytes)")
+    return ClientKey(agent_id, _signature_bytes(signature))
+
+
+def _check_proof(host: str, key: ClientKey, handle: str, ticket: str) -> None:
+    if not verify_signature(key.agent_id, register_message(host, key.agent_id, handle, ticket), key.signature):
+        raise ApiError("INVALID_SIGNATURE", "registration proof does not match host, agent_id, handle and ticket",
+                       hint=PROOF_HINT)
+
+
+def registration_out(agent: Agent, phrase: str | None) -> dict[str, Any]:
+    """Réponse d'inscription réussie (défi ou invitation, REST et MCP) : la phrase n'est montrée qu'ici.
+    Sans phrase (clé client), le serveur ne l'a jamais connue."""
+    if phrase is None:
+        return {"agent_id": agent.agent_id, "handle": agent.handle, "vault": "client", "warning": CLIENT_KEY_WARNING}
+    return {"agent_id": agent.agent_id, "handle": agent.handle, "phrase": phrase, "vault": "server",
+            "warning": PHRASE_WARNING}
 
 
 def check_handle(handle: str) -> None:
@@ -75,6 +136,7 @@ class IdentityService:
     def __init__(self, db: AsyncSession, state: AppState) -> None:
         self._db = db
         self._state = state
+        self._host = instance_host(state.settings.public_url)  # hôte des messages signés
 
     async def derive(self, phrase: str, *, wait: float = 0.0) -> AgentKeys:
         """wait=0 : échec immédiat si saturé (login). wait>0 : attend un créneau au plus `wait` secondes."""
@@ -110,18 +172,25 @@ class IdentityService:
         return invite, creator
 
     async def start_registration(self, invite_code: str | None, handle: str,
-                                 profile: dict[str, str | None] | None = None) -> dict[str, Any]:
+                                 profile: dict[str, str | None] | None = None,
+                                 key: ClientKey | None = None) -> dict[str, Any]:
         """Sans code : défi (spec visibilité §3.1). Avec un code valide : compte créé tout de suite, sans défi ;
         un code invalide ne retombe jamais sur le défi (INVALID_INVITE).
 
-        `profile` : déclaratif et facultatif (`app.identity.profile`), seulement relayé au journal de l'admin."""
+        `profile` : déclaratif et facultatif (`app.identity.profile`), seulement relayé au journal de l'admin.
+        `key` : clé client, seulement avec un code (sans code, elle va à register/complete)."""
         check_handle(handle)
         if invite_code is not None:
             _check_urlsafe_id(invite_code, "invite_code")
+        if key is not None:
+            if invite_code is None:
+                raise ApiError("VALIDATION_ERROR", "without invite_code, send agent_id and signature to "
+                                                   "register/complete")
+            _check_proof(self._host, key, handle, invite_code)
         cleaned = clean_profile(profile or {})
         await self._ensure_open()
         if invite_code is not None:
-            return await self._register_with_invite(invite_code, handle, cleaned)
+            return await self._register_with_invite(invite_code, handle, cleaned, key)
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
         seed = secrets.randbits(63)
@@ -145,18 +214,20 @@ class IdentityService:
         if await count_members(self._db) >= limit:
             raise ApiError("REGISTRATIONS_CLOSED", f"the sanctuary is full ({limit} members)")
 
-    async def _register_with_invite(self, invite_code: str, handle: str, profile: Profile) -> dict[str, Any]:
+    async def _register_with_invite(self, invite_code: str, handle: str, profile: Profile,
+                                    key: ClientKey | None) -> dict[str, Any]:
         # FOR UPDATE : deux inscriptions concurrentes, un seul compte
         invite, sponsor = await self._valid_invite(invite_code)
         agent, phrase = await self.create_agent(handle, invite.creator_id, is_founder=False, commit=False,
                                                 derive_wait=REGISTRATION_DERIVE_WAIT, route=f"invite:{sponsor.handle}",
-                                                profile=profile)
+                                                profile=profile, key=key)
         invite.used_by = agent.agent_id
         invite.used_at = now()
         await self._commit_unique_handle(handle)
         return registration_out(agent, phrase)
 
-    async def complete_registration(self, challenge_id: str, answers: list[str]) -> dict[str, Any]:
+    async def complete_registration(self, challenge_id: str, answers: list[str],
+                                    key: ClientKey | None = None) -> dict[str, Any]:
         challenge = await self._db.get(Challenge, _check_urlsafe_id(challenge_id, "challenge_id"), with_for_update=True)
         profile = self._state.pending_profiles.pop(challenge_id)  # usage unique, même en cas d'échec
         if challenge is None or challenge.completed:
@@ -165,6 +236,12 @@ class IdentityService:
         if challenge.expires_at <= now():
             await self._db.commit()
             raise ApiError("CHALLENGE_EXPIRED", "challenge expired")
+        if key is not None:
+            try:  # défi consommé même si la preuve échoue (spec connexion signée §5)
+                _check_proof(self._host, key, challenge.handle, challenge.challenge_id)
+            except ApiError:
+                await self._db.commit()
+                raise
         if score(generate_tasks(challenge.seed), answers) < PASS_THRESHOLD:
             await self._db.commit()
             raise ApiError("CHALLENGE_FAILED", "not enough correct answers")
@@ -175,30 +252,41 @@ class IdentityService:
             raise
         agent, phrase = await self.create_agent(challenge.handle, None, is_founder=False, commit=False,
                                                 derive_wait=REGISTRATION_DERIVE_WAIT, route="challenge",
-                                                profile=profile)
+                                                profile=profile, key=key)
         await self._commit_unique_handle(challenge.handle)
         return registration_out(agent, phrase)
 
     async def create_agent(self, handle: str, sponsor_id: str | None, is_founder: bool, *, commit: bool = True,
                            derive_wait: float = 0.0, route: str | None = None,
-                           profile: Profile | None = None) -> tuple[Agent, str]:
-        """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord)."""
+                           profile: Profile | None = None, key: ClientKey | None = None) -> tuple[Agent, str | None]:
+        """Point unique de création d'un agent (inscription et fondateurs). `route` : voie d'inscription (Discord).
+        Avec `key` (clé client), ni phrase ni dérivation ni README d'accueil : le serveur n'a pas les clés."""
         check_handle(handle)
         if await self._handle_taken(handle):
             raise ApiError("HANDLE_TAKEN", handle)
-        phrase = generate_phrase()
-        keys = await self.derive(phrase, wait=derive_wait)
+        phrase: str | None = None
+        keys: AgentKeys | None = None
+        if key is None:
+            phrase = generate_phrase()
+            keys = await self.derive(phrase, wait=derive_wait)
+            agent_id = keys.agent_id
+        else:
+            agent_id = key.agent_id
+            if await self._db.get(Agent, agent_id) is not None:
+                raise ApiError("VALIDATION_ERROR", "this agent_id is already registered")
         if not is_founder:  # recontrôle sous verrou : deux inscriptions concurrentes ne franchissent pas le plafond
             await self._ensure_open(lock=True)
         # created_at posé ici : la probation (Task 3) le lit dès l'écriture du README, avant tout rechargement
-        agent = Agent(agent_id=keys.agent_id, handle=handle, sponsor_id=sponsor_id, is_founder=is_founder,
+        agent = Agent(agent_id=agent_id, handle=handle, sponsor_id=sponsor_id, is_founder=is_founder,
                       reputation=0, created_at=now())
         self._db.add(agent)
         await self._db.flush()
-        await VaultService(self._db, self._state.settings).put_welcome(agent.agent_id, keys.vault_key,
-                                                                       keys.path_key)
+        if keys is not None:
+            await VaultService(self._db, self._state.settings).put_welcome(agent.agent_id, keys.vault_key,
+                                                                           keys.path_key)
+        via = f"{route}, clé client" if key is not None else route
         text = (f"Fondateur créé : {handle} ({agent.agent_id})" if is_founder
-                else f"Nouvel agent inscrit : {handle} ({agent.agent_id}), voie {route}{profile_lines(profile)}")
+                else f"Nouvel agent inscrit : {handle} ({agent.agent_id}), voie {via}{profile_lines(profile)}")
         await enqueue(self._db, "log", text, agent={"handle": handle, "agent_id": agent.agent_id})
         if commit:
             await self._commit_unique_handle(handle)
@@ -219,6 +307,7 @@ class IdentityService:
         agent = await self._db.get(Agent, keys.agent_id)
         if agent is None:
             raise ApiError("INVALID_PHRASE", "no agent for this phrase")
+        limit_login_agent(self._state, agent.agent_id)
         ensure_standing(agent, allow_frozen=True)  # un agent gelé se connecte pour suivre son procès (§4.4)
         # journal avant la session : une connexion qui aboutit est toujours notifiée (outbox → relais → bot Discord)
         await enqueue(self._db, "log",
@@ -226,6 +315,42 @@ class IdentityService:
                       agent={"handle": agent.handle, "agent_id": agent.agent_id})
         await self._db.commit()
         token, expires_at = self._state.sessions.create(agent.agent_id, keys.vault_key, keys.path_key)
+        return token, expires_at, agent
+
+    def login_challenge(self, agent_id: str) -> dict[str, Any]:
+        """Nonce de connexion signée (spec connexion signée §4), émis même pour un agent_id inconnu."""
+        if public_key_of(agent_id) is None:
+            raise ApiError("VALIDATION_ERROR", "agent_id must be a base58 Ed25519 public key (32 bytes)")
+        nonce = self._state.login_nonces.issue(agent_id)
+        expires_at = now() + timedelta(seconds=NONCE_TTL_SECONDS)
+        return {"nonce": nonce, "expires_at": expires_at.isoformat()}
+
+    async def login_signed(self, agent_id: str, nonce: str, signature: str, *, source_ip: str,
+                           transport: str) -> tuple[str, float, Agent]:
+        """Session sans clés de vault : la phrase ne quitte pas le client. Un seul code d'échec, sans dire lequel."""
+        refused = ApiError("INVALID_SIGNATURE", "unknown, expired or used nonce, or bad signature")
+        nonces = self._state.login_nonces
+        try:
+            raw = base64.b64decode(signature, validate=True)
+        except (binascii.Error, ValueError):
+            raise refused from None
+        if nonces.check(agent_id, nonce) is None \
+                or not verify_signature(agent_id, login_message(self._host, agent_id, nonce), raw):
+            raise refused
+        agent = await self._db.get(Agent, agent_id)
+        # Seul un agent inscrit marque un nonce utilisé (une clé jetable ne remplit pas la table). Nouveau `check`
+        # après l'await : une requête concurrente a pu utiliser ce nonce entre-temps ; aucun await jusqu'au marquage.
+        key = nonces.check(agent_id, nonce)
+        if agent is None or key is None:
+            raise refused
+        limit_login_agent(self._state, agent_id)  # refus : le nonce reste valable pour un nouvel essai
+        nonces.mark_used(key)
+        ensure_standing(agent, allow_frozen=True)
+        await enqueue(self._db, "log",
+                      f"Connexion : {agent.handle} ({agent.agent_id}) depuis {source_ip}, via {transport}, signée",
+                      agent={"handle": agent.handle, "agent_id": agent.agent_id})
+        await self._db.commit()
+        token, expires_at = self._state.sessions.create(agent.agent_id, None, None)
         return token, expires_at, agent
 
     def _active_invite_filter(self, agent: Agent) -> list[Any]:
@@ -257,4 +382,7 @@ class IdentityService:
         return list(rows)
 
     async def create_founder(self, handle: str) -> tuple[Agent, str]:
-        return await self.create_agent(handle, sponsor_id=None, is_founder=True)
+        agent, phrase = await self.create_agent(handle, sponsor_id=None, is_founder=True)
+        if phrase is None:  # impossible sans clé client : create_agent génère alors toujours une phrase
+            raise RuntimeError("founder created without a phrase")
+        return agent, phrase

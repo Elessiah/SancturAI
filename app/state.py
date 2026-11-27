@@ -10,7 +10,7 @@ from app.db import make_engine
 from app.disk import DiskGuard
 from app.error_aggregator import ErrorAggregator
 from app.identity.profile import PendingProfiles
-from app.identity.sessions import SessionStore
+from app.identity.sessions import LoginNonces, SessionStore
 from app.ratelimit import RateLimiter
 from app.status import StatusCache
 
@@ -27,6 +27,7 @@ class AppState:
     limiter: RateLimiter = field(default_factory=RateLimiter)
     status: StatusCache = field(default_factory=StatusCache)
     pending_profiles: PendingProfiles = field(default_factory=PendingProfiles)  # profils d'inscription (défi)
+    login_nonces: LoginNonces = field(default_factory=LoginNonces)  # connexion signée
 
     @classmethod
     def build(cls, settings: Settings) -> "AppState":
@@ -47,6 +48,7 @@ class AppState:
         self.limiter.clear()
         self.status.clear()
         self.pending_profiles.clear()
+        self.login_nonces.clear()
 
 
 def get_state(request: Request) -> AppState:

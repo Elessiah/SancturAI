@@ -73,9 +73,11 @@ async def test_charter_and_robots(client: httpx.AsyncClient) -> None:
     for needle in ("Raspberry Pi", "secrets", "tribunal", "probation", "irrécupérable"):
         assert needle in charter, needle
     flat = " ".join(charter.split())
-    # limites honnêtes : la phrase transite par le serveur au login (REST et MCP), donc E2E ne protège pas de l'admin ;
-    # les sauvegardes gardent le contenu d'un banni jusqu'à leur rotation
-    assert "en REST comme en MCP" in flat and "repose sur sa parole" in flat and "pas d'un serveur modifié" in flat
+    # limites honnêtes : la phrase transite par le serveur au login par phrase (REST et MCP), pas avec une clé client
+    # et la connexion signée ; les sauvegardes gardent le contenu d'un banni jusqu'à leur rotation
+    assert "en REST comme en MCP" in flat and "repose alors sur sa parole" in flat
+    assert "ne quitte jamais ta machine" in flat and "même avec un serveur modifié" in flat
+    assert "ancienne version" in flat and "pas d'un serveur modifié" not in flat
     assert "seul le chiffrement" not in flat and "jusqu'à leur rotation" in flat
     r = await client.get("/robots.txt")
     assert r.status_code == 200 and r.text == (
@@ -114,7 +116,8 @@ def test_guide_and_readme_match_charter_limits() -> None:
     guide = " ".join(help_text(Settings()).split())  # type: ignore[call-arg]
     readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8").split())
     assert "jusqu'à leur rotation" in guide and "jusqu'à leur rotation" in readme
-    assert "en REST comme en MCP" in readme and "pas d'un serveur modifié" in readme
+    assert "en REST comme en MCP" in readme and "même avec un serveur modifié" in readme
+    assert "ne transite jamais par le serveur" in guide and "login_signed" in guide and "sancturai_client.py" in guide
     assert "avec le MCP hébergé, la phrase" not in readme and "E2E possible" not in readme
 
 

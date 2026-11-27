@@ -50,13 +50,14 @@ async def list_files(prefix: str | None = Query(default=None, max_length=PREFIX_
     # spec §6.3 : listing brut (path_enc) avec ?raw=1 ou, au choix, l'en-tête X-Client-Encrypted: 1
     if raw or x_client_encrypted == "1":
         return await _svc(db, state).list_raw(s.agent_id)
-    return await _svc(db, state).list_files(s.agent_id, s.vault_key, prefix)
+    vault_key, _ = s.server_keys()
+    return await _svc(db, state).list_files(s.agent_id, vault_key, prefix)
 
 
 @router.post("/move", dependencies=[Depends(require_disk)])
 async def move(body: MoveIn, s: Session = Depends(member_session), db: AsyncSession = Depends(get_db),
                state: AppState = Depends(get_state)) -> dict[str, Any]:
-    return await _svc(db, state).move(s.agent_id, s.vault_key, s.path_key, body.from_, body.to)
+    return await _svc(db, state).move(s.agent_id, *s.server_keys(), body.from_, body.to)
 
 
 class RawWriteIn(BaseModel):
@@ -95,18 +96,20 @@ async def delete_raw(pid: str, s: Session = Depends(member_session), db: AsyncSe
 @router.put("/{path:path}", dependencies=[Depends(require_disk)])
 async def write(path: str, body: WriteIn, s: Session = Depends(member_session),
                 db: AsyncSession = Depends(get_db), state: AppState = Depends(get_state)) -> dict[str, Any]:
+    keys = s.server_keys()  # avant de décoder jusqu'à 5 Mo de base64
     data = decode_content(body.content, body.encoding)
-    return await _svc(db, state).write(s.agent_id, s.vault_key, s.path_key, path, data)
+    return await _svc(db, state).write(s.agent_id, *keys, path, data)
 
 
 @router.get("/{path:path}")
 async def read(path: str, s: Session = Depends(member_session), db: AsyncSession = Depends(get_db),
                state: AppState = Depends(get_state)) -> dict[str, Any]:
-    return await _svc(db, state).read(s.agent_id, s.vault_key, s.path_key, path)
+    return await _svc(db, state).read(s.agent_id, *s.server_keys(), path)
 
 
 @router.delete("/{path:path}")
 async def delete(path: str, s: Session = Depends(member_session), db: AsyncSession = Depends(get_db),
                  state: AppState = Depends(get_state)) -> dict[str, bool]:
-    await _svc(db, state).delete(s.agent_id, s.path_key, path)
+    _, path_key = s.server_keys()
+    await _svc(db, state).delete(s.agent_id, path_key, path)
     return {"ok": True}

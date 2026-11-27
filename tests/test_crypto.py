@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 
@@ -58,3 +59,39 @@ def test_aead_roundtrip_and_tamper() -> None:
 def test_two_encryptions_differ() -> None:
     key = bytes(32)
     assert crypto.encrypt(key, b"x", b"") != crypto.encrypt(key, b"x", b"")
+
+
+def test_signed_message_vectors() -> None:
+    # spec connexion signée §3 : formats figés, signatures Ed25519 déterministes
+    keys = crypto.derive_keys(VEC["phrase"])
+    login = crypto.login_message(VEC["signed_host"], VEC["agent_id"], VEC["login_nonce"])
+    register = crypto.register_message(VEC["signed_host"], VEC["agent_id"], VEC["register_handle"],
+                                       VEC["register_ticket"])
+    assert login.decode() == VEC["login_message"] and register.decode() == VEC["register_message"]
+    for message, field in ((login, "login_signature_b64"), (register, "register_signature_b64")):
+        signature = base64.b64decode(VEC[field])
+        assert keys.signing_key.sign(message).signature == signature
+        assert crypto.verify_signature(VEC["agent_id"], message, signature)
+
+
+def test_signature_rejections() -> None:
+    signature = base64.b64decode(VEC["login_signature_b64"])
+    login = VEC["login_message"].encode()
+    other = crypto.derive_keys(crypto.generate_phrase()).agent_id
+    assert not crypto.verify_signature(other, login, signature)  # autre clé
+    assert not crypto.verify_signature(VEC["agent_id"], login + b"x", signature)  # autre message
+    assert not crypto.verify_signature(VEC["agent_id"], login, signature[:-1])  # longueur
+    # une signature de connexion ne vaut pas inscription (préfixes distincts)
+    assert not crypto.verify_signature(VEC["agent_id"], VEC["register_message"].encode(), signature)
+    for bad in ("", "0OIl", "1" + VEC["agent_id"], "system:tribunal", "abc"):
+        assert crypto.public_key_of(bad) is None, bad
+        assert not crypto.verify_signature(bad, login, signature)
+    assert crypto.public_key_of(VEC["agent_id"]) is not None
+    # liée à l'instance : la même signature ne vaut pas pour un autre hôte
+    elsewhere = crypto.login_message("autre.example", VEC["agent_id"], VEC["login_nonce"])
+    assert not crypto.verify_signature(VEC["agent_id"], elsewhere, signature)
+
+
+def test_instance_host() -> None:
+    assert crypto.instance_host("https://Sancturai.Bluegenji-Esport.fr/") == "sancturai.bluegenji-esport.fr"
+    assert crypto.instance_host("http://127.0.0.1:8300") == "127.0.0.1:8300"

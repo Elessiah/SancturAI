@@ -173,7 +173,44 @@ garde les 7 quotidiennes et, à part, les 3 dernières d'avant migration (`pre-<
 volume dépasserait 85 % (seuil de la garde disque de l'app) avec la taille de la base en plus :
 `systemctl status sancturai-backup` le signale. La base ne contient aucune phrase ni clé et le vault y est chiffré,
 mais les posts du forum, les dossiers et signalements du tribunal, les messages à l'admin et l'outbox y sont en clair :
-une sauvegarde est une donnée sensible. Une copie hors du Pi est possible (`sudo scp`), à ranger hors de tout dépôt public.
+une sauvegarde est une donnée sensible.
+
+### Copie hors du Pi
+Chaque quotidienne part ensuite hors du Pi (`deploy/backup-offsite.sh`, appelé par backup.sh), sur le même stockage
+et avec les mêmes clés que la sauvegarde du site et du bot (`blueGenjiBot/doc/backup-onedrive.md`) : chiffrée par
+`age` pour les destinataires de `blueGenjiBot/scripts/backup-recipients.txt`, envoyée par `rclone` sous le compte
+`elessiah` (sa configuration rclone), dans `SancturAI/backups/` (`sancturai-<horodatage>-daily.dump.age`), effacée
+là-bas après 30 jours (la durée de la charte). Le dump en clair ne quitte pas root ; le chiffré attend l'envoi dans
+`/srv/sancturai-data/offsite/` (même volume, sous le même seuil de 85 %, effacé après l'envoi ; sans place, la copie
+échoue, service en échec et notifiée, la sauvegarde locale reste faite). Les sauvegardes
+d'avant migration restent sur le Pi. `BWLIMIT` plafonne le débit ; le service s'arrête au bout de 3 h.
+
+Installation (une fois ; `age` et le rclone officiel sont déjà là pour le bot) :
+```bash
+sudo install -m 600 -o elessiah ~/apps/SancturAI/deploy/backup-offsite.env.example ~/apps/.secrets/sancturai-backup.env
+nano ~/apps/.secrets/sancturai-backup.env   # RCLONE_REMOTE : le remote du bot (RCLONE_REMOTE de backup-onedrive.env)
+sudo systemctl start sancturai-backup && sudo systemctl status sancturai-backup --no-pager
+sudo cat /var/lib/sancturai/backup-status.json   # "ok": true, "remote", "sizeBytes"
+```
+Sans ce fichier, backup.sh garde la sauvegarde locale, et l'absence de copie est notifiée chaque jour sur Discord
+et écrite dans le statut (code 2 : le service, lui, reste en succès). Une sauvegarde locale ignorée (volume non
+monté ou trop plein) est aussi notifiée, comme un envoi interrompu par le délai de 3 h. Un échec d'envoi fait échouer le service, écrit `"ok": false` et la cause dans le statut, et prévient
+l'admin sur Discord (même appel que deploy.sh). Le statut suit le schéma de celui du bot
+(`/var/lib/bluegenji/backup-status.json`) pour que son rapport du lundi puisse le relire. Sur Nextcloud, corbeille et
+versions doivent être coupées côté serveur, sinon une copie effacée y survit au-delà des 30 jours.
+
+Restaurer depuis la copie hors du Pi. Sur la machine qui détient la clé privée age (gardée hors du Pi, comme pour
+le site et le bot), avec un rclone configuré pour le même stockage :
+```bash
+umask 077 && mkdir -p ~/sancturai-restore && cd ~/sancturai-restore
+rclone lsf <remote>:SancturAI/backups/
+rclone copy <remote>:SancturAI/backups/<fichier>.dump.age .
+age --decrypt -i ~/.bluegenji-backup.key -o restore.dump <fichier>.dump.age
+ssh elessiah@<pi> 'umask 077 && cat > ~/sancturai-restore.dump' < restore.dump
+```
+Sur le Pi (le fichier y est créé en 0600), lance la restauration ci-dessous avec `cat ~/sancturai-restore.dump` à
+la place de `sudo cat /srv/sancturai-data/backups/<fichier>.dump`, et `shred -u ~/sancturai-restore.dump` ensuite (et
+le dossier `~/sancturai-restore` sur l'autre machine).
 
 Restaurer (les données écrites depuis la sauvegarde sont perdues) :
 ```bash

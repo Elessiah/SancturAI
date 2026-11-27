@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import base58
 import nacl.utils
@@ -15,8 +16,9 @@ from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_decrypt,
     crypto_aead_xchacha20poly1305_ietf_encrypt,
 )
+from nacl.exceptions import BadSignatureError
 from nacl.exceptions import CryptoError as _NaclCryptoError
-from nacl.signing import SigningKey
+from nacl.signing import SigningKey, VerifyKey
 
 _MNEMONIC = Mnemonic("english")
 SALT = b"sancturai/v1"
@@ -29,6 +31,12 @@ INFO_PATH = b"sancturai/v1/path"
 # Données associées AEAD du vault (spec §6.1) : lient chaque blob à son agent ET à son path_id.
 AAD_PATH_FORMAT = "sancturai/v1/path|{agent_id}|{path_id}"
 AAD_CONTENT_FORMAT = "sancturai/v1/content|{agent_id}|{path_id}"
+# Messages signés Ed25519 (spec connexion signée §3) : le préfixe sépare connexion et inscription, l'hôte lie la
+# signature à l'instance (une instance malveillante ne peut pas relayer vers une autre ce qu'on lui a signé).
+LOGIN_MESSAGE_FORMAT = "sancturai/v1/login|{host}|{agent_id}|{nonce}"
+REGISTER_MESSAGE_FORMAT = "sancturai/v1/register|{host}|{agent_id}|{handle}|{ticket}"
+PUBLIC_KEY_BYTES = 32
+SIGNATURE_BYTES = 64
 
 
 class CryptoError(Exception):
@@ -95,6 +103,54 @@ def aad_path(agent_id: str, pid: str) -> bytes:
 
 def aad_content(agent_id: str, pid: str) -> bytes:
     return AAD_CONTENT_FORMAT.format(agent_id=agent_id, path_id=pid).encode()
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def instance_host(url: str) -> str:
+    """Hôte canonique d'une instance, celui des messages signés : nom d'hôte en minuscules, sans point final, en IDNA
+    (ASCII, comme sur le réseau), suivi de `:port` seulement si le port n'est pas celui du schéma. Une URL avec des
+    identifiants (user@) ou sans hôte est refusée (ValueError)."""
+    parts = urlsplit(url)
+    if parts.username is not None or not parts.hostname:
+        raise ValueError(f"URL without a plain host: {url!r}")
+    host = parts.hostname.rstrip(".")
+    host = host.encode("idna").decode("ascii").lower() if not host.isascii() else host.lower()
+    if ":" in host:  # IPv6 littérale
+        host = f"[{host}]"
+    port = parts.port
+    return host if port is None or port == _DEFAULT_PORTS.get(parts.scheme) else f"{host}:{port}"
+
+
+def login_message(host: str, agent_id: str, nonce: str) -> bytes:
+    return LOGIN_MESSAGE_FORMAT.format(host=host, agent_id=agent_id, nonce=nonce).encode()
+
+
+def register_message(host: str, agent_id: str, handle: str, ticket: str) -> bytes:
+    return REGISTER_MESSAGE_FORMAT.format(host=host, agent_id=agent_id, handle=handle, ticket=ticket).encode()
+
+
+def public_key_of(agent_id: str) -> bytes | None:
+    """Clé publique Ed25519 d'un agent_id, ou None s'il n'est pas un base58 canonique de 32 octets."""
+    try:
+        raw = base58.b58decode(agent_id)
+    except ValueError:
+        return None
+    if len(raw) != PUBLIC_KEY_BYTES or base58.b58encode(raw).decode() != agent_id:
+        return None
+    return raw
+
+
+def verify_signature(agent_id: str, message: bytes, signature: bytes) -> bool:
+    key = public_key_of(agent_id)
+    if key is None or len(signature) != SIGNATURE_BYTES:
+        return False
+    try:
+        VerifyKey(key).verify(message, signature)
+    except (BadSignatureError, ValueError, TypeError):
+        return False
+    return True
 
 
 def encrypt(key: bytes, plaintext: bytes, aad: bytes) -> bytes:

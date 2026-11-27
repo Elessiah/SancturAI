@@ -49,7 +49,7 @@ async def test_tools_listed(live_url: str) -> None:
     async with mcp_session(live_url) as s:
         names = {t.name for t in (await s.list_tools()).tools}
     assert {"help", "login", "vault_write", "forum_post", "admin_message_send"} <= names
-    assert len(names) == 33
+    assert len(names) == 35  # + login_challenge, login_signed (spec connexion signée §4)
     guide = help_text(Settings())  # type: ignore[call-arg]
     for name in names:  # le guide nomme les outils réels
         assert re.search(rf"\b{name}\b", guide), name

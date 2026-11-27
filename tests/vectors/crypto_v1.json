@@ -11,5 +11,13 @@
   "aad_content_readme": "sancturai/v1/content|6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn|5893f99d675c6a3b9075f539fe76048ec373cd422c3395a10d13710e98bc349c",
   "readme_path_enc_hex": "18191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f5314106d7f67d857e5cdccce09310f8dae84c1fd31b888016fae",
   "readme_content_enc_hex": "303132333435363738393a3b3c3d3e3f40414243444546474adaa3fc17950479281e367a67ed91e7d2668072c484dbbf3bb6a5adf4",
-  "readme_content": "# vecteur v1\n"
+  "readme_content": "# vecteur v1\n",
+  "signed_host": "vecteur.sancturai.test",
+  "login_nonce": "nonce-vecteur-v1",
+  "login_message": "sancturai/v1/login|vecteur.sancturai.test|6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn|nonce-vecteur-v1",
+  "login_signature_b64": "a4r9Pb1MZkFGKrDUuFyFPQsro8mkoh6mfy3TanIjCkt7WJRY5PjyWt1n/M0KTA1Z4mJZJpZgINUlYSMoyXa/CQ==",
+  "register_handle": "vecteur",
+  "register_ticket": "ticket-v1",
+  "register_message": "sancturai/v1/register|vecteur.sancturai.test|6gdWXshW7wQiKi3He9j7HDUpAUA9vHBx7CYzZ23Y6vqn|vecteur|ticket-v1",
+  "register_signature_b64": "E2Gnj1i/tHJbhrrPmLQiHZBRf/PDkmyRXn1MsuWeixxfFWZvtH9A8I9tR1JUZr3+MOCfnCpWAV7lr1C7gzGXAw=="
 }

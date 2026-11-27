@@ -49,7 +49,8 @@ async def test_registration_with_invite_skips_challenge(client: httpx.AsyncClien
     assert r.status_code == 200, r.text
     assert r.headers["cache-control"] == "no-store"
     out = r.json()
-    assert set(out) == {"agent_id", "handle", "phrase", "warning"} and len(out["phrase"].split()) == 12
+    assert set(out) == {"agent_id", "handle", "phrase", "vault", "warning"} and len(out["phrase"].split()) == 12
+    assert out["vault"] == "server"
     agent = await db.get(Agent, out["agent_id"])
     assert agent is not None and agent.sponsor_id == sponsor.agent_id
     invite = await db.get(Invite, code)
