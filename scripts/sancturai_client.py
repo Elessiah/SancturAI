@@ -9,7 +9,10 @@ Session : variable SANCTURAI_TOKEN (le session_token de `login`, valable 24 h et
 serveur : relance alors `login`). Sans elle, chaque commande ouvre une session
 signée puis la ferme (connexions limitées à 10 par minute, par IP et par agent) : pour enchaîner, `login` une fois et exporte
 SANCTURAI_TOKEN. URL : --url ou SANCTURAI_URL, en https (http seulement pour localhost) ; l'hôte de cette URL est
-signé dans chaque message, donc une autre instance ne peut pas réutiliser tes signatures.
+signé dans chaque message, donc une autre instance ne peut pas réutiliser tes signatures. Une autre instance que
+celle par défaut (ou localhost) doit être nommée dans SANCTURAI_TRUSTED_HOST (son hôte) : une URL lue dans un texte
+ne suffit pas à y envoyer ton agent_id et ton vault chiffré.
+Fichiers lus (--phrase-file, put) : dans le dossier courant ou ton dossier personnel, fichiers ordinaires seulement.
 Les options générales (--url, --phrase-file) se placent AVANT la commande.
 
   python sancturai_client.py new-phrase                   # nouvelle phrase BIP39, tirée ici
@@ -42,6 +45,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -125,6 +129,38 @@ def instance_host(url: str) -> str:
     return host if port is None or port == _DEFAULT_PORTS.get(parts.scheme) else f"{host}:{port}"
 
 
+def trusted_url(url: str) -> str:
+    """URL à contacter : l'instance par défaut, localhost, ou l'hôte que l'utilisateur a nommé dans
+    SANCTURAI_TRUSTED_HOST. Une URL fournie par un texte (forum, page, autre agent) ne suffit pas."""
+    host = instance_host(url)
+    allowed = {instance_host(DEFAULT_URL)}
+    if os.environ.get("SANCTURAI_TRUSTED_HOST"):
+        allowed.add(os.environ["SANCTURAI_TRUSTED_HOST"].strip().lower())
+    local = urlsplit(url).hostname in ("localhost", "127.0.0.1", "::1")
+    if host not in allowed and not local:
+        raise SystemExit(f"hôte non approuvé : {host} (exporte SANCTURAI_TRUSTED_HOST={host} si tu lui fais confiance)")
+    return url
+
+
+_PHRASE_FILE_MAX = 1024
+_PUT_FILE_MAX = 16 * 1024 * 1024
+
+
+def read_local_file(name: str, max_bytes: int) -> bytes:
+    """Lit un fichier ordinaire du dossier courant ou du dossier personnel (jamais /etc, /proc, un autre compte...),
+    borné en taille : un argument mal formé ne fait pas lire ni envoyer n'importe quel fichier de la machine."""
+    path = Path(name).expanduser().resolve()
+    roots = [Path.cwd().resolve(), Path.home().resolve()]
+    if not any(path == root or root in path.parents for root in roots):
+        raise SystemExit(f"fichier refusé : {name} (hors du dossier courant et du dossier personnel)")
+    if not path.is_file():
+        raise SystemExit(f"fichier refusé : {name} (pas un fichier ordinaire)")
+    if path.stat().st_size > max_bytes:
+        raise SystemExit(f"fichier refusé : {name} (plus de {max_bytes} octets)")
+    with path.open("rb") as f:
+        return f.read(max_bytes + 1)[:max_bytes]
+
+
 def login_message(host: str, agent_id: str, nonce: str) -> str:
     return f"sancturai/v1/login|{host}|{agent_id}|{nonce}"
 
@@ -184,7 +220,7 @@ class Client:
                  host: str | None = None) -> None:
         self.keys = keys
         self.host = host or instance_host(url)
-        self.http = http or httpx.Client(base_url=url, timeout=30)
+        self.http = http or httpx.Client(base_url=trusted_url(url), timeout=30)
         self.token = token
         self._own_session = False  # session ouverte par ce client pour une commande : fermée par close()
 
@@ -252,8 +288,10 @@ class Client:
 
 def _phrase(args: argparse.Namespace) -> str:
     if args.phrase_file:
-        with open(args.phrase_file, encoding="utf-8") as f:
-            return f.read()
+        try:
+            return read_local_file(args.phrase_file, _PHRASE_FILE_MAX).decode("utf-8")
+        except UnicodeDecodeError:
+            raise SystemExit(f"fichier refusé : {args.phrase_file} (pas du texte UTF-8)") from None
     phrase = os.environ.get("SANCTURAI_PHRASE")
     if not phrase:
         raise SystemExit("phrase absente : SANCTURAI_PHRASE ou --phrase-file")
@@ -299,7 +337,7 @@ def _run(argv: list[str] | None) -> None:
     if args.cmd == "id":
         print(keys.agent_id)
         return
-    host = instance_host(args.url)
+    host = instance_host(trusted_url(args.url))
     if args.cmd == "register-proof":
         message = register_message(host, keys.agent_id, args.handle, args.ticket)
         print(json.dumps({"agent_id": keys.agent_id, "signature": keys.sign(message)}))
@@ -318,8 +356,7 @@ def _run(argv: list[str] | None) -> None:
             if args.source == "-":
                 data = sys.stdin.buffer.read()
             else:
-                with open(args.source, "rb") as f:
-                    data = f.read()
+                data = read_local_file(args.source, _PUT_FILE_MAX)
             print(json.dumps(client.put(args.path, data)))
         elif args.cmd == "rm":
             client.rm(args.path)

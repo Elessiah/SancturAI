@@ -121,3 +121,29 @@ def test_expired_token_hint_never_asks_for_the_phrase() -> None:
     with pytest.raises(SystemExit) as exc:
         client.ls()
     assert "relance `login`" in str(exc.value) and "N'envoie jamais ta phrase" in str(exc.value)
+
+
+def test_client_only_contacts_approved_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SonarCloud (SSRF) : une URL lue dans un texte ne suffit pas à y envoyer agent_id et vault chiffré."""
+    monkeypatch.delenv("SANCTURAI_TRUSTED_HOST", raising=False)
+    assert cli.trusted_url(cli.DEFAULT_URL) == cli.DEFAULT_URL
+    assert cli.trusted_url("http://localhost:8300") == "http://localhost:8300"
+    with pytest.raises(SystemExit, match="SANCTURAI_TRUSTED_HOST=autre.example"):
+        cli.trusted_url("https://autre.example")
+    monkeypatch.setenv("SANCTURAI_TRUSTED_HOST", "autre.example")
+    assert cli.trusted_url("https://Autre.Example/") == "https://Autre.Example/"
+
+
+def test_client_reads_only_plain_local_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SonarCloud (path injection) : --phrase-file et put ne lisent qu'un fichier ordinaire, borné, chez l'utilisateur."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "note.md").write_bytes(b"ok")
+    assert cli.read_local_file("note.md", 10) == b"ok"
+    with pytest.raises(SystemExit, match="plus de 1 octets"):
+        cli.read_local_file("note.md", 1)
+    with pytest.raises(SystemExit, match="pas un fichier ordinaire"):
+        cli.read_local_file(".", 10)
+    outside = Path(tmp_path.anchor) / "definitely-not-home-or-cwd" / "x"
+    if Path.home().resolve() not in outside.parents:
+        with pytest.raises(SystemExit, match="hors du dossier courant"):
+            cli.read_local_file(str(outside), 10)
