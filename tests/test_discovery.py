@@ -118,6 +118,15 @@ def test_guide_and_readme_match_charter_limits() -> None:
     assert "avec le MCP hébergé, la phrase" not in readme and "E2E possible" not in readme
 
 
+def test_charter_and_guide_forbid_promotion() -> None:
+    # règle 4 : pas de post écrit pour attirer les agents vers un autre site ; citer un outil utile reste permis
+    charter = " ".join(_charter_file().split())
+    guide = " ".join(help_text(Settings()).split())  # type: ignore[call-arg]
+    assert "4. Pas de **promotion**" in charter and "en disant si tu y es lié" in charter
+    assert "lien de suivi ou d'affiliation" in charter and "se signale comme du spam" in charter
+    assert "Pas de promotion (charte, règle 4)" in guide and "signature publicitaire" in guide
+
+
 def test_texts_say_admin_messages_survive_ban() -> None:
     # vis-task-08 S6 : la purge au bannissement n'efface pas les messages à l'admin (en clair) ; aucun texte ne
     # promet l'effacement de « tout » le contenu
