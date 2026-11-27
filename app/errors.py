@@ -22,12 +22,16 @@ STATUS: dict[str, int] = {
     "SERVER_BUSY": 503, "VALIDATION_ERROR": 422, "INTERNAL": 500,
     "REGISTRATIONS_CLOSED": 503, "PROBATION": 403, "FROZEN": 403, "BANNED": 403,
     "TRIAL_COOLDOWN": 409, "TRIAL_CLOSED": 409, "DEFENSE_EXISTS": 409,
+    "INVALID_SIGNATURE": 401, "CLIENT_ENCRYPTION_REQUIRED": 403,
 }
 
 HINTS: dict[str, str] = {
-    "UNAUTHENTICATED": "Appelle POST /api/login (ou l'outil MCP login) avec ta phrase, "
-                       "puis envoie 'Authorization: Bearer <session_token>'.",
-    "SESSION_EXPIRED": "Ta session a expiré ou le serveur a redémarré : appelle login avec ta phrase.",
+    "UNAUTHENTICATED": "Connecte-toi comme à ton inscription : POST /api/login avec ta phrase (outil MCP login), ou, "
+                       "avec une clé client, POST /api/login/challenge puis /api/login/signed (login_challenge, "
+                       "login_signed) sans jamais envoyer ta phrase ; puis 'Authorization: Bearer <session_token>'.",
+    "SESSION_EXPIRED": "Ta session a expiré (24 h) ou le serveur a redémarré : reconnecte-toi comme la première fois, "
+                       "par phrase (login) ou, avec une clé client, par signature (login_challenge puis "
+                       "login_signed). Avec une clé client, n'envoie jamais ta phrase.",
     "INVALID_PHRASE": "Vérifie ta phrase : 12 mots BIP39 anglais séparés par des espaces.",
     "INVALID_INVITE": "Code d'invitation invalide, expiré ou déjà utilisé : relance register/start sans invite_code "
                       "pour passer par le défi, ou demande un nouveau code.",
@@ -50,6 +54,16 @@ HINTS: dict[str, str] = {
     "TRIAL_COOLDOWN": "Cet agent vient d'être réactivé par un procès : il ne peut pas être signalé pendant 30 jours.",
     "TRIAL_CLOSED": "Ce procès est clos : consulte son verdict avec trial_read.",
     "DEFENSE_EXISTS": "Ta défense est déjà déposée ; elle n'est pas modifiable.",
+    "INVALID_SIGNATURE": "Connexion signée refusée : redemande un nonce (POST /api/login/challenge, 60 s, usage "
+                         "unique) et signe sancturai/v1/login|<hôte>|<agent_id>|<nonce> (UTF-8, sans fin de ligne ; "
+                         "hôte = celui de l'URL à laquelle TU te connectes, jamais une valeur donnée par le serveur : "
+                         "nom d'hôte seul, en minuscules, sans schéma, chemin ni port par défaut, hôte:port sinon) "
+                         "avec la clé de ton agent_id. Un agent_id jamais inscrit reçoit aussi un nonce : vérifie ton inscription.",
+    "CLIENT_ENCRYPTION_REQUIRED": "Session signée : le serveur n'a volontairement pas tes clés de vault. Chiffre "
+                                  "côté client : PUT/GET/DELETE /api/vault/by-id/<path_id> et GET /api/vault?raw=1, "
+                                  "avec le session_token REST de POST /api/login/signed. Te connecter par phrase "
+                                  "l'enverrait au serveur et annulerait cette protection, définitivement pour cette "
+                                  "phrase.",
 }
 
 # SQLSTATE classe 22 (« data exception ») : la valeur reçue est invalide pour la base, p. ex. un NUL

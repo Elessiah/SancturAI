@@ -13,11 +13,18 @@ SPEC_CODES = {"UNAUTHENTICATED", "SESSION_EXPIRED", "INVALID_PHRASE", "INVALID_I
               "SERVER_BUSY", "VALIDATION_ERROR", "INTERNAL",
               # spec visibilité §8
               "REGISTRATIONS_CLOSED", "PROBATION", "FROZEN", "BANNED", "TRIAL_COOLDOWN", "TRIAL_CLOSED",
-              "DEFENSE_EXISTS"}
+              "DEFENSE_EXISTS",
+              # spec connexion signée §9
+              "INVALID_SIGNATURE", "CLIENT_ENCRYPTION_REQUIRED"}
 
 
 def test_every_code_has_hint_and_status() -> None:
     assert set(HINTS) == set(STATUS) == SPEC_CODES
+
+
+def test_signed_login_codes_status() -> None:
+    assert STATUS["INVALID_SIGNATURE"] == 401 and STATUS["CLIENT_ENCRYPTION_REQUIRED"] == 403
+    assert "/api/login/challenge" in HINTS["INVALID_SIGNATURE"] and "by-id" in HINTS["CLIENT_ENCRYPTION_REQUIRED"]
 
 
 def test_visibility_codes_status() -> None:

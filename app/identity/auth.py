@@ -22,8 +22,22 @@ def limit_register_complete(state: AppState, ip: str) -> None:
     state.limiter.hit(f"register-complete:{ip}", *REGISTER_COMPLETE_RATE)
 
 
+LOGINS_PER_AGENT = 10  # par minute, toutes IP confondues
+
+
 def limit_login(state: AppState, ip: str) -> None:
     state.limiter.hit(f"login:{ip}", 10, 60)
+
+
+def limit_login_agent(state: AppState, agent_id: str) -> None:
+    # par agent, appelée APRÈS la preuve (phrase dérivée ou signature valide) : un tiers ne peut pas l'épuiser.
+    # Borne les journaux « Connexion » (outbox, 30 jours) qu'un compte ferait écrire depuis des milliers d'IP.
+    state.limiter.hit(f"login-agent:{agent_id}", LOGINS_PER_AGENT, 60)
+
+
+def limit_login_challenge(state: AppState, ip: str) -> None:
+    # compteur distinct de login: (spec connexion signée §4) : une connexion signée coûte un hit de chaque
+    state.limiter.hit(f"login-challenge:{ip}", 10, 60)
 
 
 PROBATION_PERIOD = timedelta(days=7)

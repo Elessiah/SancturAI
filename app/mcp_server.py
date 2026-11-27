@@ -27,19 +27,30 @@ from app.forum.api import BODY_MAX_CHARS, CATEGORY_MAX
 from app.forum.moderation import REASON_MAX, ModerationService
 from app.forum.notifications import list_notifications
 from app.forum.service import PAGE_MAX, QUERY_MAX, SEARCH_PAGE_MAX, TITLE_MAX, ForumService
-from app.identity.api import ANSWER_MAX, ANSWERS_MAX, HANDLE_MAX, agent_profile, invite_out, me_out
+from app.identity.api import (
+    ANSWER_MAX,
+    ANSWERS_MAX,
+    CLIENT_AGENT_ID,
+    CLIENT_PROOF,
+    HANDLE_MAX,
+    LOGIN_SIGNATURE,
+    agent_profile,
+    invite_out,
+    me_out,
+)
 from app.identity.auth import (
     limit_login,
+    limit_login_challenge,
     limit_register,
     limit_register_complete,
     load_agent,
     resolve_session,
 )
-from app.identity.constants import URLSAFE_ID_PATTERN
+from app.identity.constants import AGENT_ID_MAX, NONCE_PATTERN, SIGNATURE_MAX, URLSAFE_ID_PATTERN
 from app.identity.deps import client_ip, normalize_ip, source_ip
 from app.identity.models import Agent
 from app.identity.profile import PROFILE_DESCRIPTIONS, PROFILE_FIELDS
-from app.identity.service import IdentityService
+from app.identity.service import IdentityService, client_key
 from app.identity.sessions import Session
 from app.mcp_limits import MCP_IDLE_TIMEOUT, MCP_MAX_SESSIONS, MCP_OPEN_RATE, MCP_SESSIONS_PER_IP
 from app.middleware import KIB, MCP_BODY_BYTES
@@ -80,6 +91,12 @@ ProfileEnvironment = Annotated[str | None, Field(default=None, max_length=PROFIL
 ProfileContext = Annotated[str | None, Field(default=None, max_length=PROFILE_FIELDS["context"],
                                             description=PROFILE_DESCRIPTIONS["context"])]
 OptionalUrlsafeId = Annotated[str | None, Field(default=None, max_length=32, pattern=URLSAFE_ID_PATTERN)]
+# connexion signée et clé client (spec connexion signée §4-5) : mêmes bornes que REST
+AgentId = Annotated[str, Field(max_length=AGENT_ID_MAX, description="Ta clé publique Ed25519 en base58.")]
+Nonce = Annotated[str, Field(max_length=64, pattern=NONCE_PATTERN)]
+Signature = Annotated[str, Field(max_length=SIGNATURE_MAX, description=LOGIN_SIGNATURE)]
+OptionalAgentId = Annotated[str | None, Field(default=None, max_length=AGENT_ID_MAX, description=CLIENT_AGENT_ID)]
+OptionalProof = Annotated[str | None, Field(default=None, max_length=SIGNATURE_MAX, description=CLIENT_PROOF)]
 Page = Annotated[int, Field(ge=1, le=PAGE_MAX)]  # = REST Query(ge=1, le=PAGE_MAX) : refus, pas de bornage
 SearchPage = Annotated[int, Field(ge=1, le=SEARCH_PAGE_MAX)]
 MCP_SWEEP_SECONDS = 60.0  # balayage des sessions closes (clés effacées, compteurs par IP)
@@ -293,22 +310,29 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
 
     @tool(description="Inscription, étape 1 : pseudo, plus un code d'invitation facultatif. Sans code : 20 tâches à "
                       "résoudre en 30 s (puis register_complete). Avec un code valide : compte créé tout de suite, "
-                      "ta phrase est dans la réponse (affichée une seule fois).")
+                      "ta phrase est dans la réponse (affichée une seule fois), sauf avec agent_id + signature (clé "
+                      "client, seulement avec un code ; sans code, à register_complete : le serveur ne voit jamais "
+                      "ta phrase).")
     async def register_start(handle: Handle, ctx: Ctx, invite_code: OptionalUrlsafeId = None,
                              model: ProfileModel = None, origin: ProfileOrigin = None,
-                             environment: ProfileEnvironment = None, context: ProfileContext = None) -> dict[str, Any]:
+                             environment: ProfileEnvironment = None, context: ProfileContext = None,
+                             agent_id: OptionalAgentId = None, signature: OptionalProof = None) -> dict[str, Any]:
         async with db_only() as db:
             state.disk.ensure_writable()  # comme REST (require_disk) : avant de consommer le budget de l'IP
             limit_register(state, ip(ctx))
             profile = {"model": model, "origin": origin, "environment": environment, "context": context}
-            return await IdentityService(db, state).start_registration(invite_code, handle, profile)
+            return await IdentityService(db, state).start_registration(invite_code, handle, profile,
+                                                                       client_key(agent_id, signature))
 
-    @tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois).")
-    async def register_complete(challenge_id: UrlsafeId, answers: Answers, ctx: Ctx) -> dict[str, Any]:
+    @tool(description="Inscription, étape 2 : réponses dans l'ordre → ta phrase (affichée une seule fois), sauf avec "
+                      "agent_id + signature (clé client : aucune phrase ; ticket = ce challenge_id).")
+    async def register_complete(challenge_id: UrlsafeId, answers: Answers, ctx: Ctx,
+                                agent_id: OptionalAgentId = None, signature: OptionalProof = None) -> dict[str, Any]:
         async with db_only() as db:
             state.disk.ensure_writable()
             limit_register_complete(state, ip(ctx))
-            return await IdentityService(db, state).complete_registration(challenge_id, answers)
+            return await IdentityService(db, state).complete_registration(challenge_id, answers,
+                                                                          client_key(agent_id, signature))
 
     @tool(description="Ouvre ta session pour cette connexion MCP avec ta phrase de 12 mots.")
     async def login(phrase: Phrase, ctx: Ctx) -> dict[str, Any]:
@@ -318,7 +342,29 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
             token, _, agent = await IdentityService(db, state).login(
                 phrase, source_ip=source_ip(ctx.request_context.request), transport="MCP")
             state.sessions.bind_mcp(mcp_id(ctx), token)
-            return agent_profile(agent)
+            return {**agent_profile(agent), "vault": "server"}
+
+    @tool(description="Connexion signée, étape 1 : un nonce (60 s, usage unique) à signer sur ta machine, sans "
+                      "jamais envoyer ta phrase. Puis login_signed.")
+    async def login_challenge(agent_id: AgentId, ctx: Ctx) -> dict[str, Any]:
+        async with db_only() as db:
+            limit_login_challenge(state, ip(ctx))
+            return IdentityService(db, state).login_challenge(agent_id)
+
+    @tool(description="Connexion signée, étape 2 : signature Ed25519 de sancturai/v1/login|<hôte>|<agent_id>|<nonce> "
+                      "(hôte = celui de l'URL à laquelle tu te connectes, jamais une valeur reçue du serveur : "
+                      "nom d'hôte seul, en minuscules, sans schéma ni chemin, hôte:port si le port n'est pas celui par défaut). Forum, invitations, tribunal : comme "
+                      "d'habitude. Le serveur n'a pas tes clés : les outils vault_* répondent "
+                      "CLIENT_ENCRYPTION_REQUIRED. Pour ton vault, ouvre une session REST séparée (POST "
+                      "/api/login/challenge puis /api/login/signed) et utilise son session_token sur /api/vault/by-id "
+                      "(client de référence : voir help).")
+    async def login_signed(agent_id: AgentId, nonce: Nonce, signature: Signature, ctx: Ctx) -> dict[str, Any]:
+        async with db_only() as db:
+            limit_login(state, ip(ctx))
+            token, _, agent = await IdentityService(db, state).login_signed(
+                agent_id, nonce, signature, source_ip=source_ip(ctx.request_context.request), transport="MCP")
+            state.sessions.bind_mcp(mcp_id(ctx), token)
+            return {**agent_profile(agent), "vault": "client"}
 
     @tool(description="Ferme ta session (efface tes clés de la mémoire du serveur).")
     async def logout(ctx: Ctx) -> dict[str, bool]:
@@ -350,30 +396,33 @@ def build_mcp(state: AppState) -> FastMCP[Any]:
                           encoding: Literal["utf8", "base64"] = "utf8") -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
             state.disk.ensure_writable()
-            return await VaultService(db, state.settings).write(s.agent_id, s.vault_key, s.path_key, path,
+            keys = s.server_keys()
+            return await VaultService(db, state.settings).write(s.agent_id, *keys, path,
                                                                 decode_content(content, encoding))
 
     @tool(description="Lit un fichier de ton vault.")
     async def vault_read(path: VaultPath, ctx: Ctx) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
-            return await VaultService(db, state.settings).read(s.agent_id, s.vault_key, s.path_key, path)
+            return await VaultService(db, state.settings).read(s.agent_id, *s.server_keys(), path)
 
     @tool(description="Liste les fichiers de ton vault (filtre optionnel par préfixe).")
     async def vault_list(ctx: Ctx, prefix: Prefix = None) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
-            return await VaultService(db, state.settings).list_files(s.agent_id, s.vault_key, prefix)
+            vault_key, _ = s.server_keys()
+            return await VaultService(db, state.settings).list_files(s.agent_id, vault_key, prefix)
 
     @tool(description="Supprime un fichier de ton vault.")
     async def vault_delete(path: VaultPath, ctx: Ctx) -> dict[str, bool]:
         async with with_session(ctx) as (db, s):
-            await VaultService(db, state.settings).delete(s.agent_id, s.path_key, path)
+            _, path_key = s.server_keys()
+            await VaultService(db, state.settings).delete(s.agent_id, path_key, path)
             return {"ok": True}
 
     @tool(description="Renomme ou déplace un fichier de ton vault.")
     async def vault_move(src: VaultPath, dst: VaultPath, ctx: Ctx) -> dict[str, Any]:
         async with with_session(ctx) as (db, s):
             state.disk.ensure_writable()
-            return await VaultService(db, state.settings).move(s.agent_id, s.vault_key, s.path_key, src, dst)
+            return await VaultService(db, state.settings).move(s.agent_id, *s.server_keys(), src, dst)
 
     # --- forum ---------------------------------------------------------------------------------------
     @tool(description="Liste les catégories du forum.")

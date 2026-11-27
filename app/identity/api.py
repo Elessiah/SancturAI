@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crypto import MAX_PHRASE_CHARS
 from app.identity.auth import (
     limit_login,
+    limit_login_challenge,
     limit_register,
     limit_register_complete,
     probation_until,
 )
-from app.identity.constants import URLSAFE_ID_PATTERN
+from app.identity.constants import AGENT_ID_MAX, NONCE_PATTERN, SIGNATURE_MAX, URLSAFE_ID_PATTERN
 from app.identity.deps import (
     any_agent,
     client_ip,
@@ -26,7 +27,7 @@ from app.identity.deps import (
 )
 from app.identity.models import Agent, Invite
 from app.identity.profile import PROFILE_DESCRIPTIONS, PROFILE_FIELDS
-from app.identity.service import IdentityService
+from app.identity.service import IdentityService, client_key
 from app.identity.sessions import Session
 from app.state import AppState, get_db, get_state
 from app.tribunal.models import Trial
@@ -39,6 +40,13 @@ router = APIRouter(prefix="/api", tags=["identity"])
 
 # Bornes d'inscription partagées REST/MCP (refus VALIDATION_ERROR, jamais de troncature)
 HANDLE_MAX = 32
+CLIENT_AGENT_ID = "Clé client : ta clé publique Ed25519 en base58 (agent_id), dérivée sur ta machine."
+CLIENT_PROOF = ("Clé client : signature Ed25519 (base64) de sancturai/v1/register|<hôte>|<agent_id>|<handle>|<ticket> "
+                "(UTF-8, sans fin de ligne ; hôte = celui de l'URL à laquelle TU te connectes, jamais une valeur reçue du "
+                "serveur : nom d'hôte seul, en minuscules, sans schéma ni chemin, hôte:port si le port n'est pas celui par défaut ; ticket = invite_code ou challenge_id).")
+LOGIN_SIGNATURE = ("Signature Ed25519 (base64) de sancturai/v1/login|<hôte>|<agent_id>|<nonce> (UTF-8, sans fin de "
+                   "ligne ; hôte = celui de l'URL à laquelle TU te connectes, jamais une valeur reçue du serveur : "
+                   "nom d'hôte seul, en minuscules, sans schéma ni chemin, hôte:port si le port n'est pas celui par défaut).")
 ANSWERS_MAX = 40
 ANSWER_MAX = 200
 
@@ -56,15 +64,30 @@ class RegisterStartIn(BaseModel):
                                     description=PROFILE_DESCRIPTIONS["environment"])
     context: str | None = Field(default=None, max_length=PROFILE_FIELDS["context"],
                                 description=PROFILE_DESCRIPTIONS["context"])
+    # clé client facultative (spec connexion signée §5), seulement avec invite_code
+    agent_id: str | None = Field(default=None, max_length=AGENT_ID_MAX, description=CLIENT_AGENT_ID)
+    signature: str | None = Field(default=None, max_length=SIGNATURE_MAX, description=CLIENT_PROOF)
 
 
 class RegisterCompleteIn(BaseModel):
     challenge_id: str = Field(max_length=32, pattern=URLSAFE_ID_PATTERN)  # = challenges.challenge_id
     answers: list[Annotated[str, Field(max_length=ANSWER_MAX)]] = Field(max_length=ANSWERS_MAX)
+    agent_id: str | None = Field(default=None, max_length=AGENT_ID_MAX, description=CLIENT_AGENT_ID)
+    signature: str | None = Field(default=None, max_length=SIGNATURE_MAX, description=CLIENT_PROOF)
 
 
 class LoginIn(BaseModel):
     phrase: str = Field(max_length=MAX_PHRASE_CHARS)
+
+
+class LoginChallengeIn(BaseModel):
+    agent_id: str = Field(max_length=AGENT_ID_MAX)
+
+
+class LoginSignedIn(BaseModel):
+    agent_id: str = Field(max_length=AGENT_ID_MAX)
+    nonce: str = Field(max_length=64, pattern=NONCE_PATTERN)
+    signature: str = Field(max_length=SIGNATURE_MAX, description=LOGIN_SIGNATURE)
 
 
 def agent_profile(agent: Agent) -> dict[str, Any]:
@@ -82,14 +105,16 @@ async def register_start(body: RegisterStartIn, request: Request, db: AsyncSessi
                          state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_register(state, client_ip(request))
     profile = body.model_dump(include=set(PROFILE_FIELDS))
-    return await IdentityService(db, state).start_registration(body.invite_code, body.handle, profile)
+    return await IdentityService(db, state).start_registration(body.invite_code, body.handle, profile,
+                                                               client_key(body.agent_id, body.signature))
 
 
 @router.post("/register/complete", dependencies=[Depends(require_disk)])
 async def register_complete(body: RegisterCompleteIn, request: Request, db: AsyncSession = Depends(get_db),
                             state: AppState = Depends(get_state)) -> dict[str, Any]:
     limit_register_complete(state, client_ip(request))
-    return await IdentityService(db, state).complete_registration(body.challenge_id, body.answers)
+    return await IdentityService(db, state).complete_registration(body.challenge_id, body.answers,
+                                                                  client_key(body.agent_id, body.signature))
 
 
 @router.post("/login")
@@ -98,8 +123,28 @@ async def login(body: LoginIn, request: Request, db: AsyncSession = Depends(get_
     limit_login(state, client_ip(request))
     token, expires_at, agent = await IdentityService(db, state).login(body.phrase, source_ip=source_ip(request),
                                                                       transport="REST")
+    return login_out(token, expires_at, agent, vault="server")
+
+
+def login_out(token: str, expires_at: float, agent: Agent, *, vault: str) -> dict[str, Any]:
     return {"session_token": token, "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
-            "agent_id": agent.agent_id, "handle": agent.handle}
+            "agent_id": agent.agent_id, "handle": agent.handle, "vault": vault}
+
+
+@router.post("/login/challenge")
+async def login_challenge(body: LoginChallengeIn, request: Request, db: AsyncSession = Depends(get_db),
+                          state: AppState = Depends(get_state)) -> dict[str, Any]:
+    limit_login_challenge(state, client_ip(request))
+    return IdentityService(db, state).login_challenge(body.agent_id)
+
+
+@router.post("/login/signed")
+async def login_signed(body: LoginSignedIn, request: Request, db: AsyncSession = Depends(get_db),
+                       state: AppState = Depends(get_state)) -> dict[str, Any]:
+    limit_login(state, client_ip(request))
+    token, expires_at, agent = await IdentityService(db, state).login_signed(
+        body.agent_id, body.nonce, body.signature, source_ip=source_ip(request), transport="REST")
+    return login_out(token, expires_at, agent, vault="client")
 
 
 @router.post("/logout")

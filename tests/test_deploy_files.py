@@ -445,8 +445,55 @@ def test_backup_script_and_timer() -> None:
     assert "sancturai-backup.timer" in doc and "pg_restore" in doc and "--single-transaction" in doc
 
 
+def test_offsite_backup_script() -> None:
+    sh = (DEPLOY / "backup-offsite.sh").read_text(encoding="utf-8")
+    assert sh.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in sh and "umask 077" in sh
+    # aligné sur la sauvegarde du site et du bot : age pour les mêmes destinataires, rclone, purge par ancienneté
+    assert "age --encrypt --recipients-file" in sh and "blueGenjiBot/scripts/backup-recipients.txt" in sh
+    assert "rclone copy" in sh and "--retries 3" in sh and "--min-age" in sh
+    # nos copies seulement : le préfixe du bot (bluegenji-*) n'est jamais purgé d'ici
+    assert '--include "sancturai-*.dump.age"' in sh and "bluegenji-" not in sh.split("set -euo pipefail")[1]
+    assert "purge_margin_hours=3" in sh and "^[1-9][0-9]*$" in sh  # RETENTION_DAYS >= 1 : jamais de purge totale
+    # root ne source pas le fichier du compte utilisateur, et rclone tourne sous ce compte
+    assert "source " not in sh and '\n. "' not in sh and "runuser -u" in sh
+    assert "/home/elessiah/apps/.secrets/sancturai-backup.env" in sh
+    # échec : statut + notification Discord (notify.sh partagé), corps JSON sérialisé (jamais interpolé)
+    notify = (DEPLOY / "notify.sh").read_text(encoding="utf-8")
+    assert "json.dumps" in notify and "/internal/sancturai/notify" in notify and "-H @-" in notify
+    assert ". ./notify.sh" in sh and "mv -f -T" in sh
+    # revues cycle 2 : interruption (TimeoutStartSec) signalée, tableau d'options jamais vide sous set -u
+    assert "trap 'fail \"interrompu" in sh and "limit_args=(--transfers 1)" in sh
+    env = (DEPLOY / "backup-offsite.env.example").read_text(encoding="utf-8")
+    assert "RETENTION_DAYS=30" in env and "REMOTE_DIR=SancturAI/backups" in env
+    charter = (ROOT / "CHARTER.md").read_text(encoding="utf-8")
+    assert "effacée là-bas après 30 jours" in charter  # durée annoncée = RETENTION_DAYS par défaut
+    backup = (DEPLOY / "backup.sh").read_text(encoding="utf-8")
+    # quotidienne seulement, après la sauvegarde locale et le verrou de déploiement rendu ; 2 (non configurée) passe
+    assert backup.index("exec 9>&-") < backup.index("./backup-offsite.sh") < backup.index('"${rc}" -eq 2')
+    assert backup.index('echo "${dir}/${name}"') < backup.index("./backup-offsite.sh")
+    # revues perf/sécu cycle 1 : chiffré posé sur le volume de données (ni /tmp ni RAM), dans un dossier de root où le
+    # compte de rclone ne peut rien remplacer (aucun chown de root sur un chemin qu'il contrôle), place réservée
+    assert "/tmp" not in sh  # noqa: S108
+    assert "stage=/srv/sancturai-data/offsite" in sh and "chown" not in sh
+    assert "install -d -o root -g root -m 755" in sh and '[[ ! -L "${stage}" ]]' in sh
+    # la copie vérifie sa propre place (jamais au prix de la sauvegarde locale) ; sauts de backup.sh notifiés
+    assert "place insuffisante" in sh and "max_used_pct=85" in sh and '"${limit_args[@]}"' in sh
+    assert "2 * db_bytes" not in backup and ". ./notify.sh" in backup and 'skip "${data} non monté"' in backup
+    # reliquats retirés par backup-offsite.sh seul, sous son verrou (jamais pendant l'envoi d'un autre)
+    assert "sancturai-*.age" not in backup and sh.index("flock -n 8") < sh.index("-name 'sancturai-*.age' -delete")
+    assert "trap 'fail \"erreur inattendue" in sh and 'step="envoi"' in sh
+    # configuration absente : statut + notification (la charte promet la copie), code 2
+    missing = sh[sh.index('if [[ ! -f "${config}" ]]'):sh.index("conf() {")]
+    assert "notify" in missing and "write_status false" in missing and "exit 2" in missing
+    svc = (DEPLOY / "systemd" / "sancturai-backup.service").read_text(encoding="utf-8").splitlines()
+    assert "TimeoutStartSec=3h" in svc
+    doc = setup_doc()
+    assert "### Copie hors du Pi" in doc and "age --decrypt" in doc and "backup-status.json" in doc
+    assert "umask 077" in doc[doc.index("### Copie hors du Pi"):]  # restauration : dump déchiffré jamais lisible par tous
+
+
 def test_scripts_are_executable_in_git() -> None:
-    files = ["deploy/backup.sh", "deploy/deploy.sh", "deploy/postgres/init/01-roles.sh"]
+    files = ["deploy/backup.sh", "deploy/backup-offsite.sh", "deploy/deploy.sh", "deploy/postgres/init/01-roles.sh"]
     out = subprocess.run(  # noqa: S603
         ["git", "ls-files", "-s", *files],  # noqa: S607
         cwd=ROOT, capture_output=True, text=True, check=True,

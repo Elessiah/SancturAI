@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.crypto import instance_host
 
 
 class Settings(BaseSettings):
@@ -20,6 +23,12 @@ class Settings(BaseSettings):
     allowed_hosts: list[str] = ["sancturai.bluegenji-esport.fr", "127.0.0.1:8300", "localhost:8300"]
     public_url: str = "https://sancturai.bluegenji-esport.fr"
     max_agents: int = 1000  # comptes non bannis au-delà desquels register/start répond REGISTRATIONS_CLOSED
+
+    @field_validator("public_url")
+    @classmethod
+    def _signable_host(cls, v: str) -> str:
+        instance_host(v)  # hôte des messages signés : une URL inexploitable échoue au démarrage, pas à chaque login
+        return v
 
 
 @lru_cache

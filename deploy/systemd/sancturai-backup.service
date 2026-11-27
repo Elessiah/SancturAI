@@ -10,3 +10,5 @@ ExecStart=/home/elessiah/apps/SancturAI/deploy/backup.sh daily
 # Le reste du serveur passe en priorité.
 Nice=19
 IOSchedulingClass=idle
+# Un envoi hors du Pi bloqué (réseau) ne déborde pas sur la sauvegarde du lendemain.
+TimeoutStartSec=3h

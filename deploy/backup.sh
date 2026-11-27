@@ -3,9 +3,12 @@
 # pg_dump au format custom (compressé) dans le volume de 20 Go, jamais sur la racine partagée. La base ne contient
 # que des chiffrés et des empreintes : aucune phrase ni clé n'est écrite. Rotation par étiquette : 7 quotidiennes,
 # 3 d'avant migration (celle d'un retour arrière survit aux quotidiennes). Restauration : setup.md.
-# Code 2 : sauvegarde ignorée (volume non monté ou trop plein) ; tout autre échec : 1.
+# Une quotidienne part ensuite, chiffrée, hors du Pi (backup-offsite.sh) ; celles d'avant migration restent ici.
+# Code 2 : sauvegarde ignorée (volume non monté ou trop plein) ; tout autre échec : 1, copie hors du Pi comprise.
 set -euo pipefail
 cd "$(dirname "$0")"
+# shellcheck source=notify.sh
+. ./notify.sh
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "lancer avec sudo : sudo deploy/backup.sh daily|pre-<sha12>" >&2
   exit 1
@@ -25,15 +28,20 @@ else
   kind=pre keep=3
 fi
 
-mountpoint -q "${data}" || { echo "AVERTISSEMENT : ${data} non monté, sauvegarde ignorée" >&2; exit 2; }
+skip() {  # sauvegarde ignorée (code 2) : pas une panne du service, mais la charte la promet, donc l'admin le sait
+  echo "AVERTISSEMENT : $1" >&2
+  notify "Sauvegarde SancturAI ${label} ignorée : $1."
+  exit 2
+}
+mountpoint -q "${data}" || skip "${data} non monté"
 # Taille de la base (majorant du dump compressé) : pg/ est sur le même volume, un dump qui le remplirait
-# arrêterait Postgres. On ne sauvegarde que si usage actuel + taille de la base reste sous le seuil.
+# arrêterait Postgres. On ne sauvegarde que si usage actuel + taille de la base reste sous le seuil (la copie chiffrée
+# pour l'envoi hors du Pi vérifie sa propre place : son manque ne coûte jamais la sauvegarde locale).
 db_bytes=$(docker compose exec -T -u postgres db psql -U postgres -Atc "SELECT pg_database_size('sancturai')")
 [[ "${db_bytes}" =~ ^[0-9]+$ ]] || { echo "taille de la base illisible" >&2; exit 1; }
 read -r total used < <(df --output=size,used -B1 "${data}" | tail -n 1)
 if [[ $(( (used + db_bytes) * 100 )) -ge $(( total * max_used_pct )) ]]; then
-  echo "AVERTISSEMENT : ${data} dépasserait ${max_used_pct} % avec la sauvegarde (${db_bytes} octets) : ignorée" >&2
-  exit 2
+  skip "${data} dépasserait ${max_used_pct} % avec la sauvegarde (${db_bytes} octets)"
 fi
 
 umask 077
@@ -50,3 +58,11 @@ trap - EXIT
 find "${dir}" -maxdepth 1 -type f -name "*-${kind}*.dump" -printf '%f\n' | sort -r | tail -n +"$((keep + 1))" \
   | while read -r old; do rm -f -- "${dir}/${old}"; done
 echo "${dir}/${name}"
+if [[ "${kind}" = daily ]]; then
+  # Verrou rendu avant l'envoi : un envoi lent (reprises rclone) ne bloque pas un déploiement.
+  exec 9>&-
+  rc=0
+  ./backup-offsite.sh "${dir}/${name}" || rc=$?
+  # 2 : copie hors du Pi pas encore configurée (notifiée, écrite dans le statut) ; la sauvegarde locale est faite.
+  [[ "${rc}" -eq 0 || "${rc}" -eq 2 ]] || exit 1
+fi

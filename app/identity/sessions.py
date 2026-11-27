@@ -1,19 +1,46 @@
+import base64
+import binascii
+import hashlib
+import hmac
 import secrets
+import struct
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+
+from app.errors import ApiError
 
 # Plafond de sessions vivantes par agent : au-delà, la plus ancienne est révoquée
 # (borne la mémoire face à des logins répétés).
 MAX_SESSIONS_PER_AGENT = 10
 
 
+# Nonces de connexion signée (spec connexion signée §4) : sans état, 60 s, usage unique.
+NONCE_TTL_SECONDS = 60
+# Nonces déjà utilisés retenus jusqu'à leur échéance : seule une connexion signée d'un agent INSCRIT en ajoute un
+# (bornée par la limite login: et par une vraie signature), jamais une demande de nonce.
+MAX_USED_NONCES = 100_000
+_NONCE_BYTES = 32  # horodatage 8 o ‖ sel 8 o ‖ HMAC tronqué 16 o
+
+
 @dataclass
 class Session:
     agent_id: str
-    vault_key: bytes = field(repr=False)
-    path_key: bytes = field(repr=False)
+    # None pour une session signée (spec connexion signée §6) : le serveur n'a pas les clés du vault
+    vault_key: bytes | None = field(repr=False)
+    path_key: bytes | None = field(repr=False)
     expires_at: float  # horloge interne (clock)
+
+    @property
+    def signed(self) -> bool:
+        return self.vault_key is None
+
+    def server_keys(self) -> tuple[bytes, bytes]:
+        """(vault_key, path_key) des routes qui chiffrent côté serveur ; refus pour une session signée."""
+        if self.vault_key is None or self.path_key is None:
+            raise ApiError("CLIENT_ENCRYPTION_REQUIRED", "signed session: the server holds no vault key")
+        return self.vault_key, self.path_key
 
 
 class SessionStore:
@@ -30,7 +57,7 @@ class SessionStore:
         self._mcp_revoked: dict[str, float] = {}
         self._by_agent: dict[str, dict[str, None]] = {}  # agent -> tokens (ordre de création)
 
-    def create(self, agent_id: str, vault_key: bytes, path_key: bytes) -> tuple[str, float]:
+    def create(self, agent_id: str, vault_key: bytes | None, path_key: bytes | None) -> tuple[str, float]:
         self._purge()
         tokens = self._by_agent.get(agent_id)
         while tokens and len(tokens) >= MAX_SESSIONS_PER_AGENT:
@@ -124,3 +151,58 @@ class SessionStore:
             self.revoke(token)
         for mcp_id in [m for m, deadline in self._mcp_revoked.items() if deadline <= now]:
             del self._mcp_revoked[mcp_id]
+
+
+class LoginNonces:
+    """Nonces de connexion signée SANS ÉTAT (revue sécu/perf cycle 1) : un nonce est l'horodatage d'émission, un sel
+    et un HMAC (secret de processus) qui le lie à l'agent_id. En émettre ne coûte aucune mémoire : un flot de demandes
+    (IPv6 tournantes) ne peut ni remplir une table ni bloquer les connexions des autres. Seuls les nonces utilisés par
+    une connexion réussie sont retenus, jusqu'à leur échéance, pour l'usage unique. Le secret change à chaque
+    démarrage : les nonces émis avant un redémarrage sont refusés, comme les sessions sont perdues. L'horodatage est
+    décalé d'une valeur aléatoire par processus : un nonce ne révèle pas depuis quand la machine tourne."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic, secret: bytes | None = None) -> None:
+        self._clock = clock
+        self._secret = secret or secrets.token_bytes(32)
+        self._offset = secrets.randbelow(2**40) / 1000  # s, ajouté à l'horloge (monotonic = temps depuis le boot)
+        # nonce décodé -> échéance ; OrderedDict : retirer en tête est O(1) (un dict garderait des cases mortes)
+        self._used: OrderedDict[bytes, float] = OrderedDict()
+
+    def _now(self) -> float:
+        return self._clock() + self._offset
+
+    def _mac(self, agent_id: str, head: bytes) -> bytes:
+        return hmac.new(self._secret, b"sancturai/login-nonce|" + head + agent_id.encode(), hashlib.sha256).digest()[:16]
+
+    def issue(self, agent_id: str) -> str:
+        head = struct.pack(">Q", int(self._now() * 1000)) + secrets.token_bytes(8)
+        return base64.urlsafe_b64encode(head + self._mac(agent_id, head)).decode().rstrip("=")
+
+    def check(self, agent_id: str, nonce: str) -> bytes | None:
+        """Clé d'usage unique d'un nonce émis pour cet agent, frais et pas encore utilisé ; None sinon.
+        La clé est le nonce DÉCODÉ : deux écritures base64 d'un même nonce ne passent pas deux fois."""
+        try:
+            raw = base64.urlsafe_b64decode(nonce + "=" * (-len(nonce) % 4))
+        except (binascii.Error, ValueError):
+            return None
+        if len(raw) != _NONCE_BYTES or not hmac.compare_digest(raw[16:], self._mac(agent_id, raw[:16])):
+            return None
+        age = self._now() - struct.unpack(">Q", raw[:8])[0] / 1000
+        if not 0 <= age < NONCE_TTL_SECONDS or raw in self._used:
+            return None
+        return raw
+
+    def mark_used(self, key: bytes) -> None:
+        """À appeler juste après un `check` réussi, sans `await` entre les deux (pas de course entre requêtes)."""
+        now = self._now()
+        while self._used:  # purge par le début, O(1) par entrée retirée
+            first = next(iter(self._used))
+            if self._used[first] > now:
+                break
+            self._used.popitem(last=False)
+        if len(self._used) >= MAX_USED_NONCES:
+            raise ApiError("SERVER_BUSY", "too many signed logins in the last minute", retry_after=NONCE_TTL_SECONDS)
+        self._used[key] = struct.unpack(">Q", key[:8])[0] / 1000 + NONCE_TTL_SECONDS
+
+    def clear(self) -> None:
+        self._used.clear()
