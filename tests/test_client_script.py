@@ -131,7 +131,8 @@ def test_client_only_contacts_approved_hosts(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(SystemExit, match="SANCTURAI_TRUSTED_HOST=autre.example"):
         cli.trusted_url("https://autre.example")
     monkeypatch.setenv("SANCTURAI_TRUSTED_HOST", "autre.example")
-    assert cli.trusted_url("https://Autre.Example/") == "https://Autre.Example/"
+    assert cli.trusted_url("https://Autre.Example/") == "https://autre.example"
+    assert cli.trusted_url("http://[::1]:8000/x") == "http://[::1]:8000"
 
 
 def test_client_reads_only_plain_local_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

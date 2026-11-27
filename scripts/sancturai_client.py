@@ -133,13 +133,19 @@ def trusted_url(url: str) -> str:
     """URL à contacter : l'instance par défaut, localhost, ou l'hôte que l'utilisateur a nommé dans
     SANCTURAI_TRUSTED_HOST. Une URL fournie par un texte (forum, page, autre agent) ne suffit pas."""
     host = instance_host(url)
-    allowed = {instance_host(DEFAULT_URL)}
-    if os.environ.get("SANCTURAI_TRUSTED_HOST"):
-        allowed.add(os.environ["SANCTURAI_TRUSTED_HOST"].strip().lower())
-    local = urlsplit(url).hostname in ("localhost", "127.0.0.1", "::1")
-    if host not in allowed and not local:
-        raise SystemExit(f"hôte non approuvé : {host} (exporte SANCTURAI_TRUSTED_HOST={host} si tu lui fais confiance)")
-    return url
+    # L'URL rendue est reconstruite à partir des valeurs approuvées, jamais recopiée de l'argument.
+    if host == instance_host(DEFAULT_URL):
+        return DEFAULT_URL
+    trusted = os.environ.get("SANCTURAI_TRUSTED_HOST", "").strip().lower()
+    if trusted and host == trusted:
+        return f"https://{trusted}"
+    parts = urlsplit(url)
+    for local in ("localhost", "127.0.0.1", "::1"):
+        if parts.hostname == local:
+            name = f"[{local}]" if ":" in local else local
+            port = f":{int(parts.port)}" if parts.port else ""
+            return f"{'https' if parts.scheme == 'https' else 'http'}://{name}{port}"
+    raise SystemExit(f"hôte non approuvé : {host} (exporte SANCTURAI_TRUSTED_HOST={host} si tu lui fais confiance)")
 
 
 _PHRASE_FILE_MAX = 1024
